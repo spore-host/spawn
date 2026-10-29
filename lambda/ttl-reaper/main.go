@@ -114,6 +114,9 @@ type account struct {
 	// (#1351). nil sqsFor skips the sweep; nil specsFor skips its spec half.
 	sqsFor   func(region string) sqsAPI
 	specsFor func(region string) poolSpecsAPI
+	// configsFor is the launch config object sweep's S3 slice (#1359). nil
+	// skips the sweep.
+	configsFor func(region string) launchConfigS3API
 }
 
 // ec2API / fsxAPI are the slices of the EC2 and FSx clients the reaper uses.
@@ -220,6 +223,11 @@ type reaper struct {
 	// poolQueuesOff / poolQueuesReport / poolQueuesReap, from
 	// REAPER_POOL_QUEUES. Unset is report. dryRun wins.
 	poolQueues string
+
+	// Unreferenced launch config objects (#1359): one of launchConfigsOff /
+	// launchConfigsReport / launchConfigsReap, from REAPER_LAUNCH_CONFIGS.
+	// Unset is report. dryRun wins.
+	launchConfigs string
 
 	// Orphaned schedule params (#1398): one of scheduleParamsOff /
 	// scheduleParamsReport / scheduleParamsReap, from REAPER_SCHEDULE_PARAMS.
@@ -473,8 +481,10 @@ func configure() {
 		// #1378: schedules live in this (the infra) account; base creds.
 		roleRefs: []instancerole.ReferenceSource{instancerole.NewScheduleSource(cfg)},
 		// #1351: abandoned pool queues and their staged specs.
-		poolQueues:   parsePoolQueues(os.Getenv("REAPER_POOL_QUEUES")),
-		emptyBuckets: parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
+		poolQueues: parsePoolQueues(os.Getenv("REAPER_POOL_QUEUES")),
+		// #1359: launch config objects no instance references.
+		launchConfigs: parseLaunchConfigs(os.Getenv("REAPER_LAUNCH_CONFIGS")),
+		emptyBuckets:  parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
 		// #1398: orphaned schedule params, in this (the infra) account.
 		scheduleParams:     parseScheduleParams(os.Getenv("REAPER_SCHEDULE_PARAMS")),
 		schedParams:        &schedParamsClients,
@@ -514,8 +524,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s, schedule-params=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues, r.scheduleParams)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s, schedule-params=%s, launch-configs=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues, r.scheduleParams, r.launchConfigs)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -588,6 +598,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return s3.NewFromConfig(c)
 			},
+			configsFor: func(region string) launchConfigS3API {
+				c := base.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
+			},
 		})
 	}
 
@@ -652,6 +667,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				c.Region = region
 				return s3.NewFromConfig(c)
 			},
+			configsFor: func(region string) launchConfigS3API {
+				c := acctCfg.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
+			},
 		})
 	}
 
@@ -700,6 +720,11 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 				return sqs.NewFromConfig(c)
 			},
 			specsFor: func(region string) poolSpecsAPI {
+				c := base.Copy()
+				c.Region = region
+				return s3.NewFromConfig(c)
+			},
+			configsFor: func(region string) launchConfigS3API {
 				c := base.Copy()
 				c.Region = region
 				return s3.NewFromConfig(c)
@@ -885,9 +910,17 @@ type Summary struct {
 	PoolQueuesWouldDelete int `json:"pool_queues_would_delete"` // qualified, but report mode or a dry run held it back
 	PoolQueuesSkipped     int `json:"pool_queues_skipped"`
 	// PoolSpecs* count runs' staged-spec sets, not objects.
-	PoolSpecsDeleted     int `json:"pool_specs_deleted"`
-	PoolSpecsWouldDelete int `json:"pool_specs_would_delete"`
-	PoolSpecsFailed      int `json:"pool_specs_failed"` // an S3 call failed (AccessDenied: the role predates #1351)
+	// LaunchConfigs* count launch config objects (#1359).
+	LaunchConfigsScanned     int `json:"launch_configs_scanned"`
+	LaunchConfigsDeleted     int `json:"launch_configs_deleted"`
+	LaunchConfigsWouldDelete int `json:"launch_configs_would_delete"` // qualified, but report mode or a dry run held it back
+	LaunchConfigsFailed      int `json:"launch_configs_failed"`
+	// LaunchConfigsAccountsDenied counts account-regions whose role refused
+	// the sweep's S3 calls (it predates the #1359 grant).
+	LaunchConfigsAccountsDenied int `json:"launch_configs_accounts_denied"`
+	PoolSpecsDeleted            int `json:"pool_specs_deleted"`
+	PoolSpecsWouldDelete        int `json:"pool_specs_would_delete"`
+	PoolSpecsFailed             int `json:"pool_specs_failed"` // an S3 call failed (AccessDenied: the role predates #1351)
 	// PoolQueuesAccountsDenied counts accounts whose role refused the SQS
 	// listing: a member role not yet redeployed with the #1351 grant.
 	PoolQueuesAccountsDenied int `json:"pool_queues_accounts_denied"`
@@ -1094,6 +1127,10 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 			// once empty for a week. Never an object: a bucket holding
 			// anything is kept.
 			r.reapEmptyBucketsRegion(ctx, acct, region, start, &sum)
+
+			// Launch config objects no instance or Spot request in the
+			// region references (#1359), after the instance reaps above.
+			r.reapLaunchConfigsRegion(ctx, acct, region, start, &sum)
 		}
 
 		// Per-task IAM roles (#1300). Once per account: IAM is global. After

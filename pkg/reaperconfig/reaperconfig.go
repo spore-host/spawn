@@ -44,12 +44,15 @@ const (
 	// EnvScheduleParams is the orphaned schedule params sweep (#1398).
 	// Unset means report, not reap: it is new deletion behaviour.
 	EnvScheduleParams = "REAPER_SCHEDULE_PARAMS"
+	// EnvLaunchConfigs is the unreferenced launch config object sweep
+	// (#1359). Unset means report, not reap: it is new deletion behaviour.
+	EnvLaunchConfigs = "REAPER_LAUNCH_CONFIGS"
 )
 
 // The three states of a sweep that can be previewed before it is allowed to
 // delete: REAPER_SPOT_REQUESTS, REAPER_NET_RESOURCES, REAPER_ELASTIC_IPS,
-// REAPER_EMPTY_BUCKETS, REAPER_INSTANCE_ROLES, REAPER_POOL_QUEUES and
-// REAPER_SCHEDULE_PARAMS.
+// REAPER_EMPTY_BUCKETS, REAPER_INSTANCE_ROLES, REAPER_POOL_QUEUES,
+// REAPER_SCHEDULE_PARAMS and REAPER_LAUNCH_CONFIGS.
 const (
 	// ModeOff skips the sweep entirely.
 	ModeOff = "off"
@@ -145,7 +148,7 @@ func Validate(name, value string) error {
 		}
 	}
 	switch name {
-	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles, EnvPoolQueues, EnvScheduleParams:
+	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles, EnvPoolQueues, EnvScheduleParams, EnvLaunchConfigs:
 		if _, ok := ParseMode(value); !ok {
 			return fmt.Errorf("%s: %q is not one of %s", name, value, strings.Join(Modes(), ", "))
 		}
@@ -172,7 +175,7 @@ func Validate(name, value string) error {
 var settable = map[string]struct{}{
 	EnvSpotRequests: {}, EnvNetResources: {}, EnvElasticIPs: {}, EnvMaxAge: {}, EnvNotifyURL: {},
 	EnvTTLGrace: {}, EnvEmptyBuckets: {}, EnvInstanceRoles: {}, EnvPoolQueues: {},
-	EnvScheduleParams: {},
+	EnvScheduleParams: {}, EnvLaunchConfigs: {},
 }
 
 // Settable lists the variables Validate accepts, sorted. Derived from the same
