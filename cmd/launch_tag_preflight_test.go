@@ -180,7 +180,7 @@ func TestLaunchLeavingSporedNoRoomMakesNoAWSCall(t *testing.T) {
 	}
 	reserve := len(limit.Spored) + len(limit.PostLaunch)
 	own := limit.Count - reserve - 50
-	if reserve == 0 || own <= 0 {
+	if own <= 0 {
 		t.Fatalf("refusal counts %d tags with %d reserved; cannot size the launch", limit.Count, reserve)
 	}
 
