@@ -60,6 +60,9 @@ func (f *efaSubnetAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		b.WriteString(`<DescribeInstanceTypesResponse ` + ns + `><requestId>r</requestId><instanceTypeSet><item><instanceType>` + form.Get("InstanceType.1") +
 			`</instanceType><networkInfo><efaSupported>true</efaSupported><efaInfo><maximumEfaInterfaces>2</maximumEfaInterfaces></efaInfo></networkInfo>` +
 			`<placementGroupInfo><supportedStrategies><item>cluster</item></supportedStrategies></placementGroupInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>`)
+	case "DescribeKeyPairs":
+		// No key yet, so a launch that gets this far goes on to import one.
+		b.WriteString(`<DescribeKeyPairsResponse ` + ns + `><requestId>r</requestId><keySet/></DescribeKeyPairsResponse>`)
 	case "DescribeVpcs":
 		b.WriteString(`<DescribeVpcsResponse ` + ns + `><requestId>r</requestId><vpcSet><item><vpcId>vpc-default</vpcId><isDefault>true</isDefault></item></vpcSet></DescribeVpcsResponse>`)
 	case "DescribeSubnets":
@@ -183,15 +186,15 @@ func TestMultiCardEFAWithNeitherSubnetNorAZIsRefusedBeforeAnyMutatingCall(t *tes
 			serveEFASubnetAWS(t, f)
 			setEFALaunchFlags(t, extra)
 			err := runLaunch(launchCmd, nil)
+			if m := f.mutating(); len(m) != 0 {
+				t.Errorf("the launch made %d mutating AWS call(s): %v", len(m), m)
+			}
 			if !errors.Is(err, aws.ErrEFANeedsSubnet) {
 				t.Fatalf("runLaunch = %v; want the %q refusal", err, aws.ErrEFANeedsSubnet)
 			}
 			const want = "2 EFA interfaces need one subnet: pass --subnet-id, or --az to let spawn pick one"
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("refusal %q; want it to say %q", err, want)
-			}
-			if m := f.mutating(); len(m) != 0 {
-				t.Errorf("the refused launch made %d mutating AWS call(s) first: %v", len(m), m)
 			}
 		})
 	}
