@@ -78,3 +78,26 @@ func TestParseSporedVersion(t *testing.T) {
 		}
 	}
 }
+
+// #1412: with no --version, upgrade-spored brings an instance to the spored
+// this spawn ships (the one its launches install), not to whatever was
+// released last; a dev build, which ships none, asks for the latest ("").
+func TestUpgradeSporedDefaultsToThisSpawnsVersion(t *testing.T) {
+	cases := []struct{ flag, own, want string }{
+		{"", "0.148.0", "0.148.0"},
+		{"", "", ""},
+		{"0.140.0", "0.148.0", "0.140.0"},
+		{"v0.140.0", "", "0.140.0"},
+	}
+	for _, c := range cases {
+		got, err := upgradeSporedTarget(c.flag, c.own)
+		if err != nil || got != c.want {
+			t.Errorf("upgradeSporedTarget(%q, %q) = %q, %v; want %q", c.flag, c.own, got, err, c.want)
+		}
+	}
+	for _, bad := range []string{"latest", "0.1", "0.1.0'; reboot; '", "0.1.0-rc1"} {
+		if _, err := upgradeSporedTarget(bad, "0.148.0"); err == nil {
+			t.Errorf("--version %q was accepted; it names no published spored", bad)
+		}
+	}
+}

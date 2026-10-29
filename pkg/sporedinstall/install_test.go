@@ -46,6 +46,8 @@ type fixture struct {
 	// the transient S3 failure of #462).
 	drops map[string]int
 	mu    sync.Mutex
+	// requested records every request path, in order.
+	requested []string
 	// env is appended to the script's environment (e.g. a PATH carrying shims).
 	env []string
 }
@@ -90,6 +92,7 @@ func newFixture(t *testing.T) *fixture {
 	f.drops = map[string]int{}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.requested = append(f.requested, r.URL.Path)
 		drop := f.drops[r.URL.Path] > 0
 		if drop {
 			f.drops[r.URL.Path]--

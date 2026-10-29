@@ -18,6 +18,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 	"github.com/spore-host/spawn/pkg/sweep"
 	"gopkg.in/yaml.v3"
 )
@@ -276,6 +277,24 @@ func TestDevOrchestratorInlinesTheBody(t *testing.T) {
 	}
 	if s := decodeUserData(t, in); strings.Contains(s, "SPAWN_BS_VERSION=") || !strings.Contains(s, "systemctl start spored") {
 		t.Error("a dev orchestrator's legacy member does not carry the body inline")
+	}
+}
+
+// #1412: a legacy member installs the spored of this orchestrator's release,
+// the one its bootstrap body is pinned to, and a dev orchestrator the latest.
+// The spored the orchestrator's spawn:version tag names is the one it runs.
+func TestLegacyMemberInstallsTheOrchestratorsSpored(t *testing.T) {
+	pin := regexp.MustCompile(`(?m)^` + sporedinstall.PinVar + `='([^']*)'$`)
+	for version, want := range map[string]string{"0.147.0": "0.147.0", "": ""} {
+		releaseOrchestrator(t, version)
+		in, err := buildRunInstancesInput(legacyState(), v0146Params(false, "1h"), 2, "t3.micro", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := pin.FindAllStringSubmatch(decodeUserData(t, in), -1)
+		if len(m) != 1 || m[0][1] != want {
+			t.Errorf("a %q orchestrator's legacy member pins spored to %v, want exactly one pin to %q", version, m, want)
+		}
 	}
 }
 

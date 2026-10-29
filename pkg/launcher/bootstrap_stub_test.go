@@ -685,6 +685,16 @@ func readOr(p string) []byte { b, _ := os.ReadFile(p); return b }
 // failSystemctl names systemctl arguments that fail (e.g. "acpid").
 func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string) (*bootSandbox, string, error) {
 	t.Helper()
+	sb, _, out, err := fullBootPinned(t, cfg, failSystemctl, "", "spawn")
+	return sb, out, err
+}
+
+// fullBootPinned is fullBoot for a bootstrap pinned to spored version pin
+// ("" for a dev build), with the signed spored published only under the key
+// prefix publish (e.g. "spawn" or "spawn/versions/9.9.9") in the regional
+// bucket. It also returns the stand-in bucket, for its request counts.
+func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publish string) (*bootSandbox, *stubServer, string, error) {
+	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -705,11 +715,11 @@ func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string) (*bootSan
 		t.Fatal(err)
 	}
 	srv := newStubServer(t, "eu-west-1")
-	srv.put("eu-west-1", "spawn/spored-linux-amd64", spored)
-	srv.put("eu-west-1", "spawn/spored-linux-amd64.sha256", []byte(hex.EncodeToString(sum[:])+"\n"))
-	srv.put("eu-west-1", "spawn/spored-linux-amd64.sig", []byte(base64.StdEncoding.EncodeToString(sig)+"\n"))
+	srv.put("eu-west-1", publish+"/spored-linux-amd64", spored)
+	srv.put("eu-west-1", publish+"/spored-linux-amd64.sha256", []byte(hex.EncodeToString(sum[:])+"\n"))
+	srv.put("eu-west-1", publish+"/spored-linux-amd64.sig", []byte(base64.StdEncoding.EncodeToString(sig)+"\n"))
 
-	script, err := buildLinuxBootstrap(cfg, "", "", BootstrapBody())
+	script, err := buildLinuxBootstrap(cfg, "", pin, BootstrapBody())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +737,7 @@ func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string) (*bootSan
 		"su": "#!/bin/bash\nexec bash \"$4\"\n",
 	})
 	out, err := sb.run(script)
-	return sb, out, err
+	return sb, srv, out, err
 }
 
 func sporedStarted(sb *bootSandbox) bool {

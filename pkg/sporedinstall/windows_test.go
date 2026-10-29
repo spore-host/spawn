@@ -93,8 +93,16 @@ const (
 // console output and the bytes installed (nil if nothing was installed).
 func (f *winFixture) run(t *testing.T, keyPEM string) (string, []byte) {
 	t.Helper()
+	out, got, _ := f.runVersion(t, keyPEM, "")
+	return out, got
+}
+
+// runVersion is run for the spored of spawn release version ("" for latest),
+// and also returns every s3:// URL the script asked aws to copy, in order.
+func (f *winFixture) runVersion(t *testing.T, keyPEM, version string) (string, []byte, []string) {
+	t.Helper()
 	pwsh := pwshOrSkip(t)
-	script, err := WindowsInstallScript(keyPEM, "")
+	script, err := WindowsInstallScript(keyPEM, version)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +135,7 @@ $store = '` + store + `'
 # setting $LASTEXITCODE as the real CLI would.
 $aws = {
   $src = $args[2]; $dst = $args[3]
+  Add-Content -Path '` + filepath.Join(dir, "requested") + `' -Value $src
   $hex = -join ([Text.Encoding]::UTF8.GetBytes($src) | ForEach-Object { $_.ToString('x2') })
   $p = Join-Path $store $hex
   if (Test-Path $p) { Copy-Item -Force $p $dst; $global:LASTEXITCODE = 0 } else { $global:LASTEXITCODE = 1 }
@@ -149,7 +158,13 @@ $aws = {
 	if rerr != nil {
 		got = nil
 	}
-	return string(out), got
+	requested := strings.Fields(string(readOrEmpty(filepath.Join(dir, "requested"))))
+	return string(out), got, requested
+}
+
+func readOrEmpty(p string) []byte {
+	b, _ := os.ReadFile(p) //nolint:gosec // the test's own temp file
+	return b
 }
 
 func wantInstalled(t *testing.T, out string, got, want []byte) {
@@ -373,4 +388,65 @@ func TestP256CoordinatesRoundTripFixedWidth(t *testing.T) {
 	if !sawShort {
 		t.Fatal("never exercised a coordinate with a leading zero byte")
 	}
+}
+
+// #1412: a Windows launch by a release of spawn installs that release's
+// spored, from spawn/versions/<version>/ regional then us-east-1, and nothing
+// else; with no such spored published it installs nothing, as with a bad
+// signature, however good the latest one is.
+func TestWindowsPinnedInstallFetchesOnlyItsOwnVersion(t *testing.T) {
+	const v = "9.9.9"
+	versioned := map[string]string{
+		"regional": "s3://spawn-binaries-eu-west-1/spawn/versions/" + v + "/spored-windows-amd64.exe",
+		"fallback": "s3://spawn-binaries-us-east-1/spawn/versions/" + v + "/spored-windows-amd64.exe",
+	}
+	onlyVersioned := func(t *testing.T, requested []string) {
+		t.Helper()
+		if len(requested) == 0 {
+			t.Fatal("the fake aws recorded no requests; the harness has broken")
+		}
+		for _, u := range requested {
+			if !strings.Contains(u, "/spawn/versions/"+v+"/") {
+				t.Errorf("a pinned install read the unversioned %s (#1412)", u)
+			}
+		}
+	}
+	for name, url := range versioned {
+		t.Run(name, func(t *testing.T) {
+			f := newWinFixture(t)
+			for _, u := range []string{regional, rootPath, fallback} {
+				f.publish(t, u, []byte("MZ latest spored"), f.key)
+			}
+			f.publish(t, url, bin, f.key)
+			out, got, requested := f.runVersion(t, f.pubPEM, v)
+			wantInstalled(t, out, got, bin)
+			onlyVersioned(t, requested)
+			if requested[len(requested)-1] != url+".sig" {
+				t.Errorf("the install did not end on %s's signature: %v", url, requested)
+			}
+		})
+	}
+	t.Run("no versioned spored published", func(t *testing.T) {
+		f := newWinFixture(t)
+		for _, u := range []string{regional, rootPath, fallback} {
+			f.publish(t, u, bin, f.key)
+		}
+		out, got, requested := f.runVersion(t, f.pubPEM, v)
+		wantRefused(t, out, got)
+		onlyVersioned(t, requested)
+	})
+	t.Run("a dev build installs the latest", func(t *testing.T) {
+		f := newWinFixture(t)
+		f.publish(t, regional, bin, f.key)
+		out, got, requested := f.runVersion(t, f.pubPEM, "")
+		wantInstalled(t, out, got, bin)
+		if len(requested) == 0 || requested[0] != regional {
+			t.Errorf("a dev build did not read the latest regional spored first: %v", requested)
+		}
+	})
+	t.Run("a version that is not a release is refused", func(t *testing.T) {
+		if _, err := WindowsInstallScript(SigningKeyPEM, "0.1.0'; Remove-Item C:\\"); err == nil {
+			t.Error("WindowsInstallScript accepted a version that is not a release")
+		}
+	})
 }

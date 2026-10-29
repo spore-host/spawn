@@ -343,3 +343,55 @@ func TestUpgradeScriptIsFailClosed(t *testing.T) {
 			"nothing to roll back to")
 	}
 }
+
+// windowsInstallCall matches a call of the Windows installer generator, and
+// windowsPinnedCall one that passes it this spawn's spored version (#1412).
+var (
+	windowsInstallCall = regexp.MustCompile(`\bsporedinstall\.WindowsInstallScript\(`)
+	windowsPinnedCall  = regexp.MustCompile(`\bsporedinstall\.WindowsInstallScript\([^,()]+,\s*launcher\.SporedVersion\(\)\)`)
+)
+
+// Every Windows install path outside pkg/sporedinstall installs the spored of
+// the spawn rendering it (#1412). Discovered from the repository's source, so a
+// new Windows bootstrap is covered without editing this.
+func TestEveryWindowsInstallPathIsPinned(t *testing.T) {
+	root := repoRootFromCmd(t)
+	found := 0
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() {
+			if path != root && skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			filepath.Dir(path) == filepath.Join(root, "pkg", "sporedinstall") {
+			return nil
+		}
+		b, err := os.ReadFile(path) //nolint:gosec // walking the repo's own tree
+		if err != nil {
+			return err
+		}
+		calls := len(windowsInstallCall.FindAllIndex(b, -1))
+		pinned := len(windowsPinnedCall.FindAllIndex(b, -1))
+		found += calls
+		if calls != pinned {
+			rel, _ := filepath.Rel(root, path)
+			t.Errorf("%s calls sporedinstall.WindowsInstallScript %d times but passes launcher.SporedVersion() "+
+				"in only %d, so a Windows launch installs a spored other than its own spawn's (#1412)", rel, calls, pinned)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == 0 {
+		t.Fatal("found no call of sporedinstall.WindowsInstallScript; discovery has broken, it has not proven the repo clean")
+	}
+}

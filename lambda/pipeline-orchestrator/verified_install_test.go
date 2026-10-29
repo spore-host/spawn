@@ -162,3 +162,55 @@ func TestUserData_EmbedsTheSporeHostSigningKey(t *testing.T) {
 		t.Errorf("stage user data is %d bytes, over EC2's 16 KB limit", len(raw))
 	}
 }
+
+// #1412: a stage instance installs the spored of this orchestrator's own
+// release, the one `spored run-pipeline-stage` was built with, from
+// spawn/versions/<version>/ only; a build that is not a release installs the
+// latest. Executed: every spored URL the user data asks curl for is checked.
+func TestUserData_InstallsThisReleasesSpored(t *testing.T) {
+	sporedURLs := func(calls string) []string {
+		var out []string
+		for _, line := range strings.Split(calls, "\n") {
+			if u, ok := strings.CutPrefix(line, "curl "); ok && strings.Contains(u, "/spored-linux-") {
+				out = append(out, u)
+			}
+		}
+		return out
+	}
+	pin := func(t *testing.T, v string) {
+		prev := sporedVersion
+		t.Cleanup(func() { sporedVersion = prev })
+		sporedVersion = func() string { return v }
+	}
+	t.Run("release build", func(t *testing.T) {
+		pin(t, "9.9.9")
+		calls, err := runUserDataWithSig(t, sigValid)
+		if err != nil || !strings.Contains(calls, "spored run-pipeline-stage") {
+			t.Fatalf("a release build's stage did not install and run its spored (err %v); calls:\n%s", err, calls)
+		}
+		urls := sporedURLs(calls)
+		if len(urls) == 0 {
+			t.Fatal("recorded no spored download; the harness has broken")
+		}
+		for _, u := range urls {
+			if !strings.HasPrefix(u, "https://spawn-binaries-eu-west-1.s3.amazonaws.com/spawn/versions/9.9.9/spored-linux-amd64") {
+				t.Errorf("a 9.9.9 orchestrator's stage fetched %s, which is not its own regional spored (#1412)", u)
+			}
+		}
+	})
+	t.Run("not a release", func(t *testing.T) {
+		pin(t, "")
+		calls, err := runUserDataWithSig(t, sigValid)
+		if err != nil {
+			t.Fatalf("%v; calls:\n%s", err, calls)
+		}
+		if urls := sporedURLs(calls); len(urls) == 0 || urls[0] != "https://spawn-binaries-eu-west-1.s3.amazonaws.com/spawn/spored-linux-amd64.sig" {
+			t.Errorf("a dev build did not install the latest regional spored first: %v", urls)
+		}
+	})
+	t.Run("a test binary is not a release", func(t *testing.T) {
+		if v := sporedVersion(); v != "" {
+			t.Errorf("sporedVersion() = %q in a test binary, which no release published", v)
+		}
+	})
+}
