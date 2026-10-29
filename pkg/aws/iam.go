@@ -16,8 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
-	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/elasticip"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 )
 
 // SporedRoleName and SporedInstanceProfileName are the SHARED, long-lived IAM
