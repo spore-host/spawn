@@ -710,6 +710,7 @@ field BootstrapConfig.CompletionFile string
 field BootstrapConfig.ContainerScript string
 field BootstrapConfig.CustomUserData string
 field BootstrapConfig.InlineBody bool
+field BootstrapConfig.LaunchConfig []byte
 field BootstrapConfig.Plugins []plugin.Declaration
 field BootstrapConfig.PublicKey []byte
 field BootstrapConfig.ReadyGates []string

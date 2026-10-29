@@ -69,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tags, are enforced as ever. A persistent Spot request's replacement reads
   its original's notification settings from the object the request's
   `spawn:config` names. API: `aws.LaunchConfigObject`,
-  `aws.StagingBootstrapPrefix`, `aws.StagingBackstopRuleID`.
+  `aws.StagingBootstrapPrefix`, `aws.StagingBackstopRuleID`,
+  `launcher.BootstrapConfig.LaunchConfig`.
 - **The staging bucket's lifecycle is two rules** (#1359): a task's staged
   bootstrap, now at `bootstrap/<task_id>/bootstrap-<sha256>.sh`, still
   expires after a day (`spawn-staging-expire-1d`, now scoped to `bootstrap/`),
