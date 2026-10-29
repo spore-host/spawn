@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.148.0] - 2026-10-28
-
 ### Added
 
 - **`spawn launch --efa-secondary-type efa|efa-only`: IP on every network
@@ -37,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aws.EFANetworkInterfacesWithSecondaryType`, `aws.EFASecondaryTypeEFA`,
   `aws.EFASecondaryTypeEFAOnly`. No new IAM: the interfaces ride the same
   RunInstances call.
+
+## [0.148.0] - 2026-10-28
+
+### Added
 
 - **An image spawn creates records where it came from** (#1364). `spawn ami
   create` / `create-ami` and the warm AMI `spawn image import` builds (unless
