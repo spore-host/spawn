@@ -104,6 +104,13 @@ func withMemberBootstrap(state *SweepRecord, config map[string]interface{}, para
 	if err != nil {
 		return nil, fmt.Errorf("param set %d: render instance tags: %w; it was not launched", paramIndex, err)
 	}
+	// Legacy params set no launch-fixed spored setting, so there is no launch
+	// config object (#1359), which this Lambda could not store in the member's
+	// account anyway. Checked, so a legacy setting added later fails here
+	// rather than launching a member whose spawn:config names nothing.
+	if _, sha, err := spawnaws.LaunchConfigObject(cfg); err != nil || sha != "" {
+		return nil, fmt.Errorf("param set %d: legacy params rendered a launch config object (%q, %v), which this Lambda cannot store; it was not launched", paramIndex, sha, err)
+	}
 	logLegacyBootstrap(state)
 
 	out := make(map[string]interface{}, len(config)+2)

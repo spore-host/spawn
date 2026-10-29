@@ -294,11 +294,31 @@ func detachedMemberUserData(plat *platform.Platform, cfg *aws.LaunchConfig, stor
 		}
 		publicKey = pub
 	}
-	script, err := buildUserDataForKey(plat, cfg, publicKey, storageScript, readyMountPoints)
+	// The launch config object (#1359). A foreground launch stores it in the
+	// staging bucket for spored to fetch; this member is launched later by the
+	// sweep-orchestrator Lambda, which cannot write to this account's staging
+	// bucket, and a schedule replays this same user data for as long as it
+	// runs, past any expiry. So the object rides in the user data and is
+	// seeded into spored's cache of it, which spored checks against the
+	// member's spawn:config tag like any other.
+	object, _, err := aws.LaunchConfigObject(*cfg)
 	if err != nil {
 		return "", err
 	}
-	return encodeUserDataForOS(script, cfg.TargetOS), nil
+	if object != nil && cfg.TargetOS == "windows" {
+		return "", fmt.Errorf("a detached sweep cannot launch a Windows member with spored settings fixed at launch " +
+			"(notifications, webhooks, --active-ports/--active-processes, a web app, --idle-cpu-threshold, metrics or " +
+			"tracing details): the Windows bootstrap does not carry them. Drop them, or run the sweep with --no-detach (#1359)")
+	}
+	script, err := buildUserDataSeeded(plat, cfg, publicKey, storageScript, readyMountPoints, object)
+	if err != nil {
+		return "", err
+	}
+	ud := encodeUserDataForOS(script, cfg.TargetOS)
+	if err := aws.CheckUserDataSize(ud); err != nil {
+		return "", err
+	}
+	return ud, nil
 }
 
 // ensureDetachedInstanceProfile makes sure every member has an instance

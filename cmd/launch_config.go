@@ -818,6 +818,14 @@ func userDataOSGuard(config *aws.LaunchConfig) error {
 // already resolved; an empty key is a keyless (SSM-only) instance. The caller
 // has run userDataOSGuard.
 func buildUserDataForKey(plat *platform.Platform, config *aws.LaunchConfig, publicKey []byte, storageScript string, readyMountPoints []string) (string, error) {
+	return buildUserDataSeeded(plat, config, publicKey, storageScript, readyMountPoints, nil)
+}
+
+// buildUserDataSeeded is buildUserDataForKey with the launch's config object
+// seeded into the instance's cache of it (launcher.BootstrapConfig.LaunchConfig,
+// #1359): only a detached sweep's member, which the CLI cannot store an object
+// for, passes one.
+func buildUserDataSeeded(plat *platform.Platform, config *aws.LaunchConfig, publicKey []byte, storageScript string, readyMountPoints []string, launchConfig []byte) (string, error) {
 	// Windows uses a completely different bootstrap: EC2Launch runs a
 	// <powershell> block, not bash. It installs SSH and spored and nothing else;
 	// the workload inputs were refused above (#1022).
@@ -866,6 +874,7 @@ func buildUserDataForKey(plat *platform.Platform, config *aws.LaunchConfig, publ
 		Command: embeddedCommand(config),
 		// The --command wrapper must write the file spored watches (#1131).
 		CompletionFile: config.CompletionFile,
+		LaunchConfig:   launchConfig,
 	})
 }
 
