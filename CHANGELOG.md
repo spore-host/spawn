@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)). A launch
+  that sets any of the spored settings now kept in the per-launch config object
+  (notifications, webhooks, activity guards, metrics/tracing, web readiness; #1359)
+  writes that object to the account's staging bucket, creating and configuring the bucket
+  on first use. Such launches by `spawn launch`, `app launch`, `array retry`, `burst`,
+  `pool create`, `service`, `image import`, `resume` and `sweep resume` need the staging
+  bucket permissions: `s3:CreateBucket`, `s3:Get`/`PutBucketTagging`,
+  `s3:Get`/`PutLifecycleConfiguration`, `s3:ListBucket`, `s3:PutBucketOwnershipControls`,
+  `s3:PutBucketPublicAccessBlock`, `s3:PutEncryptionConfiguration` and `s3:PutObject`. A
+  launch that sets none of them makes no S3 call.
+
 - **spored writes its cost footprint as one tag, `spawn:cost-footprint`,
   not three** (#1428). The EBS rate and the auto-assigned and Elastic public
   IPv4 counts that `--cost-limit` is enforced from are now one versioned value,
