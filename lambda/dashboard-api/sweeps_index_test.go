@@ -273,7 +273,7 @@ func strs(v any) []string {
 func TestDashboardRoleGrantsExactlyTheQueriedSweepIndexes(t *testing.T) {
 	used := queriedIndexes(t)[dynamoSweepTable]
 	if !used[sweepUserIndex] || !used["team_id-index"] {
-		t.Fatalf("discovered sweep-table indexes %v; want at least %s and team_id-index, so the discovery is broken", used, sweepUserIndex)
+		t.Fatalf("discovered sweep-table indexes %v; want %s (the personal listing, #1426) and team_id-index (team sweeps); either the listing stopped querying them or the discovery is broken", used, sweepUserIndex)
 	}
 	prefix := "${T}/" + dynamoSweepTable + "/index/"
 	granted := map[string]bool{}

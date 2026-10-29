@@ -59,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spawn module) drops from 8182 to 7133 bytes gzipped of its 8192 budget, and
   a new test fails while fewer than 1024 bytes of that budget are spare. The
   published bootstrap body changes, so its sha256 does too.
+- **The dashboard lists a user's sweeps by Query, not a whole-table Scan**
+  (#1426). `GET /api/sweeps` read every user's sweeps from
+  `spawn-sweep-orchestration` and filtered on `user_id`, so each dashboard load
+  cost O(table). It now Queries the table's existing `user_id-created_at-index`
+  (projection ALL, so no read-back), every page, newest first, still checking
+  each item's owner. The dashboard role's `Sweeps` statement gains
+  `dynamodb:Query` on that one index. Deploy order matters: re-run
+  `lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh` first, then
+  redeploy `dashboard-api` from a release tag; the other order makes the
+  personal sweeps list a 500 (AccessDenied) until the role is updated.
 
 - **spored's launch-fixed settings are a per-launch config object, not
   instance tags** (#1359). The settings only spored reads, at boot, and
