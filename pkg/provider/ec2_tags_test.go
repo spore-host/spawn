@@ -24,7 +24,6 @@ func TestConfigFromTags_DayUnits(t *testing.T) {
 		"spawn:ttl", "1d",
 		"spawn:idle-timeout", "2d12h",
 		"spawn:pre-stop-timeout", "1.5h",
-		"spawn:webhook-timeout", "2s",
 		"spawn:completion-delay", "1d",
 		"spawn:on-complete", "terminate",
 	))
@@ -35,7 +34,6 @@ func TestConfigFromTags_DayUnits(t *testing.T) {
 		{"spawn:ttl", cfg.TTL, 24 * time.Hour},
 		{"spawn:idle-timeout", cfg.IdleTimeout, 60 * time.Hour},
 		{"spawn:pre-stop-timeout", cfg.PreStopTimeout, 90 * time.Minute},
-		{"spawn:webhook-timeout", cfg.WebhookTimeout, 2 * time.Second},
 		{"spawn:completion-delay", cfg.CompletionDelay, 24 * time.Hour},
 	}
 	for _, c := range checks {

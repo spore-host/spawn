@@ -34,7 +34,7 @@ func TestLoadConfigFromEC2Tags_Burst(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("CreateTags: %v", err)
 			}
-			cfg, _, err := loadConfigFromEC2Tags(context.Background(), p.ec2Client, id)
+			cfg, _, _, err := loadConfigFromEC2Tags(context.Background(), p.ec2Client, id)
 			if err != nil {
 				t.Fatalf("loadConfigFromEC2Tags: %v", err)
 			}

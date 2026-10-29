@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/spawn/pkg/bucketsweep"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 )
 
 // S3BucketConfig contains configuration for creating/tagging S3 buckets
@@ -374,12 +375,25 @@ func (c *Client) ListS3Keys(ctx context.Context, region, bucket, prefix, expecte
 	return keys, nil
 }
 
-// StagingLifecycleRuleID names the lifecycle rule EnsureStagingBucket installs.
+// StagingLifecycleRuleID names the staging bucket's lifecycle rule for the
+// task bootstrap objects under StagingBootstrapPrefix.
 const StagingLifecycleRuleID = "spawn-staging-expire-1d"
 
-// StagingObjectExpiryDays is how long a staged object lives: long enough for
-// an instance to boot and fetch it, and no longer.
+// StagingBackstopRuleID names the staging bucket's lifecycle rule for every
+// other object: the launch config objects (#1359), and the task bootstrap
+// objects a spawn older than v0.150.0 staged at the bucket's root.
+const StagingBackstopRuleID = "spawn-staging-expire-backstop"
+
+// StagingObjectExpiryDays is how long a staged task bootstrap object lives:
+// long enough for an instance to boot and fetch it, and no longer.
 const StagingObjectExpiryDays = 1
+
+// StagingBootstrapPrefix is where the task bootstrap objects are staged
+// (taskiam.StagedFilesKey), so their one-day rule can be scoped to them: S3
+// lifecycle rules cannot exclude a prefix, and when two rules apply to an
+// object the shorter expiry wins, so a one-day rule over the whole bucket
+// would expire the launch config objects, which must outlive their instance.
+const StagingBootstrapPrefix = "bootstrap/"
 
 // EnsureStagingBucket makes sure bucket exists in region, belongs to
 // ownerAccount, and is configured as a spawn staging bucket (#1274):
@@ -387,16 +401,26 @@ const StagingObjectExpiryDays = 1
 //   - Block Public Access on, all four settings;
 //   - default encryption SSE-S3;
 //   - Object Ownership BucketOwnerEnforced (no ACLs);
-//   - a lifecycle rule expiring every object, and aborting incomplete
-//     multipart uploads, after StagingObjectExpiryDays;
+//   - lifecycle rules expiring a task bootstrap object (under
+//     StagingBootstrapPrefix) after StagingObjectExpiryDays, every other object,
+//     which includes the launch config objects (#1359), after
+//     launchconfig.ObjectMaxDays, and aborting incomplete multipart uploads
+//     after StagingObjectExpiryDays;
 //   - tagged spawn:managed=true and spawn:purpose=bootstrap-staging, so
 //     `spawn footprint` and other inventories find it.
 //
 // A bucket it creates gets all of that. A bucket that already exists is
-// checked for the lifecycle rule and, if the rule is missing or differs, gets
+// checked for the lifecycle rules and, if one is missing or differs, gets
 // the whole configuration re-applied: a staging bucket whose objects never
 // expire would keep every task's wrapper forever, which is the point of the
-// rule. A bucket of that name owned by another account is an error, and
+// rules.
+//
+// A spawn older than v0.150.0 re-applies its own single rule, one day for
+// every object, when it finds these instead. While that rule is in force a
+// launch config object more than a day old expires; the instance has it cached
+// on its root volume, so only a persistent Spot request's replacement, which
+// boots with a fresh one, misses it (and is retired without its notification).
+// The next launch by this spawn restores these rules. A bucket of that name owned by another account is an error, and
 // nothing is written to it.
 func (c *Client) EnsureStagingBucket(ctx context.Context, bucket, region, ownerAccount string) error {
 	return ensureStagingBucket(ctx, s3.NewFromConfig(c.regionalConfig(region)), bucket, region, ownerAccount)
@@ -473,31 +497,65 @@ func isNotFound(err error) bool {
 
 // stagingLifecycleRules is the staging bucket's whole lifecycle configuration.
 func stagingLifecycleRules() []types.LifecycleRule {
-	return []types.LifecycleRule{{
-		ID:                             aws.String(StagingLifecycleRuleID),
-		Status:                         types.ExpirationStatusEnabled,
-		Filter:                         &types.LifecycleRuleFilter{Prefix: aws.String("")},
-		Expiration:                     &types.LifecycleExpiration{Days: aws.Int32(StagingObjectExpiryDays)},
-		AbortIncompleteMultipartUpload: &types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(StagingObjectExpiryDays)},
-	}}
+	return []types.LifecycleRule{
+		{
+			ID:                             aws.String(StagingLifecycleRuleID),
+			Status:                         types.ExpirationStatusEnabled,
+			Filter:                         &types.LifecycleRuleFilter{Prefix: aws.String(StagingBootstrapPrefix)},
+			Expiration:                     &types.LifecycleExpiration{Days: aws.Int32(StagingObjectExpiryDays)},
+			AbortIncompleteMultipartUpload: &types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(StagingObjectExpiryDays)},
+		},
+		{
+			ID:                             aws.String(StagingBackstopRuleID),
+			Status:                         types.ExpirationStatusEnabled,
+			Filter:                         &types.LifecycleRuleFilter{Prefix: aws.String("")},
+			Expiration:                     &types.LifecycleExpiration{Days: aws.Int32(launchconfig.ObjectMaxDays)},
+			AbortIncompleteMultipartUpload: &types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(StagingObjectExpiryDays)},
+		},
+	}
 }
 
-// stagingLifecycleOK reports whether the bucket has the expiry rule, enabled,
-// for every object.
+// stagingLifecycleOK reports whether the bucket has both of
+// stagingLifecycleRules, enabled, exactly.
 func stagingLifecycleOK(ctx context.Context, api stagingS3, bucket, owner string) bool {
 	out, err := api.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(bucket), ExpectedBucketOwner: aws.String(owner)})
 	if err != nil {
 		return false
 	}
-	for _, r := range out.Rules {
-		if aws.ToString(r.ID) == StagingLifecycleRuleID && r.Status == types.ExpirationStatusEnabled &&
-			r.Expiration != nil && aws.ToInt32(r.Expiration.Days) == StagingObjectExpiryDays &&
-			r.AbortIncompleteMultipartUpload != nil && aws.ToInt32(r.AbortIncompleteMultipartUpload.DaysAfterInitiation) == StagingObjectExpiryDays &&
-			(r.Filter == nil || (aws.ToString(r.Filter.Prefix) == "" && r.Filter.And == nil && r.Filter.Tag == nil && r.Filter.ObjectSizeGreaterThan == nil && r.Filter.ObjectSizeLessThan == nil)) {
-			return true
+	for _, want := range stagingLifecycleRules() {
+		found := false
+		for _, r := range out.Rules {
+			if sameStagingRule(r, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// sameStagingRule reports whether r is want: same ID, enabled, the same expiry
+// and multipart abort, and the same prefix with no other filter.
+func sameStagingRule(r, want types.LifecycleRule) bool {
+	prefixOnly := func(f *types.LifecycleRuleFilter) (string, bool) {
+		if f == nil {
+			return "", true
+		}
+		if f.And != nil || f.Tag != nil || f.ObjectSizeGreaterThan != nil || f.ObjectSizeLessThan != nil {
+			return "", false
+		}
+		return aws.ToString(f.Prefix), true
+	}
+	got, ok := prefixOnly(r.Filter)
+	wantPrefix, _ := prefixOnly(want.Filter)
+	return ok && got == wantPrefix && aws.ToString(r.ID) == aws.ToString(want.ID) &&
+		r.Status == types.ExpirationStatusEnabled &&
+		r.Expiration != nil && aws.ToInt32(r.Expiration.Days) == aws.ToInt32(want.Expiration.Days) &&
+		r.AbortIncompleteMultipartUpload != nil &&
+		aws.ToInt32(r.AbortIncompleteMultipartUpload.DaysAfterInitiation) == aws.ToInt32(want.AbortIncompleteMultipartUpload.DaysAfterInitiation)
 }
 
 func configureStagingBucket(ctx context.Context, api stagingS3, bucket, owner string) error {

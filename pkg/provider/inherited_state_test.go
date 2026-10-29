@@ -10,7 +10,8 @@ import (
 
 // spored discards state inherited from an image before it loads any (#1241):
 // NewEC2Provider calls discardInheritedState with the instance ID before
-// loadConfigFromEC2Tags, the only reader of plugins.json.
+// loadConfig, which reads plugins.json (loadConfigFromEC2Tags, its only
+// reader) and the cached launch config object (#1359).
 func TestNewEC2ProviderDiscardsInheritedStateBeforeLoadingIt(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "ec2.go", nil, 0)
@@ -36,12 +37,12 @@ func TestNewEC2ProviderDiscardsInheritedStateBeforeLoadingIt(t *testing.T) {
 		return out
 	}
 	np := callsIn("NewEC2Provider")
-	if len(np["discardInheritedState"]) == 0 || len(np["loadConfigFromEC2Tags"]) == 0 {
-		t.Fatalf("NewEC2Provider calls discardInheritedState %d time(s) and loadConfigFromEC2Tags %d; want both",
-			len(np["discardInheritedState"]), len(np["loadConfigFromEC2Tags"]))
+	if len(np["discardInheritedState"]) == 0 || len(np["loadConfig"]) == 0 {
+		t.Fatalf("NewEC2Provider calls discardInheritedState %d time(s) and loadConfig %d; want both",
+			len(np["discardInheritedState"]), len(np["loadConfig"]))
 	}
-	if np["discardInheritedState"][0] > np["loadConfigFromEC2Tags"][0] {
-		t.Error("NewEC2Provider loads plugins.json (loadConfigFromEC2Tags) before discarding inherited state")
+	if np["discardInheritedState"][0] > np["loadConfig"][0] {
+		t.Error("NewEC2Provider loads plugins.json and the launch config cache (loadConfig) before discarding inherited state")
 	}
 	// The plugin declarations are read nowhere else at startup.
 	for _, d := range f.Decls {

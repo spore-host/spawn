@@ -227,45 +227,6 @@ func allSporedSettings(cfg *LaunchConfig) {
 	}
 }
 
-// A maximal launch with every #1308 spored setting set is 54 tags, plus the
-// Spot price spawn writes after launch (#1336). It is refused by buildTags, so
-// in the shell, with an error that gives the count and the limit and names
-// each setting the user can drop.
-func TestMaximalSporedSettingsLaunchIsRefused(t *testing.T) {
-	cfg := maximalConfig()
-	allSporedSettings(&cfg)
-
-	tags, err := buildTags(cfg, "123456789012", "arn:aws:iam::1:user/u", "acct")
-	var limit *TagLimitError
-	if !errors.As(err, &limit) {
-		t.Fatalf("maximal launch + every spored setting built %d tags with err=%v; want a *TagLimitError, "+
-			"since RunInstances rejects more than %d", len(tags), err, awsMaxTagsPerResource)
-	}
-	if limit.Count != 55 || limit.Limit != awsMaxTagsPerResource {
-		t.Errorf("Count=%d Limit=%d, want 55 (54 tags + spawn:spot-price-per-hour) and %d", limit.Count, limit.Limit, awsMaxTagsPerResource)
-	}
-	msg := err.Error()
-	for _, want := range []string{
-		"55 tags", "allows 50", "Drop at least 5",
-		"--idle-cpu-threshold (spawn:idle-cpu)", "--metrics (spawn:metrics-enabled)",
-		"--metrics-port (spawn:metrics-port)", "--metrics-bind (spawn:metrics-bind)",
-		"--metrics-path (spawn:metrics-path)", "--tracing (spawn:tracing-enabled, spawn:tracing-exporter)",
-		"--tracing-sampling (spawn:tracing-sampling)", SpotPriceTag,
-	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("refusal does not mention %q:\n%s", want, msg)
-		}
-	}
-	if strings.Contains(msg, "custom --tag") {
-		t.Errorf("refusal names --tag values the launch does not have:\n%s", msg)
-	}
-
-	// The pre-flight, which callers run before creating anything, agrees.
-	if err := cfg.ValidateTagCount(); !errors.As(err, &limit) {
-		t.Errorf("ValidateTagCount() = %v; want the same *TagLimitError", err)
-	}
-}
-
 // ValidateTagCount runs before Launch has resolved the price and account name,
 // so it counts them as present: a launch that would only go over once Launch
 // tagged its price must be refused by the pre-flight too.
@@ -325,10 +286,10 @@ func paramKeysOf(tags []tagPair) []string {
 }
 
 // The monitoring setup docs/self-hosted-monitoring.md documents (metrics on,
-// bound beyond localhost) plus an idle CPU threshold still fits on a maximal
-// launch (#1308): 49 tags, and the Spot price spawn writes after launch makes 50.
-// Every spored setting at once does not fit, and is refused
-// (TestMaximalSporedSettingsLaunchIsRefused).
+// bound beyond localhost) plus an idle CPU threshold fits on a maximal launch
+// (#1308). Since #1359 only --metrics takes a tag, the one Prometheus' EC2
+// discovery filters on; the bind address and the threshold are in the launch
+// config object. Every spored setting at once fits too (TestMaximalLaunchTagCount).
 func TestMonitoringSettingsFitOnAMaximalLaunch(t *testing.T) {
 	cfg := maximalConfig()
 	cfg.IdleCPUPercent = 10
@@ -344,9 +305,13 @@ func TestMonitoringSettingsFitOnAMaximalLaunch(t *testing.T) {
 	for _, tg := range tags {
 		have[tg.Key] = tg.Value
 	}
-	for k, v := range map[string]string{"spawn:metrics-enabled": "true", "spawn:metrics-bind": "0.0.0.0", "spawn:idle-cpu": "10"} {
-		if have[k] != v {
-			t.Errorf("%s = %q, want %q", k, have[k], v)
+	if have["spawn:metrics-enabled"] != "true" {
+		t.Errorf("spawn:metrics-enabled = %q, want true: Prometheus' EC2 discovery filters on it", have["spawn:metrics-enabled"])
+	}
+	obj := objectSettings(t, cfg)
+	for k, v := range map[string]string{"metrics-bind": "0.0.0.0", "idle-cpu": "10"} {
+		if obj[k] != v {
+			t.Errorf("object %s = %q, want %q", k, obj[k], v)
 		}
 	}
 }

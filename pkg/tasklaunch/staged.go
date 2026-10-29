@@ -16,8 +16,9 @@ import (
 // A task's wrapper and terminal-flush hook are the per-launch half of its user
 // data, and they grow with its command and manifests. A release build stages
 // them in S3 instead (#1274): Launch uploads them as one content-addressed
-// object, <task_id>/bootstrap-<sha256>.sh, to the account's dedicated staging
-// bucket for the launch region (taskproto.StagingBucket) before RunInstances,
+// object, bootstrap/<task_id>/bootstrap-<sha256>.sh, to the account's
+// dedicated staging bucket for the launch region (taskproto.StagingBucket)
+// before RunInstances,
 // and the user data carries only the reference, which the bootstrap fetches
 // with the instance role and verifies before writing the two files.
 //

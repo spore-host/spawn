@@ -1463,6 +1463,13 @@ func (a *Agent) isIdle(ctx context.Context) bool {
 // idleDecision decides from one tick's readings plus the stateless signals
 // (DCV, sessions, processes, GPU). It takes no counter sample itself.
 func (a *Agent) idleDecision(ctx context.Context, r idleSnapshot) (bool, string) {
+	// The launch config object holds the activity signals (--active-ports,
+	// --active-processes) and the idle CPU threshold (#1359). Until it loads,
+	// an instance in use could look idle, so no idle action is taken; TTL,
+	// cost limit and completion are tags and are enforced as ever.
+	if a.config.LaunchConfigUnavailable() {
+		return false, "Not idle: the launch config object has not loaded (" + a.config.LaunchConfigError + ")"
+	}
 	// DCV application streaming: use X11 activity file (written by kiosk-wm on
 	// key/mouse events) as the authoritative idle signal. Falls back to DCV
 	// connection count if the file doesn't exist (pre-kiosk-wm instances).

@@ -10,6 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/spawn/pkg/launchconfig"
+	"github.com/spore-host/spawn/pkg/taskiam"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -98,8 +100,8 @@ const (
 var stBucket = taskproto.StagingBucket(stOwner, stRegion)
 
 // assertConfigured checks the documented configuration of a staging bucket:
-// all four Block Public Access settings, SSE-S3, BucketOwnerEnforced, every
-// object (and incomplete upload) gone after a day, and the inventory tags.
+// all four Block Public Access settings, SSE-S3, BucketOwnerEnforced, the
+// expiry assertStagingExpiry checks, and the inventory tags.
 func assertConfigured(t *testing.T, f *fakeStagingS3) {
 	t.Helper()
 	b := f.bpa
@@ -112,14 +114,7 @@ func assertConfigured(t *testing.T, f *fakeStagingS3) {
 	if e := f.encryption; e == nil || len(e.Rules) != 1 || e.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm != types.ServerSideEncryptionAes256 {
 		t.Errorf("default encryption = %+v, want SSE-S3", e)
 	}
-	if len(f.rules) != 1 {
-		t.Fatalf("lifecycle rules = %+v, want one", f.rules)
-	}
-	r := f.rules[0]
-	if r.Status != types.ExpirationStatusEnabled || aws.ToInt32(r.Expiration.Days) != 1 || aws.ToInt32(r.AbortIncompleteMultipartUpload.DaysAfterInitiation) != 1 ||
-		r.Filter == nil || aws.ToString(r.Filter.Prefix) != "" {
-		t.Errorf("lifecycle rule = %+v, want every object expired and every incomplete upload aborted after 1 day", r)
-	}
+	assertStagingExpiry(t, f.rules)
 	tags := map[string]string{}
 	for _, tg := range f.tags {
 		tags[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
@@ -131,6 +126,68 @@ func assertConfigured(t *testing.T, f *fakeStagingS3) {
 		if o != stOwner {
 			t.Errorf("%s did not require the owning account (ExpectedBucketOwner %q)", f.calls[i], o)
 		}
+	}
+}
+
+// expiryDays is when S3 expires an object at key under rules: the shortest
+// expiry of the enabled rules whose prefix it has (S3 honours the shorter of
+// two overlapping expirations), or 0 if none applies and it never expires.
+func expiryDays(rules []types.LifecycleRule, key string) int32 {
+	var days int32
+	for _, r := range rules {
+		if r.Status != types.ExpirationStatusEnabled || r.Expiration == nil {
+			continue
+		}
+		prefix := ""
+		if r.Filter != nil {
+			if r.Filter.And != nil || r.Filter.Tag != nil {
+				continue
+			}
+			prefix = aws.ToString(r.Filter.Prefix)
+		}
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if d := aws.ToInt32(r.Expiration.Days); days == 0 || d < days {
+			days = d
+		}
+	}
+	return days
+}
+
+// assertStagingExpiry checks the staging bucket's documented expiry (#1274,
+// #1359): a task's staged bootstrap is gone after a day; a launch config
+// object outlives the reaper's 7-day max-age ceiling, which no instance
+// survives, so a persistent Spot replacement can still fetch it; nothing,
+// including a bootstrap an older spawn staged at the root, is kept forever;
+// and every incomplete upload is aborted after a day.
+func assertStagingExpiry(t *testing.T, rules []types.LifecycleRule) {
+	t.Helper()
+	bootstrap := taskiam.StagedFilesKey("t1", strings.Repeat("a", 64))
+	config := launchconfig.Key(strings.Repeat("b", 64))
+	legacy := "t1/bootstrap-" + strings.Repeat("c", 64) + ".sh"
+	if d := expiryDays(rules, bootstrap); d != 1 {
+		t.Errorf("a staged task bootstrap (%s) expires after %d day(s), want 1", bootstrap, d)
+	}
+	if d := expiryDays(rules, config); d < 8 {
+		t.Errorf("a launch config object (%s) expires after %d day(s); it must outlive the reaper's 7-day max-age ceiling", config, d)
+	}
+	if d := expiryDays(rules, legacy); d == 0 || d > launchconfig.ObjectMaxDays {
+		t.Errorf("a bootstrap staged by an older spawn (%s) expires after %d day(s), want at most %d (0 is never)", legacy, d, launchconfig.ObjectMaxDays)
+	}
+	for _, r := range rules {
+		if r.AbortIncompleteMultipartUpload == nil || aws.ToInt32(r.AbortIncompleteMultipartUpload.DaysAfterInitiation) != 1 {
+			t.Errorf("rule %s does not abort incomplete uploads after a day", aws.ToString(r.ID))
+		}
+	}
+}
+
+// The staging bucket's one-day rule is scoped to the prefix the task bootstrap
+// objects are staged under; the two constants must agree or every staged
+// bootstrap would live the backstop's 30 days.
+func TestStagedFilesLiveUnderTheOneDayRule(t *testing.T) {
+	if taskiam.StagedFilesRoot != StagingBootstrapPrefix {
+		t.Fatalf("taskiam.StagedFilesRoot = %q, pkg/aws.StagingBootstrapPrefix = %q", taskiam.StagedFilesRoot, StagingBootstrapPrefix)
 	}
 }
 
@@ -154,6 +211,15 @@ func TestEnsureStagingBucketReappliesAMissingOrChangedRule(t *testing.T) {
 	disabled[0].Status = types.ExpirationStatusDisabled
 	scoped := stagingLifecycleRules()
 	scoped[0].Filter = &types.LifecycleRuleFilter{Prefix: aws.String("tmp/")}
+	noBackstop := stagingLifecycleRules()[:1]
+	shortBackstop := stagingLifecycleRules()
+	shortBackstop[1].Expiration = &types.LifecycleExpiration{Days: aws.Int32(1)}
+	legacy := []types.LifecycleRule{{
+		ID: aws.String(StagingLifecycleRuleID), Status: types.ExpirationStatusEnabled,
+		Filter:                         &types.LifecycleRuleFilter{Prefix: aws.String("")},
+		Expiration:                     &types.LifecycleExpiration{Days: aws.Int32(1)},
+		AbortIncompleteMultipartUpload: &types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(1)},
+	}}
 	for name, tc := range map[string]struct {
 		rules     []types.LifecycleRule
 		reapplies bool
@@ -163,6 +229,11 @@ func TestEnsureStagingBucketReappliesAMissingOrChangedRule(t *testing.T) {
 		"expires too late": {longer, true},
 		"rule disabled":    {disabled, true},
 		"rule scoped":      {scoped, true},
+		"no backstop":      {noBackstop, true},
+		"backstop 1 day":   {shortBackstop, true},
+		// v0.149.0's single rule, which expires a launch config object after
+		// a day (#1359).
+		"v0.149.0's rule": {legacy, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeStagingS3{lifecycle: tc.rules}

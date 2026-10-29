@@ -85,65 +85,62 @@ func TestBuildTags_FSxPending(t *testing.T) {
 }
 
 // TestBuildTags_SpotWebhook verifies the spot-interruption webhook fields (#228)
-// are tagged only when a URL is set (opt-in): the URL, the opaque correlation
-// blob, and the timeout all become spawn:* tags; with no URL, none appear (the
-// correlation/timeout are companions meaningful only alongside a URL).
+// are recorded only when a URL is set (opt-in): the URL, the opaque correlation
+// blob, and the timeout all go into the launch config object (#1359), never a
+// tag; with no URL, none appear (the correlation/timeout are companions
+// meaningful only alongside a URL).
 func TestBuildTags_SpotWebhook(t *testing.T) {
-	withURL := mustBuildTags(t, LaunchConfig{
+	cfg := LaunchConfig{
 		Name:                       "t",
 		SpotInterruptionWebhookURL: "https://example.test/hook",
 		WebhookCorrelation:         "opaque-blob-42",
 		WebhookTimeout:             "3s",
-	}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	}
+	withURL := objectSettings(t, cfg)
+	for k, want := range map[string]string{
+		"spot-webhook-url": "https://example.test/hook", "webhook-correlation": "opaque-blob-42", "webhook-timeout": "3s",
+	} {
+		if got := withURL[k]; got != want {
+			t.Errorf("object %s = %q, want %q", k, got, want)
+		}
+	}
+	tags := mustBuildTags(t, cfg, "123456789012", "arn:aws:iam::123456789012:user/test", "")
+	for _, k := range []string{"spawn:spot-webhook-url", "spawn:webhook-correlation", "spawn:webhook-timeout"} {
+		if got := findTagValue(tags, k); got != "" {
+			t.Errorf("%s = %q is a tag; it belongs in the launch config object (#1359)", k, got)
+		}
+	}
 
-	if got := findTagValue(withURL, "spawn:spot-webhook-url"); got != "https://example.test/hook" {
-		t.Errorf("spawn:spot-webhook-url = %q, want the URL", got)
-	}
-	if got := findTagValue(withURL, "spawn:webhook-correlation"); got != "opaque-blob-42" {
-		t.Errorf("spawn:webhook-correlation = %q, want the verbatim blob", got)
-	}
-	if got := findTagValue(withURL, "spawn:webhook-timeout"); got != "3s" {
-		t.Errorf("spawn:webhook-timeout = %q, want 3s", got)
-	}
-
-	// No URL → none of the three tags are written (opt-in; today's behavior).
-	without := mustBuildTags(t, LaunchConfig{
+	// No URL → none of the three are written (opt-in; today's behavior).
+	without := objectSettings(t, LaunchConfig{
 		Name:               "t",
 		WebhookCorrelation: "orphan", // present but URL-less → must be dropped
 		WebhookTimeout:     "3s",
-	}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
-	for _, k := range []string{"spawn:spot-webhook-url", "spawn:webhook-correlation", "spawn:webhook-timeout"} {
-		if got := findTagValue(without, k); got != "" {
-			t.Errorf("%s = %q, want empty when no webhook URL is set", k, got)
-		}
+	})
+	if len(without) != 0 {
+		t.Errorf("object = %v, want none when no webhook URL is set", without)
 	}
 }
 
 // TestBuildTags_CompletionWebhook is the spawn#497 counterpart to
-// TestBuildTags_SpotWebhook: the completion-webhook URL is tagged only when
-// set (opt-in), sharing the same webhook-correlation/webhook-timeout tags.
+// TestBuildTags_SpotWebhook: the completion-webhook URL is recorded only when
+// set (opt-in), sharing the same webhook-correlation/webhook-timeout settings.
 func TestBuildTags_CompletionWebhook(t *testing.T) {
-	withURL := mustBuildTags(t, LaunchConfig{
+	withURL := objectSettings(t, LaunchConfig{
 		Name:                 "t",
 		CompletionWebhookURL: "https://example.test/completion-hook",
 		WebhookCorrelation:   "opaque-blob-42",
 		WebhookTimeout:       "3s",
-	}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
-
-	if got := findTagValue(withURL, "spawn:completion-webhook-url"); got != "https://example.test/completion-hook" {
-		t.Errorf("spawn:completion-webhook-url = %q, want the URL", got)
+	})
+	for k, want := range map[string]string{
+		"completion-webhook-url": "https://example.test/completion-hook", "webhook-correlation": "opaque-blob-42", "webhook-timeout": "3s",
+	} {
+		if got := withURL[k]; got != want {
+			t.Errorf("object %s = %q, want %q", k, got, want)
+		}
 	}
-	if got := findTagValue(withURL, "spawn:webhook-correlation"); got != "opaque-blob-42" {
-		t.Errorf("spawn:webhook-correlation = %q, want the verbatim blob", got)
-	}
-	if got := findTagValue(withURL, "spawn:webhook-timeout"); got != "3s" {
-		t.Errorf("spawn:webhook-timeout = %q, want 3s", got)
-	}
-
-	// No URL → the completion-webhook tag is not written (opt-in).
-	without := mustBuildTags(t, LaunchConfig{Name: "t"}, "123456789012", "arn:aws:iam::123456789012:user/test", "")
-	if got := findTagValue(without, "spawn:completion-webhook-url"); got != "" {
-		t.Errorf("spawn:completion-webhook-url = %q, want empty when no URL is set", got)
+	if without := objectSettings(t, LaunchConfig{Name: "t"}); len(without) != 0 {
+		t.Errorf("object = %v, want none with no webhook URL", without)
 	}
 }
 

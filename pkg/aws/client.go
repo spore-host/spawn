@@ -30,6 +30,7 @@ import (
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/elasticip"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 )
@@ -568,6 +569,24 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	tags, err := tagger.tags(ctx, &launchConfig)
 	if err != nil {
 		return nil, err
+	}
+
+	// The launch config object spawn:config names (#1359), stored before
+	// RunInstances so spored finds it at first boot. Same config, same bytes,
+	// same sha as the tag buildTags wrote; checked rather than assumed.
+	cfgBody, cfgSHA, err := LaunchConfigObject(launchConfig)
+	if err != nil {
+		return nil, err
+	}
+	if launchTagValue(tags, launchconfig.Tag) != cfgSHA {
+		return nil, fmt.Errorf("internal error: the launch config object hashes to %q but the instance would be tagged %s=%q",
+			cfgSHA, launchconfig.Tag, launchTagValue(tags, launchconfig.Tag))
+	}
+	if cfgBody != nil {
+		if err := c.storeLaunchConfigObject(ctx, launchConfig.Region, tagger.accountID, cfgBody, cfgSHA); err != nil {
+			return nil, err
+		}
+		warnUnmanagedProfileForObject(launchConfig.IamInstanceProfile, cfgBody)
 	}
 
 	// Build block device mappings from the AMI's registered root device. The

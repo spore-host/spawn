@@ -54,10 +54,17 @@ func TestTaskRunPolicyFor(t *testing.T) {
 
 func TestStagedFilesKey(t *testing.T) {
 	sha := strings.Repeat("a", 64)
-	if got, want := StagedFilesKey("t1", sha), "t1/bootstrap-"+sha+".sh"; got != want {
+	if got, want := StagedFilesKey("t1", sha), "bootstrap/t1/bootstrap-"+sha+".sh"; got != want {
 		t.Errorf("StagedFilesKey = %q, want %q", got, want)
 	}
 	if !strings.HasPrefix(StagedFilesKey("t1", sha), StagedFilesKeyPrefix("t1")) {
 		t.Error("the key does not start with StagedFilesKeyPrefix")
+	}
+	// The instance-role grant still covers the key under the bootstrap/ root
+	// the one-day lifecycle rule is scoped to (#1359): '*' in an S3 ARN spans
+	// '/', so bucket/*/bootstrap-<sha>.sh matches bootstrap/t1/bootstrap-<sha>.sh.
+	pat := StagedFilesResources("b")[0]
+	if !strings.HasPrefix(pat, "arn:aws:s3:::b/*/bootstrap-") {
+		t.Errorf("staged-files resource %s no longer matches keys under %s", pat, StagedFilesRoot)
 	}
 }
