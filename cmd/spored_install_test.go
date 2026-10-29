@@ -351,12 +351,36 @@ var (
 	windowsPinnedCall  = regexp.MustCompile(`\bsporedinstall\.WindowsInstallScript\([^,()]+,\s*launcher\.SporedVersion\(\)\)`)
 )
 
-// Every Windows install path outside pkg/sporedinstall installs the spored of
-// the spawn rendering it (#1412). Discovered from the repository's source, so a
-// new Windows bootstrap is covered without editing this.
-func TestEveryWindowsInstallPathIsPinned(t *testing.T) {
-	root := repoRootFromCmd(t)
+// verifiedInstallCall matches a call of the Linux installer generator.
+var verifiedInstallCall = regexp.MustCompile(`\bsporedinstall\.VerifiedInstallFunc\(\)`)
+
+// Every file outside pkg/sporedinstall that emits the Linux installer also
+// emits the spored version pin (#1412). Discovered by the generator call, not by
+// the artifact name, so an install path that names no spored-linux-* binary
+// itself is covered too.
+func TestEveryVerifiedInstallCallerIsPinned(t *testing.T) {
 	found := 0
+	walkGoSource(t, func(rel string, b []byte) {
+		if !verifiedInstallCall.Match(b) {
+			return
+		}
+		found++
+		if !pinCall.Match(b) {
+			t.Errorf("%s emits sporedinstall.VerifiedInstallFunc() but never sporedinstall.PinScript(), so "+
+				"what it installs is the latest spored, not its own spawn's (#1412)", rel)
+		}
+	})
+	// pkg/launcher, cmd/app.go, cmd/upgrade_spored.go, the pipeline orchestrator.
+	if found < 4 {
+		t.Fatalf("found %d files emitting the installer, fewer than the four known; discovery has broken", found)
+	}
+}
+
+// walkGoSource calls fn for every non-test .go file in the repository outside
+// pkg/sporedinstall, nested modules included.
+func walkGoSource(t *testing.T, fn func(rel string, b []byte)) {
+	t.Helper()
+	root := repoRootFromCmd(t)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if treewalk.Vanished(root, path, err) {
@@ -378,19 +402,32 @@ func TestEveryWindowsInstallPathIsPinned(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		calls := len(windowsInstallCall.FindAllIndex(b, -1))
-		pinned := len(windowsPinnedCall.FindAllIndex(b, -1))
-		found += calls
-		if calls != pinned {
-			rel, _ := filepath.Rel(root, path)
-			t.Errorf("%s calls sporedinstall.WindowsInstallScript %d times but passes launcher.SporedVersion() "+
-				"in only %d, so a Windows launch installs a spored other than its own spawn's (#1412)", rel, calls, pinned)
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
 		}
+		fn(rel, b)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Every Windows install path outside pkg/sporedinstall installs the spored of
+// the spawn rendering it (#1412). Discovered from the repository's source, so a
+// new Windows bootstrap is covered without editing this.
+func TestEveryWindowsInstallPathIsPinned(t *testing.T) {
+	found := 0
+	walkGoSource(t, func(rel string, b []byte) {
+		calls := len(windowsInstallCall.FindAllIndex(b, -1))
+		pinned := len(windowsPinnedCall.FindAllIndex(b, -1))
+		found += calls
+		if calls != pinned {
+			t.Errorf("%s calls sporedinstall.WindowsInstallScript %d times but passes launcher.SporedVersion() "+
+				"in only %d, so a Windows launch installs a spored other than its own spawn's (#1412)", rel, calls, pinned)
+		}
+	})
 	if found == 0 {
 		t.Fatal("found no call of sporedinstall.WindowsInstallScript; discovery has broken, it has not proven the repo clean")
 	}
