@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 )
 
@@ -75,13 +76,35 @@ func TestReplacementCheck_RetiresOnlyAReplacement(t *testing.T) {
 }
 
 // The replacement has no tags of its own; the notification must use the
-// request's, which carry the original's notification settings.
+// request's, which carry the original's spawn:config, and the notification
+// settings are in the launch config object that names (#1359), fetched with
+// the replacement's role. Not from the request's tags: a tag with one of
+// their names is not read.
 func TestNotifyConfigFromRequestTags(t *testing.T) {
-	cfg := notifyConfigFromTags(map[string]string{
-		"spawn:notify-url": "https://bot.example", "spawn:slack-workspace-id": "T1",
-	})
-	if cfg.NotifyURL != "https://bot.example" || cfg.SlackWorkspaceID != "T1" {
+	sha := strings.Repeat("c", 64)
+	var asked []string
+	fetch := func(_ context.Context, s string) (map[string]string, error) {
+		asked = append(asked, s)
+		return map[string]string{launchconfig.NotifyURL: "https://bot.example", launchconfig.SlackWorkspaceID: "T1"}, nil
+	}
+	cfg := notifyConfigFromTags(context.Background(), map[string]string{
+		"spawn:config": sha, "spawn:dns-name": "orig",
+		"spawn:notify-url": "https://from-a-tag.example",
+	}, fetch)
+	if cfg.NotifyURL != "https://bot.example" || cfg.SlackWorkspaceID != "T1" || cfg.DNSName != "orig" {
 		t.Fatalf("config = %+v", cfg)
+	}
+	if len(asked) != 1 || asked[0] != sha {
+		t.Errorf("fetched %v, want the request's spawn:config %s once", asked, sha)
+	}
+	none := notifyConfigFromTags(context.Background(), map[string]string{"spawn:notify-url": "https://from-a-tag.example"}, fetch)
+	if none.NotifyURL != "" {
+		t.Errorf("read the notify URL from a tag: %q", none.NotifyURL)
+	}
+	failed := notifyConfigFromTags(context.Background(), map[string]string{"spawn:config": sha},
+		func(context.Context, string) (map[string]string, error) { return nil, errors.New("NoSuchKey") })
+	if failed.NotifyURL != "" {
+		t.Errorf("an unreadable object gave notify URL %q", failed.NotifyURL)
 	}
 }
 

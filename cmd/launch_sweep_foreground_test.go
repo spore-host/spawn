@@ -415,15 +415,18 @@ var foregroundDispositions = map[string]foregroundDisposition{
 	"FSxMountPoint": {tags: true, userData: true, prereq: func(c *aws.LaunchConfig) { c.FSxLustreID = "fs-2" }},
 	"TargetOS":      {tags: true, userData: true},
 
+	// A setting that gives the launch a launch config object (#1359) is in
+	// the object, named by a tag, and changes a dev build's user data: its
+	// spored must come from spawn/current/, never the frozen latest (#1419).
 	"TTL": {tags: true}, "IdleTimeout": {tags: true}, "TerminateOnIdle": {tags: true}, "CostLimit": {tags: true},
-	"DNSName": {tags: true}, "IdleCPUPercent": {tags: true}, "Observability": {tags: true},
+	"DNSName": {tags: true}, "IdleCPUPercent": {tags: true, userData: true}, "Observability": {tags: true},
 	"DNSDomain":   {tags: true, prereq: func(c *aws.LaunchConfig) { c.DNSName = "box" }},
 	"DNSEndpoint": {tags: true, prereq: func(c *aws.LaunchConfig) { c.DNSName = "box" }},
 	"PreStop":     {tags: true}, "PreStopTimeout": {tags: true, prereq: func(c *aws.LaunchConfig) { c.PreStop = "sync" }},
-	"SpotInterruptionWebhookURL": {tags: true},
+	"SpotInterruptionWebhookURL": {tags: true, userData: true},
 	"WebhookCorrelation":         {tags: true, prereq: func(c *aws.LaunchConfig) { c.SpotInterruptionWebhookURL = "https://h.example.org/" }},
 	"WebhookTimeout":             {tags: true, prereq: func(c *aws.LaunchConfig) { c.SpotInterruptionWebhookURL = "https://h.example.org/" }},
-	"CompletionWebhookURL":       {tags: true}, "OnComplete": {tags: true},
+	"CompletionWebhookURL":       {tags: true, userData: true}, "OnComplete": {tags: true},
 	"CompletionFile":  {tags: true, userData: true, prereq: func(c *aws.LaunchConfig) { c.OnComplete = "terminate" }},
 	"CompletionDelay": {tags: true}, "SessionTimeout": {tags: true}, "Username": {tags: true},
 	"JobArrayID":    {tags: true},
@@ -431,10 +434,10 @@ var foregroundDispositions = map[string]foregroundDisposition{
 	"JobArraySize":  {tags: true, prereq: func(c *aws.LaunchConfig) { c.JobArrayID = "ja" }},
 	"JobArrayIndex": {tags: true, prereq: func(c *aws.LaunchConfig) { c.JobArrayID = "ja" }}, "JobArrayCommand": {tags: true},
 	"SweepID": {tags: true}, "SweepName": {tags: true}, "SweepIndex": {tags: true}, "SweepSize": {tags: true},
-	"Parameters": {tags: true}, "SlackWorkspaceID": {tags: true}, "NotifyURL": {tags: true}, "NotifyCommand": {tags: true},
-	"NotifyPlatform": {tags: true}, "ActivePortsRaw": {tags: true}, "ActiveProcessesRaw": {tags: true},
-	"DCVSessionID": {tags: true}, "AppName": {tags: true}, "AppMode": {tags: true}, "ReadyPort": {tags: true},
-	"ReadyHealthPath": {tags: true}, "WebAuth": {tags: true}, "PricePerHour": {tags: true},
+	"Parameters": {tags: true}, "SlackWorkspaceID": {tags: true, userData: true}, "NotifyURL": {tags: true, userData: true}, "NotifyCommand": {tags: true, userData: true},
+	"NotifyPlatform": {tags: true, userData: true}, "ActivePortsRaw": {tags: true, userData: true}, "ActiveProcessesRaw": {tags: true, userData: true},
+	"DCVSessionID": {tags: true}, "AppName": {tags: true}, "AppMode": {tags: true, userData: true}, "ReadyPort": {tags: true, userData: true},
+	"ReadyHealthPath": {tags: true, userData: true}, "WebAuth": {tags: true, userData: true}, "PricePerHour": {tags: true},
 	"PriceSource": {tags: true, prereq: func(c *aws.LaunchConfig) { c.PricePerHour = 0.1 }}, "Name": {tags: true}, "Tags": {tags: true}, "SpawnVersion": {tags: true},
 }
 

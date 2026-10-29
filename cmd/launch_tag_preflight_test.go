@@ -157,7 +157,9 @@ func TestLaunchOverTheTagLimitMakesNoAWSCall(t *testing.T) {
 // A parameter sweep any of whose members is over the limit is refused before
 // any AWS call (#1336): before applyCLIIAMToSweep creates a role, and before
 // either orchestration path imports a key pair or uploads the params. Here
-// every #1308 spored setting on a sweep that also sets most launch options.
+// every #1308 spored setting on a sweep that also sets most launch options,
+// which since #1359 fits on its own (those settings are in the launch config
+// object), plus custom tags to take it over.
 func TestSweepOverTheTagLimitMakesNoAWSCall(t *testing.T) {
 	f := serveTagLimitAWS(t)
 	dir := t.TempDir()
@@ -170,13 +172,17 @@ func TestSweepOverTheTagLimitMakesNoAWSCall(t *testing.T) {
 	paramFile, autoYes = pf, true
 
 	base := maximalSweepBase()
+	base.Tags = map[string]string{}
+	for i := 0; i < 20; i++ {
+		base.Tags[fmt.Sprintf("team%02d", i)] = "x"
+	}
 	err := launchParameterSweep(t.Context(), &base, &platform.Platform{OS: "linux", HomeDir: dir}, newAuditLogger("test", "test"))
 	var limit *aws.TagLimitError
 	if !errors.As(err, &limit) {
 		t.Fatalf("launchParameterSweep = %v; want a *aws.TagLimitError", err)
 	}
-	if !strings.Contains(err.Error(), "--metrics-port (spawn:metrics-port)") {
-		t.Errorf("the refusal does not name the spored settings to drop: %v", err)
+	if !strings.Contains(err.Error(), "20 custom --tag") || !strings.Contains(err.Error(), "--metrics (spawn:metrics-enabled)") {
+		t.Errorf("the refusal does not name what to drop: %v", err)
 	}
 	if calls := f.beyondIdentity(); len(calls) != 0 || len(f.actions) != 0 {
 		t.Errorf("a sweep refused for its tag count made AWS call(s) first: %v", f.actions)

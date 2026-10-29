@@ -29,6 +29,12 @@ func (f *fixture) copyTo(prefix string) {
 // output, whether spored was installed, and every path requested.
 func (f *fixture) runFromBuckets(pin string) (int, string, bool, []string) {
 	f.t.Helper()
+	return f.runFromBucketsFor(pin, false)
+}
+
+// runFromBucketsFor is runFromBuckets with PinScriptFor(pin, readsLaunchConfig).
+func (f *fixture) runFromBucketsFor(pin string, readsLaunchConfig bool) (int, string, bool, []string) {
+	f.t.Helper()
 	script := strings.ReplaceAll(VerifiedInstallFunc(), Dest, f.destPath)
 	script = strings.ReplaceAll(script, SigningKeyPath, f.keyPath)
 	// Retries on a 404 are the installer's business, not this test's; skip the waits.
@@ -36,7 +42,7 @@ func (f *fixture) runFromBuckets(pin string) (int, string, bool, []string) {
 	if _, err := exec.LookPath("sha256sum"); err != nil {
 		prelude += "sha256sum() { shasum -a 256 \"$@\"; }\n"
 	}
-	full := fmt.Sprintf("%s%s\nSPORED_SIG_VERIFY=1\n%s\n%s %q %q %q\n", prelude, script, PinScript(pin),
+	full := fmt.Sprintf("%s%s\nSPORED_SIG_VERIFY=1\n%s\n%s %q %q %q\n", prelude, script, PinScriptFor(pin, readsLaunchConfig),
 		BucketInstallFuncName, f.binary, f.srv.URL+"/regional", f.srv.URL+"/fallback")
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.Command("bash", "-c", full) //nolint:gosec // this package's own generated script
@@ -134,26 +140,79 @@ func TestAPinnedInstallNeverFallsBackToLatest(t *testing.T) {
 	}
 }
 
-// A dev build of spawn has no published spored: it installs the latest, from
-// the same sources in the same order as before #1412.
-func TestAnUnpinnedInstallFetchesLatest(t *testing.T) {
-	requireBash(t)
-	f := newFixture(t)
-	f.copyTo("/fallback")
-	code, out, installed, paths := f.runFromBuckets("")
-	if code != 0 || !installed {
-		t.Fatalf("a dev build did not install the latest spored (exit %d):\n%s", code, out)
-	}
-	// The sources whose .sig was probed, in order, each once however often the
-	// probe was retried.
+// probedSources are the sources whose .sig was probed, in order, each once
+// however often the probe was retried.
+func probedSources(paths []string, binary string) []string {
 	var probes []string
 	for _, p := range paths {
-		if src, ok := strings.CutSuffix(p, "/"+f.binary+".sig"); ok && (len(probes) == 0 || probes[len(probes)-1] != src) {
+		if src, ok := strings.CutSuffix(p, "/"+binary+".sig"); ok && (len(probes) == 0 || probes[len(probes)-1] != src) {
 			probes = append(probes, src)
 		}
 	}
-	if got, want := strings.Join(probes, " "), strings.Join(latestPrefixes, " "); got != want {
+	return probes
+}
+
+var (
+	currentPrefixes = []string{"/regional/" + CurrentPrefix, "/fallback/" + CurrentPrefix}
+	frozenPrefixes  = []string{"/regional/spawn", "/fallback/spawn"}
+)
+
+// #1419: a dev build of spawn has no published spored of its own. It installs
+// the newest release's, from spawn/current/, regional then us-east-1, and
+// never the frozen spawn/ keys while that exists.
+func TestADevBuildInstallsTheCurrentSpored(t *testing.T) {
+	requireBash(t)
+	for name, where := range map[string]string{"regional": currentPrefixes[0], "fallback": currentPrefixes[1]} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			publishLatest(f)
+			f.copyTo(where)
+			code, out, installed, paths := f.runFromBucketsFor("", true)
+			if code != 0 || !installed {
+				t.Fatalf("a dev build did not install the current spored at %s (exit %d):\n%s", where, code, out)
+			}
+			for _, p := range paths {
+				for _, frozen := range latestPrefixes {
+					if strings.HasPrefix(p, frozen+"/"+f.binary) {
+						t.Errorf("a dev build read the frozen %s with spawn/current/ published", p)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Before the first release that moves spawn/current/ (v0.150.0), a dev build
+// falls back to the spored frozen at spawn/ (v0.149.0). That is safe exactly
+// when the launch has no launch config object: that spored reads every other
+// setting from the tags, as this release's does. With an object it would
+// ignore the launch's notifications, webhooks and --active-ports (#1359), so
+// the install is refused, and the bootstrap retires the instance saying why.
+func TestADevBuildFallsBackToTheFrozenSporedOnlyWithoutAnObject(t *testing.T) {
+	requireBash(t)
+	f := newFixture(t)
+	publishLatest(f)
+	code, out, installed, paths := f.runFromBucketsFor("", false)
+	if code != 0 || !installed {
+		t.Fatalf("a dev build with no launch config object did not fall back to the frozen spored (exit %d):\n%s", code, out)
+	}
+	if got, want := strings.Join(probedSources(paths, f.binary), " "), strings.Join(append(append([]string{}, currentPrefixes...), frozenPrefixes[0]), " "); got != want {
 		t.Errorf("sources probed %q, want %q", got, want)
+	}
+
+	f = newFixture(t)
+	publishLatest(f)
+	code, out, installed, paths = f.runFromBucketsFor("", true)
+	if code == 0 || installed {
+		t.Fatalf("a dev build whose launch has a launch config object installed the frozen spored (exit %d):\n%s", code, out)
+	}
+	if !strings.Contains(out, "ignores launch configs") {
+		t.Errorf("the refusal does not say why:\n%s", out)
+	}
+	for _, p := range paths {
+		if !strings.Contains(p, "/"+CurrentPrefix+"/") {
+			t.Errorf("read %s; with an object a dev build may read only %s/", p, CurrentPrefix)
+		}
 	}
 }
 

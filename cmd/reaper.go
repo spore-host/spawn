@@ -34,6 +34,7 @@ var (
 	reaperInstRoles    string
 	reaperPoolQueues   string
 	reaperSchedParams  string
+	reaperLaunchCfgs   string
 	reaperTTLGrace     string
 	reaperEmptyBuckets string
 	reaperMaxAge       string
@@ -192,6 +193,8 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 		"Abandoned pool SQS queue and staged-spec sweep, REAPER_POOL_QUEUES: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperSchedParams, "schedule-params", "",
 		"Orphaned schedule params sweep (spawn-schedules-*/schedules/<id>/params.yaml with no schedule record, 30 days old), REAPER_SCHEDULE_PARAMS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
+	fs.StringVar(&reaperLaunchCfgs, "launch-configs", "",
+		"Unreferenced launch config object sweep (spawn-staging-*/launch-config/config-<sha256>.json no instance or Spot request names, a day old), REAPER_LAUNCH_CONFIGS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperEmptyBuckets, "empty-buckets", "",
 		"Empty spawn-staging/spawn-results bucket sweep, REAPER_EMPTY_BUCKETS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperTTLGrace, "ttl-grace", "",
@@ -279,6 +282,7 @@ var reaperDeployFlags = map[string]struct {
 	reaperconfig.EnvInstanceRoles:  {"instance-roles", &reaperInstRoles},
 	reaperconfig.EnvPoolQueues:     {"pool-queues", &reaperPoolQueues},
 	reaperconfig.EnvScheduleParams: {"schedule-params", &reaperSchedParams},
+	reaperconfig.EnvLaunchConfigs:  {"launch-configs", &reaperLaunchCfgs},
 	reaperconfig.EnvNotifyURL:      {"notify-url", &reaperNotifyURL},
 }
 

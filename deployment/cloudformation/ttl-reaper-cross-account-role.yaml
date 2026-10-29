@@ -223,9 +223,10 @@ Resources:
               # these. The sweep's own checks are the rest of the guard
               # (pkg/bucketsweep): exact names for this account and region,
               # spawn:managed=true, ExpectedBucketOwner on every call.
-              # No list action on spawn-staging-*: no role spawn makes may list
-              # it (#1274); S3's refusal to delete a non-empty bucket is the
-              # sweep's emptiness check there.
+              # No unconditioned list action on spawn-staging-*: no role spawn
+              # makes may list its task bootstrap objects (#1274); S3's refusal
+              # to delete a non-empty bucket is the sweep's emptiness check
+              # there. (The launch config sweep below lists launch-config/.)
               - Effect: Allow
                 Action:
                   - s3:GetBucketTagging
@@ -370,6 +371,22 @@ Resources:
                 Action:
                   - s3:DeleteObject
                 Resource: 'arn:aws:s3:::spawn-results-*/staging/pool-specs/*'
+              # The launch config object sweep (#1359): list the staging
+              # buckets under launch-config/ only, so their task bootstrap
+              # objects stay unlistable (#1274), and delete a config object
+              # (launch-config/config-<sha256>.json) no instance references,
+              # under the reaper's LaunchConfigs setting. Nothing is read.
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: 'arn:aws:s3:::spawn-staging-*'
+                Condition:
+                  StringLike:
+                    s3:prefix: 'launch-config/*'
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::spawn-staging-*/launch-config/config-*.json'
       Tags:
         - Key: !Sub '${TagPrefix}:managed'
           Value: 'false'

@@ -61,16 +61,12 @@ func (e *TagLimitError) Error() string {
 }
 
 // sporedSettingFlags maps each tag an optional spored setting writes (#1308)
-// to the flag that sets it. --tracing writes two.
+// to the flag that sets it. The rest of those settings (--idle-cpu-threshold,
+// --metrics-port/-bind/-path, --tracing, --tracing-sampling) are in the launch
+// config object and take no tag (#1359); --metrics itself stays one, as
+// Prometheus' EC2 discovery filters on it.
 var sporedSettingFlags = map[string]string{
-	"spawn:idle-cpu":         "--idle-cpu-threshold",
-	"spawn:metrics-enabled":  "--metrics",
-	"spawn:metrics-port":     "--metrics-port",
-	"spawn:metrics-bind":     "--metrics-bind",
-	"spawn:metrics-path":     "--metrics-path",
-	"spawn:tracing-enabled":  "--tracing",
-	"spawn:tracing-exporter": "--tracing",
-	"spawn:tracing-sampling": "--tracing-sampling",
+	"spawn:metrics-enabled": "--metrics",
 }
 
 // postLaunchTags are the instance tags spawn's own launch code writes after

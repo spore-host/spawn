@@ -174,7 +174,7 @@ func runDaemon() {
 			instanceID: identity.InstanceID,
 			region:     identity.Region,
 			shutdown:   powerOff,
-			notify:     replacementNotifier(identity),
+			notify:     replacementNotifier(identity, ep.FetchLaunchSettings),
 			sleep:      sleepCtx,
 		}.run(ctx)
 	}
@@ -482,6 +482,13 @@ type statusReport struct {
 	HibernatedSeconds float64 `json:"hibernated_seconds"`
 
 	ConfigLoadError string `json:"config_load_error,omitempty"`
+
+	// LaunchConfig is the launch config object the instance's spawn:config
+	// names (#1359), and LaunchConfigError why it could not be loaded, when
+	// it could not: its settings are then unknown and no idle action is taken.
+	LaunchConfig       string `json:"launch_config,omitempty"`
+	LaunchConfigSource string `json:"launch_config_source,omitempty"`
+	LaunchConfigError  string `json:"launch_config_error,omitempty"`
 
 	TTL statusTTL `json:"ttl"`
 
@@ -913,6 +920,9 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 		BootSeconds:        bootTime.Seconds(),
 		HibernatedSeconds:  hibernatedTime.Seconds(),
 		ConfigLoadError:    config.ConfigLoadError,
+		LaunchConfig:       config.LaunchConfigSHA,
+		LaunchConfigSource: config.LaunchConfigSource,
+		LaunchConfigError:  config.LaunchConfigError,
 		CPUPercent:         cpuPercent,
 		CPUMeasured:        cpuMeasured,
 		NetworkBytesPerMin: netBytes,
@@ -1173,6 +1183,13 @@ func renderStatusTable(report *statusReport) error {
 			report.TTL.TerminateAt.Format("2006-01-02 15:04 UTC"))
 	default:
 		fmt.Println("  TTL:              none — instance will not auto-terminate")
+	}
+
+	switch {
+	case report.LaunchConfigError != "":
+		fmt.Printf("  Launch config:    UNAVAILABLE — %s; no idle action until it loads\n", report.LaunchConfigError)
+	case report.LaunchConfig != "":
+		fmt.Printf("  Launch config:    %s (from %s)\n", shortSHA(report.LaunchConfig), report.LaunchConfigSource)
 	}
 
 	if report.IdleTimeout.Configured {
@@ -1834,4 +1851,12 @@ func runPipelineStage() error {
 
 	log.Println("Pipeline stage completed successfully")
 	return nil
+}
+
+// shortSHA is the first 12 characters of a sha256, for display.
+func shortSHA(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }

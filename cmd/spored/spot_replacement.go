@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/agent"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/provider"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
@@ -114,27 +115,48 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 // replacementNotifier sends the notification through the original instance's
-// notification settings, which the request carries in its tags: the
-// replacement has no tags of its own.
-func replacementNotifier(identity *provider.Identity) func(context.Context, spotrequest.Detection) {
+// notification settings: the replacement has no tags of its own, and the
+// request carries the original's. Since #1359 the settings themselves are in
+// the launch config object the request's spawn:config names, which this
+// replacement, booted with a fresh root volume, fetches with fetch (the
+// object outlives its instance for this, launchconfig.ObjectMaxDays).
+func replacementNotifier(identity *provider.Identity, fetch launchSettingsFetcher) func(context.Context, spotrequest.Detection) {
 	return func(ctx context.Context, d spotrequest.Detection) {
 		// Name the original: the bot DMs the users registered for it, and
 		// nobody registered this replacement's id (#1007).
-		n := agent.NewNotifier(notifyConfigFromTags(d.RequestTags), identity).WithOriginalInstance(d.OriginalInstanceID)
+		n := agent.NewNotifier(notifyConfigFromTags(ctx, d.RequestTags, fetch), identity).WithOriginalInstance(d.OriginalInstanceID)
 		n.Notify(ctx, "spot_replacement_retired", fmt.Sprintf(
 			"replacement of %s launched by leaked Spot request %s; cancelling the request and terminating it",
 			d.OriginalInstanceID, d.RequestID))
 	}
 }
 
-// notifyConfigFromTags reads the notification settings from a set of spawn tags.
-func notifyConfigFromTags(tags map[string]string) *provider.Config {
-	return &provider.Config{
-		NotifyURL:        tags[tagprefix.Tag("notify-url")],
-		SlackWorkspaceID: tags[tagprefix.Tag("slack-workspace-id")],
-		NotifyCommand:    tags[tagprefix.Tag("notify-command")],
-		NotifyPlatform:   tags[tagprefix.Tag("notify-platform")],
-		DNSName:          tags[tagprefix.Tag("dns-name")],
-		AccountBase36:    tags[tagprefix.Tag("account-base36")],
+// launchSettingsFetcher fetches and verifies the launch config object a sha
+// names: provider.EC2Provider.FetchLaunchSettings in production.
+type launchSettingsFetcher func(ctx context.Context, sha string) (map[string]string, error)
+
+// notifyConfigFromTags reads the notification settings for a set of spawn
+// tags: the DNS name and account from the tags, the rest from the launch
+// config object their spawn:config names. With no object, or one that cannot
+// be fetched (said in the log), the notification goes nowhere, which is what
+// an original with no notification settings gets too.
+func notifyConfigFromTags(ctx context.Context, tags map[string]string, fetch launchSettingsFetcher) *provider.Config {
+	cfg := &provider.Config{
+		DNSName:       tags[tagprefix.Tag("dns-name")],
+		AccountBase36: tags[tagprefix.Tag("account-base36")],
 	}
+	sha := tags[tagprefix.Tag(launchconfig.TagSuffix)]
+	if sha == "" || fetch == nil {
+		return cfg
+	}
+	settings, err := fetch(ctx, sha)
+	if err != nil {
+		log.Printf("Warning: the original's launch config object %s could not be read (%v); the retirement is not notified", sha, err)
+		return cfg
+	}
+	cfg.NotifyURL = settings[launchconfig.NotifyURL]
+	cfg.SlackWorkspaceID = settings[launchconfig.SlackWorkspaceID]
+	cfg.NotifyCommand = settings[launchconfig.NotifyCommand]
+	cfg.NotifyPlatform = settings[launchconfig.NotifyPlatform]
+	return cfg
 }

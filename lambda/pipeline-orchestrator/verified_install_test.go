@@ -204,8 +204,9 @@ func TestUserData_InstallsThisReleasesSpored(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v; calls:\n%s", err, calls)
 		}
-		if urls := sporedURLs(calls); len(urls) == 0 || urls[0] != "https://spawn-binaries-eu-west-1.s3.amazonaws.com/spawn/spored-linux-amd64.sig" {
-			t.Errorf("a dev build did not install the latest regional spored first: %v", urls)
+		// A dev build installs spawn/current/ first (#1419).
+		if urls := sporedURLs(calls); len(urls) == 0 || urls[0] != "https://spawn-binaries-eu-west-1.s3.amazonaws.com/spawn/current/spored-linux-amd64.sig" {
+			t.Errorf("a dev build did not try the current regional spored first: %v", urls)
 		}
 	})
 	t.Run("a test binary is not a release", func(t *testing.T) {

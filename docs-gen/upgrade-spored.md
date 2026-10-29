@@ -3,8 +3,14 @@
 Replace the spored lifecycle agent on a running instance with a newer
 release WITHOUT terminating/relaunching the instance and without losing spored's
 lifecycle state (the TTL deadline, accumulated compute-seconds, and the
-completion / pre-stop / idle / FSx config all live in EC2 tags that the new
-spored re-reads on boot).
+completion / pre-stop / idle / FSx config live in EC2 tags that the new spored
+re-reads on boot, and the settings fixed at launch in the launch config object
+cached on the instance).
+
+An upgrade across v0.150.0, the first spored that reads those settings only from
+the launch config object, is refused when the instance keeps them in the other
+place: tags on an instance launched by an older spawn, or an object an older
+spored would not read.
 
 The default target is this spawn's own version, the spored a launch by this
 spawn installs (for a development build of spawn, which has no published spored,

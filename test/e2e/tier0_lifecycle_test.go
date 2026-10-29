@@ -5,6 +5,8 @@ package e2e
 import (
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/launchconfig"
 )
 
 // Tier 0 lifecycle coverage: launch variants and instance state transitions
@@ -123,19 +125,45 @@ func TestTier0_Launch_LifecycleTags(t *testing.T) {
 }
 
 // TestTier0_Launch_SpotWebhookTags verifies the spot-interruption webhook flags
-// (#228) round-trip to spawn:* tags so spored picks them up on-node: --spot-webhook-url,
-// --webhook-correlation (opaque, echoed verbatim later), and --webhook-timeout.
+// (#228) reach spored: --spot-webhook-url, --webhook-correlation (opaque, echoed
+// verbatim later) and --webhook-timeout. Since #1359 they are not tags (the URL
+// often carries a token, and tags are readable account-wide): they are in the
+// launch config object in the staging bucket, and the instance carries only
+// spawn:config=<its sha256>. Checked end to end against Substrate: the tag, the
+// absence of the old tags, and the object at the key the tag names, holding
+// the three values.
 func TestTier0_Launch_SpotWebhookTags(t *testing.T) {
 	env := startSpawnSubstrate(t)
+	// Substrate does not implement PutBucketOwnershipControls
+	// (scttfrdmn/substrate#1445), so EnsureStagingBucket cannot configure a new
+	// bucket there. A bucket that already carries the staging lifecycle rules
+	// is left as it is (it is what every launch after the first finds), so the
+	// launch writes its object into this one.
+	env.preconfigureStagingBucket()
 	arr := env.launchOK("hooked", "--instance-type", "t3.small",
 		"--spot-webhook-url", "https://example.test/hook",
 		"--webhook-correlation", "entity-7",
 		"--webhook-timeout", "3s")
 	id := arr[0]["instance_id"].(string)
 
-	env.requireTag(id, "spawn:spot-webhook-url", "https://example.test/hook")
-	env.requireTag(id, "spawn:webhook-correlation", "entity-7")
-	env.requireTag(id, "spawn:webhook-timeout", "3s")
+	_, tags := env.describeInstance(id)
+	for _, k := range []string{"spawn:spot-webhook-url", "spawn:webhook-correlation", "spawn:webhook-timeout"} {
+		if v, ok := tags[k]; ok {
+			t.Errorf("instance %s carries %s=%q as a tag; it belongs in the launch config object (#1359)", id, k, v)
+		}
+	}
+	sha := tags[launchconfig.Tag]
+	if !launchconfig.ValidSHA(sha) {
+		t.Fatalf("instance %s has no %s tag (have: %v)", id, launchconfig.Tag, tagKeys(tags))
+	}
+	settings := env.launchConfigObject(sha)
+	for k, want := range map[string]string{
+		launchconfig.SpotWebhookURL: "https://example.test/hook", launchconfig.WebhookCorrelation: "entity-7", launchconfig.WebhookTimeout: "3s",
+	} {
+		if got := settings[k]; got != want {
+			t.Errorf("launch config object %s = %q, want %q", k, got, want)
+		}
+	}
 }
 
 // TestTier0_Launch_VolumeSize verifies --volume-size is accepted and the launch

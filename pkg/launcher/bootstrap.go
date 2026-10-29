@@ -29,10 +29,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"runtime/debug"
 	"strings"
 
 	"github.com/spore-host/spawn/internal/shellmin"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
@@ -150,6 +152,21 @@ type BootstrapConfig struct {
 	// bootstrap does (#1274). Command and TaskFlushScript must still be set: the
 	// build checks that they are what was staged.
 	StagedFiles *StagedFiles
+	// LaunchConfig, when set, is the launch's launch config object
+	// (aws.LaunchConfigObject, #1359), written before spored starts into the
+	// cache spored reads it from (launchconfig.LinuxCachePath, 0600), so spored
+	// never fetches it. Only a detached sweep's member sets it: it is launched
+	// by the sweep-orchestrator Lambda, possibly days after the CLI rendered
+	// it (a schedule replays the same user data), and the Lambda cannot store
+	// the object in the member's account. Every other launch stores it in the
+	// staging bucket, and spored fetches it there.
+	LaunchConfig []byte
+	// ReadsLaunchConfig says the launch has a launch config object, seeded
+	// (LaunchConfig) or in the staging bucket (#1359). A dev build of spawn
+	// then installs spored only from spawn/current/, never the spored frozen
+	// at spawn/, which would ignore it (#1419). A release build installs its
+	// own version either way.
+	ReadsLaunchConfig bool
 }
 
 // StagedFiles is a per-launch object holding a launch's command and task
@@ -332,7 +349,7 @@ LOCAL_SSH_KEY_BASE64=%s
 
 	// The spored the body installs (#1412): this release's, which is per
 	// launch and so here rather than in the published body.
-	script += sporedinstall.PinScript(spored)
+	script += sporedinstall.PinScriptFor(spored, cfg.ReadsLaunchConfig || len(cfg.LaunchConfig) > 0)
 
 	// Defined first, because every abort before spored is running calls it:
 	// the stub's (no verified body) and the body's own (no spored).
@@ -478,6 +495,19 @@ cat > %s <<'EOFGATES'
 %s
 EOFGATES
 `, ReadyDir, RequiredGatesFile, strings.Join(gates, "\n"))
+	}
+
+	// The launch config object, seeded where spored caches it (#1359): base64
+	// so the shell carries the exact bytes whose sha256 the spawn:config tag
+	// names. Before the body, so it exists when spored starts; written this
+	// boot, so discard-inherited-state keeps it.
+	if len(cfg.LaunchConfig) > 0 {
+		script += fmt.Sprintf(`
+# Launch config object (#1359), checked by spored against spawn:config
+mkdir -p %[1]s
+echo '%[2]s' | base64 -d > %[3]s
+chmod 600 %[3]s
+`, path.Dir(launchconfig.LinuxCachePath), base64.StdEncoding.EncodeToString(cfg.LaunchConfig), launchconfig.LinuxCachePath)
 	}
 
 	// Plugin declarations, written BEFORE linuxBootstrapBody (#1023). The body

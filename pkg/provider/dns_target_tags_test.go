@@ -26,7 +26,7 @@ func TestCustomDNSTargetSurvivesTheTagHandOff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Launch: %v", err)
 		}
-		got, _, err := loadConfigFromEC2Tags(ctx, env.EC2Client(), res.InstanceID)
+		got, _, _, err := loadConfigFromEC2Tags(ctx, env.EC2Client(), res.InstanceID)
 		if err != nil {
 			t.Fatalf("loadConfigFromEC2Tags: %v", err)
 		}

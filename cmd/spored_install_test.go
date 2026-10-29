@@ -47,7 +47,7 @@ var directInstallerCall = regexp.MustCompile(`(?m)^\s*(?:if\s+!\s+)?` + sporedin
 // pinCall matches the Go call that assigns the spored version the script
 // installs (#1412). A script that calls the installer without it installs the
 // latest spored whatever spawn rendered it.
-var pinCall = regexp.MustCompile(`\bsporedinstall\.PinScript\(`)
+var pinCall = regexp.MustCompile(`\bsporedinstall\.PinScript(For)?\(`)
 
 // keySetupCall matches the Go call that emits SPORED_SIG_VERIFY and the signing
 // key. A script that calls the installer without it runs with verification OFF:
@@ -347,8 +347,8 @@ func TestUpgradeScriptIsFailClosed(t *testing.T) {
 // windowsInstallCall matches a call of the Windows installer generator, and
 // windowsPinnedCall one that passes it this spawn's spored version (#1412).
 var (
-	windowsInstallCall = regexp.MustCompile(`\bsporedinstall\.WindowsInstallScript\(`)
-	windowsPinnedCall  = regexp.MustCompile(`\bsporedinstall\.WindowsInstallScript\([^,()]+,\s*launcher\.SporedVersion\(\)\)`)
+	windowsInstallCall = regexp.MustCompile(`\bsporedinstall\.WindowsInstallScript(For)?\(`)
+	windowsPinnedCall  = regexp.MustCompile(`\bsporedinstall\.WindowsInstallScript(For)?\([^,()]+,\s*launcher\.SporedVersion\(\)(,\s*[A-Za-z_]+)?\)`)
 )
 
 // verifiedInstallCall matches a call of the Linux installer generator.

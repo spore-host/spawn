@@ -585,7 +585,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// DryRun first because it is the one that silently stops the reaper
 	// terminating anything.
 	keys := []string{
-		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "InstanceRoles", "PoolQueues", "ScheduleParams", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "InstanceRoles", "PoolQueues", "ScheduleParams", "LaunchConfigs", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	}
@@ -1071,6 +1071,47 @@ func TestScheduleParamsSurvivesAMakeDeploy(t *testing.T) {
 	got, _ = runMerge(t, summary, setReap, toExplicit(set))
 	if got["ScheduleParams"] != "off" {
 		t.Errorf("make deploy SCHEDULE_PARAMS=off sent %q", got["ScheduleParams"])
+	}
+}
+
+// TestLaunchConfigsSurvivesAMakeDeploy is #1359's preservation property, the
+// same shape as TestPoolQueuesSurvivesAMakeDeploy: a stack set to
+// LaunchConfigs=reap keeps it across a `make deploy` that does not mention
+// it, a stack that predates the parameter gets the template default 'report'
+// (an upgrade deletes nothing by itself), and `make deploy
+// LAUNCH_CONFIGS=off` sets it.
+func TestLaunchConfigsSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	setReap := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"LaunchConfigs\",\"ParameterValue\":\"reap\"}\n]", 1)
+	if setReap == liveParams {
+		t.Fatal("could not add LaunchConfigs to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, setReap, toExplicit(plain))
+	if got["LaunchConfigs"] != "reap" {
+		t.Errorf("plain make deploy over a stack with LaunchConfigs=reap sent %q: a deploy that did "+
+			"not mention it changed it", got["LaunchConfigs"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["LaunchConfigs"] != "report" {
+		t.Errorf("a stack predating LaunchConfigs got %q, want the template default 'report': "+
+			"new deletion behaviour must start report-only", got["LaunchConfigs"])
+	}
+
+	set, _ := explicitFromMakefile(t, "LAUNCH_CONFIGS=off")
+	got, _ = runMerge(t, summary, setReap, toExplicit(set))
+	if got["LaunchConfigs"] != "off" {
+		t.Errorf("make deploy LAUNCH_CONFIGS=off sent %q", got["LaunchConfigs"])
 	}
 }
 

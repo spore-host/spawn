@@ -21,9 +21,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spore-host/spawn/pkg/costmodel"
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/instancestate"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/observability"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
@@ -42,6 +44,9 @@ type EC2Provider struct {
 	// (Config.Burst) uses it, to find the local nodes of its job array (#918).
 	registryClient registryQueryAPI
 	registryTable  string
+
+	// launch loads the launch config object once per boot (#1359).
+	launch *launchConfigLoader
 }
 
 // NewEC2Provider creates an EC2 provider
@@ -113,7 +118,13 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 
 	// Load config from tags first to check if tracing is enabled
 	ec2Client := ec2.NewFromConfig(cfg)
-	providerConfig, instanceName, err := loadConfigFromEC2Tags(ctx, ec2Client, instanceID)
+	launch := &launchConfigLoader{
+		s3:        s3.NewFromConfig(cfg),
+		bucket:    launchconfig.Bucket(accountID, region),
+		account:   accountID,
+		cachePath: launchconfig.CachePath,
+	}
+	providerConfig, instanceName, err := loadConfig(ctx, ec2Client, instanceID, launch)
 	if err != nil {
 		log.Printf("Warning: Could not load config from tags: %v", err)
 		providerConfig = &Config{
@@ -147,6 +158,7 @@ func NewEC2Provider(ctx context.Context) (*EC2Provider, error) {
 		// registry table and launches its members.
 		registryClient: dynamodb.NewFromConfig(cfg),
 		registryTable:  HybridRegistryTable,
+		launch:         launch,
 	}, nil
 }
 
@@ -160,8 +172,12 @@ func (p *EC2Provider) GetConfig(ctx context.Context) (*Config, error) {
 
 // RefreshConfig re-reads configuration from EC2 tags and updates the cached config.
 // Called periodically by the agent to pick up tag changes (e.g. spawn extend).
+//
+// The launch config object is not fetched again (#1359): it is fixed at
+// launch, so the copy loaded at boot is reused. Only one that could not be
+// loaded is tried again.
 func (p *EC2Provider) RefreshConfig(ctx context.Context) error {
-	fresh, _, err := loadConfigFromEC2Tags(ctx, p.ec2Client, p.identity.InstanceID)
+	fresh, _, err := loadConfig(ctx, p.ec2Client, p.identity.InstanceID, p.launch)
 	if err != nil {
 		return err
 	}
@@ -626,9 +642,24 @@ func footprintTagWrites(fp CostFootprint, current []types.Tag) [][2]string {
 	return out
 }
 
+// loadConfig is spored's configuration: the instance's tags, then the
+// launch-fixed settings from the launch config object the spawn:config tag
+// names (#1359). launch may be nil (no object is read).
+func loadConfig(ctx context.Context, client *ec2.Client, instanceID string, launch *launchConfigLoader) (*Config, string, error) {
+	cfg, name, tags, err := loadConfigFromEC2Tags(ctx, client, instanceID)
+	if err != nil {
+		return nil, "", err
+	}
+	if launch != nil {
+		launch.apply(ctx, cfg, tags)
+	}
+	return cfg, name, nil
+}
+
 // loadConfigFromEC2Tags loads configuration from EC2 instance tags.
-// It returns the Config and the value of the EC2 Name tag (may be empty).
-func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID string) (*Config, string, error) {
+// It returns the Config, the value of the EC2 Name tag (may be empty), and the
+// tags read.
+func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID string) (*Config, string, []types.TagDescription, error) {
 	output, err := client.DescribeTags(ctx, &ec2.DescribeTagsInput{
 		Filters: []types.Filter{
 			{
@@ -638,14 +669,14 @@ func loadConfigFromEC2Tags(ctx context.Context, client *ec2.Client, instanceID s
 		},
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	config, instanceName := configFromTags(output.Tags)
 
 	// Load plugin declarations written to /etc/spawn/plugins.json by user-data.
 	config.Plugins = loadPluginDeclarations()
 
-	return config, instanceName, nil
+	return config, instanceName, output.Tags, nil
 }
 
 // configFromTags builds spored's Config from the instance's tags, and returns
@@ -668,6 +699,10 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 		switch *tag.Key {
 		case "Name":
 			instanceName = *tag.Value
+		case tagprefix.Tag(launchconfig.TagSuffix):
+			// The launch config object (#1359): the launch-fixed settings,
+			// which have no case here. launchConfigLoader.apply reads them.
+			config.LaunchConfigSHA = *tag.Value
 		case tagprefix.Tag("ttl"):
 			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.TTL = duration
@@ -718,10 +753,6 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			if price, err := strconv.ParseFloat(*tag.Value, 64); err == nil && price > 0 {
 				config.SpotPricePerHour = price
 			}
-		case tagprefix.Tag("idle-cpu"):
-			if cpu, err := strconv.ParseFloat(*tag.Value, 64); err == nil {
-				config.IdleCPUPercent = cpu
-			}
 		case tagprefix.Tag("dns-name"):
 			config.DNSName = *tag.Value
 		case tagprefix.Tag("dns-domain"):
@@ -732,54 +763,13 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			config.AccountBase36 = *tag.Value
 		case tagprefix.Tag("account-name"):
 			config.AccountName = *tag.Value
-		case tagprefix.Tag("notify-url"):
-			config.NotifyURL = *tag.Value
-		case tagprefix.Tag("notify-command"):
-			config.NotifyCommand = *tag.Value
-		case tagprefix.Tag("notify-platform"):
-			config.NotifyPlatform = *tag.Value
-		case tagprefix.Tag("active-ports"):
-			for _, p := range strings.Split(*tag.Value, ",") {
-				p = strings.TrimSpace(p)
-				if port, err := strconv.Atoi(p); err == nil && port > 0 {
-					config.ActivePorts = append(config.ActivePorts, port)
-				}
-			}
-		case tagprefix.Tag("active-processes"):
-			for _, p := range strings.Split(*tag.Value, ",") {
-				if p = strings.TrimSpace(p); p != "" {
-					config.ActiveProcesses = append(config.ActiveProcesses, p)
-				}
-			}
 		case tagprefix.Tag("dcv-session-id"):
 			config.DCVSessionID = *tag.Value
-		case tagprefix.Tag("app-mode"):
-			config.AppMode = *tag.Value
-		case tagprefix.Tag("ready-port"):
-			if port, err := strconv.Atoi(strings.TrimSpace(*tag.Value)); err == nil {
-				config.ReadyPort = port
-			}
-		case tagprefix.Tag("ready-path"):
-			config.ReadyHealthPath = *tag.Value
-		case tagprefix.Tag("web-auth"):
-			config.WebAuth = *tag.Value
-		case tagprefix.Tag("slack-workspace-id"):
-			config.SlackWorkspaceID = *tag.Value
 		case tagprefix.Tag("pre-stop"):
 			config.PreStop = *tag.Value
 		case tagprefix.Tag("pre-stop-timeout"):
 			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.PreStopTimeout = duration
-			}
-		case tagprefix.Tag("spot-webhook-url"):
-			config.SpotWebhookURL = *tag.Value
-		case tagprefix.Tag("completion-webhook-url"):
-			config.CompletionWebhookURL = *tag.Value
-		case tagprefix.Tag("webhook-correlation"):
-			config.WebhookCorrelation = *tag.Value
-		case tagprefix.Tag("webhook-timeout"):
-			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
-				config.WebhookTimeout = duration
 			}
 		case tagprefix.Tag("local-username"):
 			config.LocalUsername = *tag.Value
@@ -817,25 +807,10 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 		// Observability - Metrics
 		case tagprefix.Tag("metrics-enabled"):
 			config.Observability.Metrics.Enabled = *tag.Value == "true"
-		case tagprefix.Tag("metrics-port"):
-			if port, err := strconv.Atoi(*tag.Value); err == nil && port >= 1024 && port <= 65535 {
-				config.Observability.Metrics.Port = port
-			}
-		case tagprefix.Tag("metrics-bind"):
-			config.Observability.Metrics.Bind = *tag.Value
-		case tagprefix.Tag("metrics-path"):
-			config.Observability.Metrics.Path = *tag.Value
 
 		// Observability - Tracing
-		case tagprefix.Tag("tracing-enabled"):
-			config.Observability.Tracing.Enabled = *tag.Value == "true"
-		case tagprefix.Tag("tracing-exporter"):
-			config.Observability.Tracing.Exporter = *tag.Value
-		case tagprefix.Tag("tracing-sampling"):
-			if rate, err := strconv.ParseFloat(*tag.Value, 64); err == nil {
-				config.Observability.Tracing.SamplingRate = rate
-			}
 		case tagprefix.Tag("tracing-endpoint"):
+			// No launch writes this; a tag a user may set by hand.
 			config.Observability.Tracing.Endpoint = *tag.Value
 		}
 	}

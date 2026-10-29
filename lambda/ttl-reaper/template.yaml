@@ -262,6 +262,32 @@ Parameters:
       and spec grants; until then the run summary counts the account in
       pool_queues_accounts_denied.
 
+  LaunchConfigs:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      The launch config object sweep (#1359). A launch that sets a spored
+      setting fixed at launch (notifications, webhooks, active ports or
+      processes, a web app, idle CPU, metrics or tracing details) stores it
+      as launch-config/config-<sha256>.json in the account's
+      spawn-staging-<account>-<region> bucket and tags the instance
+      spawn:config=<sha256>. In each of Regions, per member account, after
+      the instance reaps, the sweep deletes such an object only when all
+      hold: no instance in the region, pending through stopped, and no Spot
+      request in it that is open, active or disabled, carries its
+      spawn:config; and it was last written over 24 hours ago, checked again
+      just before the delete. If the instances or Spot requests cannot be
+      read, nothing in that region is deleted. The staging bucket's 30-day
+      lifecycle rule is the backstop for regions not in Regions. 'report'
+      (default) logs 'WOULD delete launch config object ...' for exactly what
+      'reap' would delete and changes nothing: this is new deletion
+      behaviour, so it starts report-only. 'reap' deletes. 'off' skips it. An
+      unrecognised value resolves to 'report'. DryRun always wins. The member
+      accounts' role stack (ttl-reaper-cross-account-role.yaml) must be
+      redeployed for the grants; until then the run summary counts the
+      account-region in launch_configs_accounts_denied.
+
   ScheduleParams:
     Type: String
     Default: 'report'
@@ -457,6 +483,7 @@ Resources:
           REAPER_INSTANCE_ROLES: !Ref InstanceRoles
           REAPER_POOL_QUEUES: !Ref PoolQueues
           REAPER_SCHEDULE_PARAMS: !Ref ScheduleParams
+          REAPER_LAUNCH_CONFIGS: !Ref LaunchConfigs
           REAPER_EMPTY_BUCKETS: !Ref EmptyBuckets
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
@@ -696,6 +723,21 @@ Resources:
                   Action:
                     - s3:DeleteObject
                   Resource: 'arn:aws:s3:::spawn-results-*/staging/pool-specs/*'
+                # #1359 launch config object sweep (LaunchConfigs): list the
+                # staging buckets under launch-config/ only (their task
+                # bootstrap objects stay unlistable, #1274), and delete a
+                # config object, nothing else in them.
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                  Resource: 'arn:aws:s3:::spawn-staging-*'
+                  Condition:
+                    StringLike:
+                      s3:prefix: 'launch-config/*'
+                - Effect: Allow
+                  Action:
+                    - s3:DeleteObject
+                  Resource: 'arn:aws:s3:::spawn-staging-*/launch-config/config-*.json'
             - !Ref AWS::NoValue
         # DNS teardown (#247): delete a reaped instance's Route53 records, since
         # spored's graceful DeleteDNS never ran. Scoped to the single configured

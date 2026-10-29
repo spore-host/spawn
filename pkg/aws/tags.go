@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/ttl"
 )
@@ -48,7 +49,8 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	//   1. Base identity (always present): managed/root/created-by/version/account/iam-user.
 	//   2. Naming & DNS: Name, account-name alias, dns-name.
 	//   3. Lifecycle: launch-time, ttl(+deadline), idle-timeout, on-complete, pre-stop, hibernation.
-	//   4. Notifications & activity signals: slack/notify-*, active-ports/processes.
+	//   4. Activity and app signals that stay tags; the launch-fixed spored
+	//      settings go into the launch config object (spawn:config, #1359).
 	//   5. Storage: FSx/EFS mount metadata.
 	//   6. Job-array / sweep: array id/name/index and per-run parameters.
 	//   7. User-supplied custom tags (appended last).
@@ -144,23 +146,21 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	}
 
 	// --- Section 4: notifications & activity signals ---
-	if config.SlackWorkspaceID != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:slack-workspace-id"), Value: aws.String(config.SlackWorkspaceID)})
+	// The spored settings a launch fixes (notifications, activity signals,
+	// webhooks, the web-app proxy, idle CPU, metrics and tracing details) are
+	// not tags: they are the launch config object, named by spawn:config
+	// (#1359, pkg/launchconfig). Client.Launch stores it before RunInstances.
+	if err := config.ValidateSporedSettings(); err != nil {
+		return nil, err
 	}
-	if config.NotifyURL != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:notify-url"), Value: aws.String(config.NotifyURL)})
+	settings, err := launchConfigSettings(config)
+	if err != nil {
+		return nil, err
 	}
-	if config.NotifyCommand != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:notify-command"), Value: aws.String(config.NotifyCommand)})
-	}
-	if config.NotifyPlatform != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:notify-platform"), Value: aws.String(config.NotifyPlatform)})
-	}
-	if config.ActivePortsRaw != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:active-ports"), Value: aws.String(config.ActivePortsRaw)})
-	}
-	if config.ActiveProcessesRaw != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:active-processes"), Value: aws.String(config.ActiveProcessesRaw)})
+	if _, sha, err := launchconfig.Encode(settings); err != nil {
+		return nil, err
+	} else if sha != "" {
+		tags = append(tags, types.Tag{Key: aws.String(launchconfig.Tag), Value: aws.String(sha)})
 	}
 	// The command rides the spawn:command tag only when it fits EC2's 256-char
 	// tag-value cap. A longer --command is delivered via user-data instead (the
@@ -175,19 +175,6 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	}
 	if config.AppName != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:app-name"), Value: aws.String(config.AppName)})
-	}
-	// Web-UI app mode (#590): spored probes ReadyPort + fronts it with a TLS proxy.
-	if config.AppMode != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:app-mode"), Value: aws.String(config.AppMode)})
-	}
-	if config.ReadyPort > 0 {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:ready-port"), Value: aws.String(strconv.Itoa(config.ReadyPort))})
-	}
-	if config.ReadyHealthPath != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:ready-path"), Value: aws.String(config.ReadyHealthPath)})
-	}
-	if config.WebAuth != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:web-auth"), Value: aws.String(config.WebAuth)})
 	}
 
 	// --- Section 5: storage ---
@@ -295,38 +282,6 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		}
 	}
 
-	// Spot-interruption webhook (#228): only tagged when a URL is set (opt-in).
-	// The correlation blob and timeout are companions, meaningful only with a URL.
-	if config.SpotInterruptionWebhookURL != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:spot-webhook-url"), Value: aws.String(config.SpotInterruptionWebhookURL)})
-		if config.WebhookCorrelation != "" {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-correlation"), Value: aws.String(config.WebhookCorrelation)})
-		}
-		if config.WebhookTimeout != "" {
-			v, err := lifecycleDurationTag("webhook-timeout", config.WebhookTimeout)
-			if err != nil {
-				return nil, err
-			}
-			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(v)})
-		}
-	}
-
-	// Completion webhook (#497): only tagged when a URL is set (opt-in). Shares
-	// spawn:webhook-correlation/spawn:webhook-timeout with the spot webhook above.
-	if config.CompletionWebhookURL != "" {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:completion-webhook-url"), Value: aws.String(config.CompletionWebhookURL)})
-		if config.WebhookCorrelation != "" {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-correlation"), Value: aws.String(config.WebhookCorrelation)})
-		}
-		if config.WebhookTimeout != "" {
-			v, err := lifecycleDurationTag("webhook-timeout", config.WebhookTimeout)
-			if err != nil {
-				return nil, err
-			}
-			tags = append(tags, types.Tag{Key: aws.String("spawn:webhook-timeout"), Value: aws.String(v)})
-		}
-	}
-
 	// Record the instance's primary user so spored can run the pre-stop hook as
 	// that user rather than root (#63). Tagged whenever known.
 	if config.Username != "" {
@@ -344,36 +299,11 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		tags = append(tags, types.Tag{Key: aws.String("spawn:cost-limit"), Value: aws.String(fmt.Sprintf("%.4f", config.CostLimit))})
 	}
 
-	// spored settings it reads at boot and nothing else could set (#1308): the
-	// idle CPU threshold, and metrics and tracing. Refused rather than written
-	// when spored would ignore them.
-	if err := config.ValidateSporedSettings(); err != nil {
-		return nil, err
-	}
-	if config.IdleCPUPercent > 0 {
-		tags = append(tags, types.Tag{Key: aws.String("spawn:idle-cpu"), Value: aws.String(strconv.FormatFloat(config.IdleCPUPercent, 'f', -1, 64))})
-	}
-	if obs := config.Observability; obs.MetricsEnabled {
+	// --metrics (#1308). Its port, bind address and path are in the launch
+	// config object; the switch itself stays a tag because Prometheus' EC2
+	// service discovery filters on it (deployment/prometheus/prometheus.yaml).
+	if config.Observability.MetricsEnabled {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-enabled"), Value: aws.String("true")})
-		if obs.MetricsPort != 0 {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-port"), Value: aws.String(strconv.Itoa(obs.MetricsPort))})
-		}
-		if obs.MetricsBind != "" {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-bind"), Value: aws.String(obs.MetricsBind)})
-		}
-		if obs.MetricsPath != "" {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:metrics-path"), Value: aws.String(obs.MetricsPath)})
-		}
-	}
-	if obs := config.Observability; obs.TracingEnabled {
-		// The exporter is always written: spored's own default is xray, which
-		// the instance role cannot reach (SporedObservability.TracingExporter).
-		tags = append(tags,
-			types.Tag{Key: aws.String("spawn:tracing-enabled"), Value: aws.String("true")},
-			types.Tag{Key: aws.String("spawn:tracing-exporter"), Value: aws.String(TracingExporterStdout)})
-		if obs.TracingSampling != nil {
-			tags = append(tags, types.Tag{Key: aws.String("spawn:tracing-sampling"), Value: aws.String(strconv.FormatFloat(*obs.TracingSampling, 'f', -1, 64))})
-		}
 	}
 
 	// Session management
@@ -401,9 +331,9 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 
 	// Dedupe everything the sections above appended, keeping the first
 	// occurrence. EC2 rejects the entire RunInstances call on a repeated key
-	// ("Duplicate tag key '<k>' specified"), and the spot-interruption and
-	// completion webhook blocks both emit spawn:webhook-correlation and
-	// spawn:webhook-timeout — so setting both URLs failed the launch with two
+	// ("Duplicate tag key '<k>' specified"); the spot-interruption and
+	// completion webhook blocks both used to emit spawn:webhook-correlation and
+	// spawn:webhook-timeout, so setting both URLs failed the launch with two
 	// flags. Done as a pass here rather than by threading appendTagUnique through
 	// every section, so a future section cannot forget to use it.
 	tags = dedupeTags(tags)

@@ -182,15 +182,25 @@ func TaskRunPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string
 const stagedFilesSHA256Len = 64
 
 // StagedFilesKey is the key, in the staging bucket, of a task's staged command
-// and flush hook (#1274): <task_id>/bootstrap-<sha256>.sh.
+// and flush hook (#1274): bootstrap/<task_id>/bootstrap-<sha256>.sh.
+//
+// Under StagedFilesRoot since v0.150.0 (#1359) so the staging bucket's one-day
+// lifecycle rule can be scoped to these objects and leave the launch config
+// objects beside them alone. A spawn before that staged them at
+// <task_id>/bootstrap-<sha256>.sh, which the bucket's backstop rule expires.
 func StagedFilesKey(taskID, sha256Hex string) string {
 	return StagedFilesKeyPrefix(taskID) + sha256Hex + ".sh"
 }
 
+// StagedFilesRoot is the prefix every staged task object is under. It must
+// equal pkg/aws.StagingBootstrapPrefix, the prefix of the bucket's one-day
+// lifecycle rule (TestStagedFilesLiveUnderTheOneDayRule).
+const StagedFilesRoot = "bootstrap/"
+
 // StagedFilesKeyPrefix is what every staged object key of taskID starts with,
 // for clearing a previous attempt's.
 func StagedFilesKeyPrefix(taskID string) string {
-	return taskID + "/bootstrap-"
+	return StagedFilesRoot + taskID + "/bootstrap-"
 }
 
 // StagedFilesResources are the object ARNs a task's role may GetObject for its

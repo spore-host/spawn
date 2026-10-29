@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`REAPER_LAUNCH_CONFIGS`: the deleter of the launch config objects**
+  (#1359). Per scanned region, after the instance reaps, the TTL reaper
+  deletes `launch-config/config-<sha256>.json` from
+  `spawn-staging-<account>-<region>` once no instance (pending through
+  stopped) and no open, active or disabled Spot request in the region carries
+  its `spawn:config`, and it was last written over 24 hours ago, checked again
+  for that key just before the delete. If the instances or Spot requests
+  cannot be read, nothing in that region is deleted. `off|report|reap`, unset
+  is `report`: template parameter `LaunchConfigs`, make variable
+  `LAUNCH_CONFIGS`, `spawn reaper deploy --launch-configs`; a deploy that does
+  not name it keeps the deployed value. New reaper grants (pkg/reaperiam, the
+  SAM ScanSelf branch, `ttl-reaper-cross-account-role.yaml`): `s3:ListBucket`
+  on `spawn-staging-*` conditioned on `s3:prefix` `launch-config/*`, so the task
+  bootstrap objects stay unlistable, and `s3:DeleteObject` on
+  `spawn-staging-*/launch-config/config-*.json`. The member role stack must be
+  redeployed; until then the run counts the account in
+  `launch_configs_accounts_denied`.
+
+### Changed
+
+- **spored's launch-fixed settings are a per-launch config object, not
+  instance tags** (#1359). The settings only spored reads, at boot, and
+  nothing changes after launch, 21 of them (`notify-url`, `notify-command`,
+  `notify-platform`, `slack-workspace-id`, `active-ports`, `active-processes`,
+  `app-mode`, `ready-port`, `ready-path`, `web-auth`, `spot-webhook-url`,
+  `completion-webhook-url`, `webhook-correlation`, `webhook-timeout`,
+  `idle-cpu`, `metrics-port`, `metrics-bind`, `metrics-path`,
+  `tracing-enabled`, `tracing-exporter`, `tracing-sampling`), are written as
+  one JSON object, content-addressed at
+  `launch-config/config-<sha256>.json` in the account's staging bucket for the
+  launch region, and the instance carries one tag, `spawn:config=<sha256>`.
+  spored fetches it once at first boot, refuses it unless it hashes to the
+  tag, and caches it at `/etc/spawn/launch-config.json` (0600); a reboot,
+  stop/start or `spored reload` never fetches again. Everything `spawn
+  extend` or `spored config set` edits, spored's runtime tags, and every key
+  the reaper, a Lambda, `list`/`status`/`connect`/`cost`, the dashboard,
+  Prometheus' EC2 discovery (`spawn:metrics-enabled`) or the sweep and
+  job-array machinery reads stays a tag. A maximal launch carries 46 tags
+  (66 before, and refused), the #1336 maximal-plus-#1308 launch 41 (55); the
+  webhook and notify URLs are no longer readable account-wide through
+  `ec2:DescribeTags`. It is a same-version contract: a spawn from this release
+  installs a spored that reads the object and never these tags; an older
+  spawn keeps writing tags for its older spored. A launch that sets none of
+  the 21 has no object and makes no S3 call. A launch that does set one now
+  makes sure the staging bucket exists, as `spawn task run` did, and is
+  refused if the object cannot be stored; `docs/reference/cli-iam-actions.md`
+  lists the S3 actions that adds to `spawn launch` and the other launch
+  commands. spored grants (every spored role, provisioned by spawn):
+  `s3:GetObject` on `spawn-staging-<account>-*/launch-config/config-<64
+  hex>.json` only; a `--nested-spawn` role gets `s3:PutObject` on the same
+  keys. A detached sweep's member, launched by the sweep-orchestrator Lambda,
+  gets the object seeded into spored's cache by its user data instead (+269
+  gzip bytes for a typical object); a detached Windows member with any of
+  these settings is refused. When an instance names an object spored cannot
+  load, `spored status` says so, spored takes no idle action until it loads
+  (an unread `--active-ports` must not let an instance in use look idle), and
+  every config refresh tries again; TTL, cost limit and completion, which are
+  tags, are enforced as ever. A persistent Spot request's replacement reads
+  its original's notification settings from the object the request's
+  `spawn:config` names. API: `aws.LaunchConfigObject`,
+  `aws.StagingBootstrapPrefix`, `aws.StagingBackstopRuleID`,
+  `launcher.BootstrapConfig.LaunchConfig`, `launcher.BootstrapConfig.ReadsLaunchConfig`.
+- **The staging bucket's lifecycle is two rules** (#1359): a task's staged
+  bootstrap, now at `bootstrap/<task_id>/bootstrap-<sha256>.sh`, still
+  expires after a day (`spawn-staging-expire-1d`, now scoped to `bootstrap/`),
+  and every other object, the launch config objects among them, after 30 days
+  (`spawn-staging-expire-backstop`), past the reaper's 7-day max-age ceiling.
+  A spawn before this release re-applies its own one-day rule over the whole
+  bucket when it next runs a task there; while that is in force, a launch
+  config object over a day old expires, which only a persistent Spot
+  replacement (fresh root volume) misses; the next launch by this spawn
+  restores both rules.
+- **The unversioned latest spored is frozen at v0.149.0; dev builds install
+  from `spawn/current/`** (#1419). The release workflow no longer writes
+  `spawn/spored-*` or the bucket-root `spored-*` in the spawn-binaries buckets:
+  they stay at v0.149.0, the last spored that reads the launch-fixed settings
+  from tags, because spawn releases before v0.149.0 install them (#1412 pinned
+  only later releases), so those CLIs keep a spored that reads what they write.
+  Its "Update the current spored" step writes `spawn/current/spored-*` (with
+  `.sha256` and `.sig`) instead, under the same gates: GoReleaser's spored
+  matches the published one, and the GitHub release is published. A dev build
+  of spawn installs from `spawn/current/`, regional then us-east-1; before the
+  first release that writes it, it falls back to the frozen `spawn/`, unless
+  the launch has a launch config object, which that spored would ignore: then
+  the install is refused and the instance retires, saying why. A release
+  build's user data is unchanged. `scripts/install-spored.ps1` (no launching
+  spawn) installs `spawn/current/`, then the frozen copy. The release role
+  (`GitHubActions-spore-host-release`) needs `s3:PutObject` on
+  `arn:aws:s3:::spawn-binaries-*/spawn/current/spored-*` before v0.150.0 is
+  tagged.
+- **`spawn upgrade-spored` refuses to cross v0.150.0 where it would strand
+  the launch settings** (#1359): a v0.150.0+ spored on an instance launched by
+  an older spawn that carries them as tags (it does not read them there; pin
+  `--version` to the instance's `spawn:version`), and an older spored on an
+  instance whose settings are in a launch config object.
+
 ## [0.149.0] - 2026-10-29
 
 ### Added

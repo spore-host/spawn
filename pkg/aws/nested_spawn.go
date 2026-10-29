@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/spore-host/spawn/pkg/launchconfig"
 )
 
 // Nested spawn (#39): `spawn launch --nested-spawn` gives the instance an IAM
@@ -223,6 +225,17 @@ func nestedSpawnStatements() []interface{} {
 			"Effect":   "Allow",
 			"Action":   "ssm:StartSession",
 			"Resource": "arn:aws:ssm:*:*:document/SSM-SessionManagerRunShell",
+		},
+		// The launch config object of a child that has one (#1359): written to
+		// the account's staging buckets under launch-config/ only, so a nested
+		// spore can neither read another task's staged bootstrap nor write
+		// anything else there. The bucket itself is created and configured by
+		// a workstation launch; a nested spore does not get those grants.
+		map[string]interface{}{
+			"Sid":      "NestedSpawnStoreLaunchConfig",
+			"Effect":   "Allow",
+			"Action":   "s3:PutObject",
+			"Resource": launchconfig.ObjectARNPattern(acct),
 		},
 		// PassRole to EC2 only, and only the roles spawn makes: the shared
 		// default identity and the per-task family (which includes this role, so

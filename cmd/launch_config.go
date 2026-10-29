@@ -608,6 +608,12 @@ func spawnPublicKeyForUserData(plat *platform.Platform, keyName string) ([]byte,
 // If it ever does, gate that start on `spored is-spot-replacement` exiting 0, as
 // the Linux bootstrap does (#1007), or a Spot replacement will re-run it.
 func buildWindowsUserData(authorizedKey string) (string, error) {
+	return buildWindowsUserDataFor(authorizedKey, false)
+}
+
+// buildWindowsUserDataFor is buildWindowsUserData for a launch that has, or
+// has not, a launch config object (#1359, #1419).
+func buildWindowsUserDataFor(authorizedKey string, readsLaunchConfig bool) (string, error) {
 	// authorizedKey is an authorized_keys line (e.g. "ssh-rsa AAAA... spawn").
 	// Guard against breaking out of the PowerShell here-string.
 	if strings.Contains(authorizedKey, "\"@") || strings.Contains(authorizedKey, "@\"") {
@@ -708,7 +714,7 @@ __SPORED_WINDOWS_VERIFIED_INSTALL__
 	// format string, and a percent sign in it (PowerShell's ForEach-Object alias) would be
 	// read as a verb.
 	// The spored of this spawn's own release (#1412), as the Linux bootstrap.
-	install, err := sporedinstall.WindowsInstallScript(sporedinstall.SigningKeyPEM, launcher.SporedVersion())
+	install, err := sporedinstall.WindowsInstallScriptFor(sporedinstall.SigningKeyPEM, launcher.SporedVersion(), readsLaunchConfig)
 	if err != nil {
 		return "", fmt.Errorf("build the Windows spored install: %w", err)
 	}
@@ -818,11 +824,26 @@ func userDataOSGuard(config *aws.LaunchConfig) error {
 // already resolved; an empty key is a keyless (SSM-only) instance. The caller
 // has run userDataOSGuard.
 func buildUserDataForKey(plat *platform.Platform, config *aws.LaunchConfig, publicKey []byte, storageScript string, readyMountPoints []string) (string, error) {
+	return buildUserDataSeeded(plat, config, publicKey, storageScript, readyMountPoints, nil)
+}
+
+// buildUserDataSeeded is buildUserDataForKey with the launch's config object
+// seeded into the instance's cache of it (launcher.BootstrapConfig.LaunchConfig,
+// #1359): only a detached sweep's member, which the CLI cannot store an object
+// for, passes one.
+func buildUserDataSeeded(plat *platform.Platform, config *aws.LaunchConfig, publicKey []byte, storageScript string, readyMountPoints []string, launchConfig []byte) (string, error) {
 	// Windows uses a completely different bootstrap: EC2Launch runs a
 	// <powershell> block, not bash. It installs SSH and spored and nothing else;
 	// the workload inputs were refused above (#1022).
+	// A launch with a launch config object (#1359) needs a spored that reads
+	// it: a dev build of spawn must not fall back to the frozen one (#1419).
+	object, _, err := aws.LaunchConfigObject(*config)
+	if err != nil {
+		return "", err
+	}
+	readsLaunchConfig := object != nil
 	if config.TargetOS == "windows" {
-		return buildWindowsUserData(string(publicKey))
+		return buildWindowsUserDataFor(string(publicKey), readsLaunchConfig)
 	}
 
 	username := plat.GetUsername()
@@ -865,7 +886,9 @@ func buildUserDataForKey(plat *platform.Platform, config *aws.LaunchConfig, publ
 		// embeddedCommand.
 		Command: embeddedCommand(config),
 		// The --command wrapper must write the file spored watches (#1131).
-		CompletionFile: config.CompletionFile,
+		CompletionFile:    config.CompletionFile,
+		LaunchConfig:      launchConfig,
+		ReadsLaunchConfig: readsLaunchConfig,
 	})
 }
 

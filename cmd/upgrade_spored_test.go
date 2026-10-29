@@ -3,6 +3,8 @@ package cmd
 import (
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/launchconfig"
 )
 
 func TestCompareVersions(t *testing.T) {
@@ -98,6 +100,37 @@ func TestUpgradeSporedDefaultsToThisSpawnsVersion(t *testing.T) {
 	for _, bad := range []string{"latest", "0.1", "0.1.0'; reboot; '", "0.1.0-rc1"} {
 		if _, err := upgradeSporedTarget(bad, "0.148.0"); err == nil {
 			t.Errorf("--version %q was accepted; it names no published spored", bad)
+		}
+	}
+}
+
+// #1359: an upgrade that would leave an instance's launch-fixed settings
+// where the target spored does not read them is refused, in both directions;
+// one with nothing in the other place goes ahead.
+func TestUpgradeSporedRefusesToStrandLaunchSettings(t *testing.T) {
+	first := launchconfig.FirstSporedVersion
+	tagsOnly := map[string]string{"spawn:managed": "true", "spawn:version": "0.149.0", "spawn:notify-url": "https://n", "spawn:active-ports": "8888"}
+	object := map[string]string{"spawn:managed": "true", "spawn:version": first, launchconfig.Tag: strings.Repeat("a", 64)}
+	plain := map[string]string{"spawn:managed": "true", "spawn:version": "0.149.0", "spawn:ttl": "1h"}
+	for _, tc := range []struct {
+		name, target string
+		tags         map[string]string
+		refuse       string
+	}{
+		{"tags-only instance, new spored", first, tagsOnly, "--version 0.149.0"},
+		{"tags-only instance, later spored", "0.151.2", tagsOnly, "spawn:active-ports, spawn:notify-url"},
+		{"tags-only instance, old spored", "0.149.0", tagsOnly, ""},
+		{"object instance, new spored", "0.151.0", object, ""},
+		{"object instance, old spored", "0.149.0", object, "does not read"},
+		{"nothing to strand, new spored", first, plain, ""},
+		{"nothing to strand, old spored", "0.148.0", plain, ""},
+	} {
+		err := launchConfigUpgradeGuard(tc.tags, tc.target)
+		switch {
+		case tc.refuse == "" && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		case tc.refuse != "" && (err == nil || !strings.Contains(err.Error(), tc.refuse)):
+			t.Errorf("%s: err = %v, want a refusal mentioning %q", tc.name, err, tc.refuse)
 		}
 	}
 }

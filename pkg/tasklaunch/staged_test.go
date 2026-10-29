@@ -187,7 +187,7 @@ func TestLargeTaskLaunchesWithinBudgetWhenStaged(t *testing.T) {
 	if st.URI != "s3://"+testStagingBucket+"/"+wantKey {
 		t.Errorf("staged URI = %s, want s3://%s/%s", st.URI, testStagingBucket, wantKey)
 	}
-	if !strings.HasPrefix(wantKey, spec.TaskID+"/bootstrap-") {
+	if !strings.HasPrefix(wantKey, taskiam.StagedFilesRoot+spec.TaskID+"/bootstrap-") {
 		t.Errorf("staged key %s is not under the task_id", wantKey)
 	}
 	if len(store.puts) != 1 {
@@ -263,7 +263,7 @@ func TestStagingClearsAPreviousAttemptsObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if len(store.listed) != 1 || store.listed[0] != spec.TaskID+"/bootstrap-" || !containsString(store.calls, "list "+testStagingBucket+"/"+spec.TaskID+"/bootstrap-") {
+	if len(store.listed) != 1 || store.listed[0] != taskiam.StagedFilesKeyPrefix(spec.TaskID) || !containsString(store.calls, "list "+testStagingBucket+"/"+taskiam.StagedFilesKeyPrefix(spec.TaskID)) {
 		t.Errorf("listed %v, want the task's own bootstrap- prefix in the staging bucket", store.calls)
 	}
 	_ = res

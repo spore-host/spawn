@@ -41,6 +41,8 @@ const SporedInstanceProfileName
 const SporedMemoryFloorMiB int64
 const SporedRoleName
 const SpotPriceTag
+const StagingBackstopRuleID
+const StagingBootstrapPrefix
 const StagingLifecycleRuleID
 const StagingObjectExpiryDays
 const TracingExporterStdout
@@ -602,6 +604,7 @@ func IsOrphanedSpawnAddress(r ManagedResource) bool
 func IsSharedSporedIdentity(r ManagedResource) bool
 func IsSpawnAllocatedAddress(r ManagedResource) bool
 func IsSpawnManagedAMI(ami AMIInfo) bool
+func LaunchConfigObject(lc LaunchConfig) (body []byte, sha string, err error)
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag
 func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
 func NeedsLaunchElasticIP(interfaces []types.InstanceNetworkInterfaceSpecification) bool
@@ -707,8 +710,10 @@ field BootstrapConfig.CompletionFile string
 field BootstrapConfig.ContainerScript string
 field BootstrapConfig.CustomUserData string
 field BootstrapConfig.InlineBody bool
+field BootstrapConfig.LaunchConfig []byte
 field BootstrapConfig.Plugins []plugin.Declaration
 field BootstrapConfig.PublicKey []byte
+field BootstrapConfig.ReadsLaunchConfig bool
 field BootstrapConfig.ReadyGates []string
 field BootstrapConfig.ReadyMountPoints []string
 field BootstrapConfig.StagedFiles *StagedFiles

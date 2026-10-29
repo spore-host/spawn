@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/spore-host/spawn/internal/treewalk"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/reaperiam"
 )
 
@@ -104,11 +105,14 @@ const reaperPolicyFile = "../../pkg/reaperiam/reaperiam.go"
 
 // TestReaperPolicyCannotListOrReadTheStagingBucket is the structural half for
 // the reaper's policy: a statement whose resource reaches the staging bucket
-// or an object in it may grant no list and no object read (#1274), and nothing
-// broader than the actions it names.
+// or an object in it may grant no object read and no list of the task
+// bootstrap objects (#1274), and nothing broader than the actions it names.
+// The one list it may hold is the launch config sweep's (#1359), conditioned
+// on s3:prefix under launch-config/, which no bootstrap key is under.
 func TestReaperPolicyCannotListOrReadTheStagingBucket(t *testing.T) {
 	targets := []string{
 		"arn:aws:s3:::spawn-staging-123456789012-us-east-1",
+		"arn:aws:s3:::spawn-staging-123456789012-us-east-1/" + StagedFilesKey("t1", strings.Repeat("a", 64)),
 		"arn:aws:s3:::spawn-staging-123456789012-us-east-1/t1/bootstrap-" + strings.Repeat("a", 64) + ".sh",
 	}
 	reaching := 0
@@ -124,6 +128,9 @@ func TestReaperPolicyCannotListOrReadTheStagingBucket(t *testing.T) {
 		}
 		reaching++
 		for _, a := range st.Action {
+			if a == "s3:ListBucket" && listsOnlyLaunchConfigs(st.Condition) {
+				continue
+			}
 			if strings.Contains(a, "*") || strings.HasPrefix(a, "s3:List") || strings.HasPrefix(a, "s3:GetObject") {
 				t.Errorf("the reaper is granted %s on %s, which reaches the staging bucket: no spawn role may list it or read an object in it", a, st.Resource)
 			}
@@ -155,4 +162,15 @@ func arnGlob(pattern, s string) bool {
 		return s != "" && arnGlob(pattern[1:], s[1:])
 	}
 	return s != "" && s[0] == pattern[0] && arnGlob(pattern[1:], s[1:])
+}
+
+// listsOnlyLaunchConfigs reports whether cond limits a list to s3:prefix
+// values under launchconfig.KeyPrefix, which StagedFilesRoot is not under.
+func listsOnlyLaunchConfigs(cond interface{}) bool {
+	c, ok := cond.(map[string]map[string]string)
+	if !ok || len(c) != 1 || len(c["StringLike"]) != 1 {
+		return false
+	}
+	p, ok := c["StringLike"]["s3:prefix"]
+	return ok && strings.HasPrefix(p, launchconfig.KeyPrefix) && !strings.HasPrefix(StagedFilesRoot, launchconfig.KeyPrefix)
 }

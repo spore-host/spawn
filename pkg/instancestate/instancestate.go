@@ -83,6 +83,10 @@ var Paths = []string{
 	"/etc/spawn/task-flush.sh",
 	// What the bootstrap stub fetched for the launch.
 	"/etc/spawn/staged-files.sh",
+	// The cached launch config object (#1359): the source launch's webhook and
+	// notify URLs among it. spored also refuses a cache that does not hash to
+	// this instance's own spawn:config tag; this removes it before it is read.
+	"/etc/spawn/launch-config.json",
 	"/etc/spawn/bootstrap-body.sh",
 }
 

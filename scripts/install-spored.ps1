@@ -100,8 +100,9 @@ $tmp = Join-Path $env:TEMP ('spored-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $bucket = "spawn-binaries-$region"
 $sources = @(
+  @{ u = "s3://$bucket/spawn/current/spored-windows-amd64.exe"; r = $region },
+  @{ u = 's3://spawn-binaries-us-east-1/spawn/current/spored-windows-amd64.exe'; r = 'us-east-1' },
   @{ u = "s3://$bucket/spawn/spored-windows-amd64.exe"; r = $region },
-  @{ u = "s3://$bucket/spored-windows-amd64.exe"; r = $region },
   @{ u = 's3://spawn-binaries-us-east-1/spawn/spored-windows-amd64.exe'; r = 'us-east-1' }
 )
 foreach ($src in $sources) {

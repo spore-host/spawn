@@ -228,9 +228,11 @@ func ScanSelfStatements() []Statement {
 			// only an empty, spawn-tagged bucket named exactly for the account
 			// and region, every call naming the account as the expected owner.
 			//
-			// The staging bucket gets no list action at all: no role spawn
-			// makes may list it (#1274), so the sweep never does, and S3's
-			// refusal to delete a non-empty bucket is its emptiness check.
+			// The staging bucket gets no unconditioned list action: no role
+			// spawn makes may list its task bootstrap objects (#1274), so the
+			// sweep never does, and S3's refusal to delete a non-empty bucket
+			// is its emptiness check. (The launch config sweep below lists
+			// launch-config/ only.)
 			Effect:   "Allow",
 			Action:   StagingBucketSweepActions(),
 			Resource: "arn:aws:s3:::spawn-staging-*",
@@ -395,7 +397,39 @@ func ScanSelfStatements() []Statement {
 			Action:   []string{"s3:DeleteObject"},
 			Resource: PoolSpecsARN,
 		},
+		{
+			// The launch config object sweep (#1359, pkg/launchconfig):
+			// listing the staging buckets, but only under launch-config/. The
+			// condition is what keeps the task bootstrap objects beside them
+			// (bootstrap/...) unlistable, as they are to every other role
+			// (#1274): their keys are their secret.
+			Effect:    "Allow",
+			Action:    []string{"s3:ListBucket"},
+			Resource:  StagingBucketARN,
+			Condition: LaunchConfigListCondition,
+		},
+		{
+			// And deleting a config object, nothing else in the bucket. The
+			// sweep deletes only one no instance or Spot request in its
+			// region references, written over a day ago.
+			Effect:   "Allow",
+			Action:   []string{"s3:DeleteObject"},
+			Resource: LaunchConfigObjectARN,
+		},
 	}
+}
+
+// StagingBucketARN is spawn's staging buckets themselves.
+const StagingBucketARN = "arn:aws:s3:::spawn-staging-*"
+
+// LaunchConfigObjectARN is the only staging-bucket object the reaper may
+// delete: a launch config object (#1359, pkg/launchconfig.Key). It reads none.
+const LaunchConfigObjectARN = "arn:aws:s3:::spawn-staging-*/launch-config/config-*.json"
+
+// LaunchConfigListCondition limits the sweep's s3:ListBucket on the staging
+// buckets to keys under launch-config/ (the s3:prefix the sweep sends).
+var LaunchConfigListCondition = map[string]map[string]string{
+	"StringLike": {"s3:prefix": "launch-config/*"},
 }
 
 // ScheduleReferenceStatements are what the per-task role sweep needs to know

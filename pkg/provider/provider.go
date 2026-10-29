@@ -68,8 +68,24 @@ type Config struct {
 	// rendering an absent value as a resolved one (e.g. "TTL: none — instance
 	// will not auto-terminate" when the truth is "TTL: could not be read").
 	ConfigLoadError string
-	ComputeSeconds  int64   // accumulated compute seconds since launch (updated by spored)
-	EBSHourlyCost   float64 // EBS cost per hour of every attached volume (spawn:ebs-hourly-cost, measured by spored, #51)
+
+	// LaunchConfigSHA is the spawn:config tag (#1359): the sha256 of the
+	// launch config object holding this launch's launch-fixed settings
+	// (pkg/launchconfig). Empty when the launch had none.
+	LaunchConfigSHA string
+	// LaunchConfigSource is where the object came from, "cache" or "s3", once
+	// loaded.
+	LaunchConfigSource string
+	// LaunchConfigError, when non-empty, is why the object LaunchConfigSHA
+	// names could not be loaded: the settings it holds are unknown, not unset,
+	// and spored takes no idle action until it loads.
+	LaunchConfigError string
+	// TagOnlySettings are launch-fixed settings found as tags, which this
+	// spored does not read (an instance launched by a spawn before the object).
+	TagOnlySettings []string
+
+	ComputeSeconds int64   // accumulated compute seconds since launch (updated by spored)
+	EBSHourlyCost  float64 // EBS cost per hour of every attached volume (spawn:ebs-hourly-cost, measured by spored, #51)
 	// PublicIPv4Count and ElasticIPv4Count are the instance's public IPv4
 	// addresses, auto-assigned and Elastic (spawn:public-ipv4-count,
 	// spawn:elastic-ipv4-count): $0.005/hr each, counted by --cost-limit (#51).

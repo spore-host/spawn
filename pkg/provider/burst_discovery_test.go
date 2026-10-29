@@ -55,7 +55,7 @@ func burstMember(t *testing.T, env *testutil.TestEnv, burst bool) (*EC2Provider,
 	}
 	id := *out.Instances[0].InstanceId
 
-	cfg, _, err := loadConfigFromEC2Tags(ctx, ec2Client, id)
+	cfg, _, _, err := loadConfigFromEC2Tags(ctx, ec2Client, id)
 	if err != nil {
 		t.Fatalf("loadConfigFromEC2Tags: %v", err)
 	}

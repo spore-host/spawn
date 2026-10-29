@@ -244,6 +244,7 @@ func TestEveryReaperSettingSurvivesARedeploy(t *testing.T) {
 		reaperconfig.EnvEmptyBuckets:   "reap",
 		reaperconfig.EnvInstanceRoles:  "reap",
 		reaperconfig.EnvPoolQueues:     "reap",
+		reaperconfig.EnvLaunchConfigs:  "reap",
 		reaperconfig.EnvScheduleParams: "reap",
 		reaperconfig.EnvNotifyURL:      secretURL,
 	}

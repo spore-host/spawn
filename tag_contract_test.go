@@ -81,6 +81,10 @@ func TestSpawnTagContract(t *testing.T) {
 			t.Logf("%s: read here, written outside spawn (%s)", key, why)
 			continue
 		}
+		if why, ok := writtenOutOfTheScansSight[key]; ok {
+			t.Logf("%s: read here, written in a shape the scan does not match (%s)", key, why)
+			continue
+		}
 		t.Errorf("%s is read (%s) but nothing in this repo writes it: the branch that reads it can never fire",
 			key, sc.reads[key])
 	}
@@ -88,6 +92,14 @@ func TestSpawnTagContract(t *testing.T) {
 	for key := range externallyWrittenTags {
 		if _, ok := sc.writes[key]; ok {
 			t.Errorf("%s is on externallyWrittenTags but spawn writes it (%s); remove it from the allowlist", key, sc.writes[key])
+		}
+	}
+	for key := range writtenOutOfTheScansSight {
+		if _, ok := sc.writes[key]; ok {
+			t.Errorf("%s is on writtenOutOfTheScansSight but the scan now sees its write (%s); remove it", key, sc.writes[key])
+		}
+		if _, ok := sc.reads[key]; !ok {
+			t.Errorf("%s is on writtenOutOfTheScansSight but nothing reads it; remove it", key)
 		}
 	}
 	for key := range readOutsideThisRepo {
@@ -113,6 +125,16 @@ var externallyWrittenTags = map[string]string{
 	// Read by spored and used by nothing: no exporter consults an endpoint, so
 	// #1308 added no launch flag for it.
 	"spawn:tracing-endpoint": "set out of band with aws ec2 create-tags; no tracing exporter reads it (#1335)",
+}
+
+// writtenOutOfTheScansSight are keys spawn does write, in a shape
+// classifyTagUse does not recognise as a write. Their reads, spelled
+// tagprefix.Tag(costmodel.Tag...), became visible when the scan learned to
+// resolve a constant argument (#1359). Add one only with the writer named.
+var writtenOutOfTheScansSight = map[string]string{
+	"spawn:ebs-hourly-cost":    "spored, pkg/provider footprintTagWrites ([2]string pairs)",
+	"spawn:public-ipv4-count":  "spored, pkg/provider footprintTagWrites ([2]string pairs)",
+	"spawn:elastic-ipv4-count": "spored, pkg/provider footprintTagWrites ([2]string pairs)",
 }
 
 // readOutsideThisRepo are keys buildTags writes that no reader in this repo
@@ -193,6 +215,9 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 	// pass 1: parse, and collect string constants that hold a tag key, by
 	// "<dir>.<Name>", so a key spelled through a constant is still seen.
 	consts := map[string]string{}
+	// strConsts is every string constant, tag key or not, so the suffix
+	// tagprefix.Tag(pkg.Name) names is seen too (#1359).
+	strConsts := map[string]string{}
 	type constAlias struct {
 		dir, name string
 		f         *ast.File
@@ -238,6 +263,9 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 						continue
 					}
 					if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						if s, err := strconv.Unquote(lit.Value); err == nil {
+							strConsts[dir+"."+name.Name] = s
+						}
 						if s, err := strconv.Unquote(lit.Value); err == nil && (tagKeyRe.MatchString(s) || strings.HasPrefix(s, "tag:spawn:")) {
 							consts[dir+"."+name.Name] = s
 						}
@@ -312,6 +340,28 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 			}
 			imports[name] = rel
 		}
+		// suffixOf is the string a tagprefix.Tag/FilterTag argument spells: a
+		// literal, or a string constant in this package or another.
+		suffixOf := func(e ast.Expr) (string, bool) {
+			switch e := e.(type) {
+			case *ast.BasicLit:
+				if e.Kind == token.STRING {
+					s, err := strconv.Unquote(e.Value)
+					return s, err == nil
+				}
+			case *ast.Ident:
+				s, ok := strConsts[fl.dir+"."+e.Name]
+				return s, ok
+			case *ast.SelectorExpr:
+				if pkg, ok := e.X.(*ast.Ident); ok {
+					if dir, ok := imports[pkg.Name]; ok {
+						s, ok := strConsts[dir+"."+e.Sel.Name]
+						return s, ok
+					}
+				}
+			}
+			return "", false
+		}
 		// keyOf returns the tag key e spells, if any.
 		keyOf := func(e ast.Expr) (string, bool) {
 			switch e := e.(type) {
@@ -339,8 +389,7 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 				// tagprefix.Tag("x")
 				if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Tag" && len(e.Args) == 1 {
 					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "tagprefix" {
-						if lit, ok := e.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-							s, _ := strconv.Unquote(lit.Value)
+						if s, ok := suffixOf(e.Args[0]); ok {
 							return "spawn:" + s, true
 						}
 					}
@@ -395,8 +444,7 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 				// tagprefix.FilterTag("x") and a filter constant are EC2 filters.
 				if call, ok := n.(*ast.CallExpr); ok {
 					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "FilterTag" && len(call.Args) == 1 {
-						if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-							s, _ := strconv.Unquote(lit.Value)
+						if s, ok := suffixOf(call.Args[0]); ok {
 							read("spawn:"+s, call.Pos())
 						}
 					}
