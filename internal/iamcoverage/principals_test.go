@@ -263,7 +263,11 @@ var principals = []principal{
 			// pkg/schedulesweep is the orphaned schedule params sweep (#1398),
 			// on the same own-account credentials; its s3:ListBucket and
 			// s3:DeleteObject are also called in member accounts by other
-			// sweeps, so it is claimed by call site, not by action.
+			// sweeps, so it is claimed by call site, not by action. This gate
+			// checks action names only, and the SAM variant also holds the
+			// ScanSelf branch's ListBucket/DeleteObject on other buckets, so
+			// the resource scope of those two is held by pkg/reaperiam's
+			// TestSAMTemplateGrantsTheScheduleRead, not here.
 			{name: "function role", services: []string{"sts", "route53", "dynamodb", "kms", "s3:GetObject"},
 				pkgs: []string{"github.com/spore-host/spawn/pkg/schedulesweep"}, variants: []variant{
 					{"SAM TTLReaperFunction", cfnPolicy("lambda/ttl-reaper/template.yaml", "TTLReaperFunction")},
