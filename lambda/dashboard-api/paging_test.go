@@ -471,6 +471,25 @@ func TestScanFirstFollowsEmptyPages(t *testing.T) {
 	}
 }
 
+// The Slack token rotation finds its workspace with a filtered Scan. It reads
+// every page before saying "not found", and a failed page is a scan error, not
+// a "not found" that hides the outage. (A match goes on to Slack's API, which a
+// hermetic test cannot call; scanFirst's own test covers the late match.)
+func TestSlackRotateLookupReadsEveryPage(t *testing.T) {
+	const table = "spore-slack-workspaces"
+	d := &pagedDynamo{pages: map[string][][]string{table: {nil, nil, nil}}}
+	_, err := rotateTokenByCurrentToken(context.Background(), d.cfg(), table, "id", "secret", "xoxb-old")
+	if err == nil || !strings.Contains(err.Error(), "not found") || d.reads[table] != 3 {
+		t.Fatalf("read %d of 3 pages, err %v; want all 3 read, then not found", d.reads[table], err)
+	}
+
+	f := &pagedDynamo{pages: d.pages, failAt: map[string]int{table: 1}}
+	_, err = rotateTokenByCurrentToken(context.Background(), f.cfg(), table, "id", "secret", "xoxb-old")
+	if err == nil || strings.Contains(err.Error(), "not found") {
+		t.Fatalf("a failed second page gave %v; want a scan error, not \"not found\"", err)
+	}
+}
+
 // TestDashboardDynamoCallsArePaginated is the gate for every call site: a
 // direct .Query( or .Scan( call on a DynamoDB client reads ONE page, so each
 // must go through the paging helpers (paging.go) or carry a `single-page:`
