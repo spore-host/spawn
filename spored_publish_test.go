@@ -162,7 +162,9 @@ func TestOnlyTheReleaseWorkflowPublishesSpored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", sporedPublisher, err)
 	}
-	for _, want := range []string{"spored-linux-amd64.sig", "spored-linux-amd64.sha256", "kms"} {
+	// A text check only; TestReleasePublishesTheSignedVersionedSpored runs the
+	// steps and verifies what they publish (#1415).
+	for _, want := range []string{"spored-linux-amd64", `"$name.sig"`, `"$name.sha256"`, "kms sign"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("%s no longer mentions %q — the only sanctioned spored publisher may have "+
 				"stopped signing or checksumming", sporedPublisher, want)
