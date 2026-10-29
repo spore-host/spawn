@@ -1383,10 +1383,22 @@ var efaCapacityFor = func(ctx context.Context, awsClient *aws.Client, instanceTy
 // --mpi or not — the non-MPI path used to reach RunInstances having checked EFA
 // only through truffle's capability flag, which carries no count.
 func resolveEFAInterfaces(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig) (aws.EFACapacity, error) {
+	return resolveEFAInterfacesWith(config, func(instanceType, region string) (aws.EFACapacity, error) {
+		return efaCapacityFor(ctx, awsClient, instanceType, region)
+	})
+}
+
+// efaCapacityLookup reads an instance type's EFA capacity in a region.
+type efaCapacityLookup func(instanceType, region string) (aws.EFACapacity, error)
+
+// resolveEFAInterfacesWith is resolveEFAInterfaces with the capacity read
+// through lookup: a sweep resolves every member through one memoized lookup
+// (#1407).
+func resolveEFAInterfacesWith(config *aws.LaunchConfig, lookup efaCapacityLookup) (aws.EFACapacity, error) {
 	if !config.EFAEnabled {
 		return aws.EFACapacity{}, nil
 	}
-	capacity, err := efaCapacityFor(ctx, awsClient, config.InstanceType, config.Region)
+	capacity, err := lookup(config.InstanceType, config.Region)
 	if err != nil {
 		return aws.EFACapacity{}, fmt.Errorf("EFA validation: %w", err)
 	}

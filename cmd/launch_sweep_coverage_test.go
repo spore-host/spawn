@@ -83,7 +83,7 @@ func TestSweepFlagRulesAreEnforced(t *testing.T) {
 // flagPrereqs are the flags a flag needs to take effect (or to pass
 // buildLaunchConfig's validation), set before the baseline is taken.
 var flagPrereqs = map[string][]string{
-	"capacity-block": {"reservation-id"}, "efa-interfaces": {"efa"}, "efa-secondary-type": {"efa", "efa-interfaces"},
+	"capacity-block": {"reservation-id"}, "efa-interfaces": {"efa"}, "efa-secondary-type": {"efa"},
 	"webhook-correlation": {"spot-webhook-url"}, "webhook-timeout": {"spot-webhook-url"},
 	"metrics-port": {"metrics"}, "metrics-bind": {"metrics"}, "metrics-path": {"metrics"},
 	"tracing-exporter": {"tracing"}, "tracing-sampling": {"tracing"},

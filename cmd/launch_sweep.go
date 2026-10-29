@@ -375,6 +375,17 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return fmt.Errorf("failed to initialize AWS client: %w", err)
 	}
 
+	// --efa: each member's EFA interface count, as a single launch of its
+	// config resolves it (#1407): every card of its own type unless
+	// --efa-interfaces says otherwise. Read-only, before anything is created,
+	// and so is the Elastic IP check each multi-card member needs.
+	if err := resolveSweepEFA(launchConfigs, nil, memoEFACapacity(ctx, awsClient)); err != nil {
+		return err
+	}
+	if err := preflightSweepElasticIPs(ctx, awsClient, launchConfigs, os.Stderr); err != nil {
+		return err
+	}
+
 	// Step 1: Detect AMI — per config, so a heterogeneous sweep (#372) gets an
 	// arch/GPU-appropriate AMI per instance type instead of the first entry's AMI
 	// forced onto every entry (which broke arm64/GPU rows). GetRecommendedAMI keys

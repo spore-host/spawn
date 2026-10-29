@@ -385,6 +385,14 @@ func runResume(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("parameter set %d: %w", pending[i], err)
 		}
 	}
+	// --efa: each member's EFA interface count, resolved as the launch
+	// resolved it (#1407), and the Elastic IPs the multi-card ones need.
+	if err := resolveSweepEFA(launchConfigs, pending, memoEFACapacity(ctx, awsClient)); err != nil {
+		return err
+	}
+	if err := preflightSweepElasticIPs(ctx, awsClient, launchConfigs, os.Stderr); err != nil {
+		return err
+	}
 
 	// Setup SSH key
 	if firstConfig.KeyName == "" {

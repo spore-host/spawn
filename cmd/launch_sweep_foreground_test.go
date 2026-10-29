@@ -78,6 +78,12 @@ func foregroundMembers(t *testing.T, plat *platform.Platform, base aws.LaunchCon
 	if err != nil {
 		return nil, err
 	}
+	// --efa's count, as launchParameterSweep resolves it (#1407). A type the
+	// tests do not name has four EFA cards, so --efa-interfaces 2 is not
+	// "every card" and --efa-secondary-type efa has cards to apply to.
+	if err := resolveSweepEFA(cfgs, nil, testEFACapacity(4)); err != nil {
+		return nil, err
+	}
 	for _, c := range cfgs {
 		if c.AMI == "" {
 			c.AMI = "ami-0123456789abcdef0"

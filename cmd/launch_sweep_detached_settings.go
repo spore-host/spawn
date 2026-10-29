@@ -50,9 +50,12 @@ func detachedSettingsGuard(cfg aws.LaunchConfig) error {
 		return refuse("--efa-secondary-type "+cfg.EFASecondaryType, "it applies only to a multi-card EFA launch "+
 			"(more than one network interface), whose Elastic IP the orchestrator does not manage", noDetach)
 	case cfg.EFAEnabled && cfg.EFAInterfaces > 1:
-		return refuse(fmt.Sprintf("--efa-interfaces %d", cfg.EFAInterfaces), "an instance with more than one "+
-			"network interface gets no public IP, and the Elastic IP a launch associates (and releases on "+
-			"terminate) is not something the orchestrator manages", "Use --efa-interfaces 1, or run the sweep with --no-detach")
+		// cfg.EFAInterfaces is the resolved count (#1407): plain --efa is
+		// every card the type has, so it lands here on a multi-card type.
+		return refuse(fmt.Sprintf("--efa with %d EFA interfaces (one per network card of %s)", cfg.EFAInterfaces, cfg.InstanceType),
+			"an instance with more than one network interface gets no public IP, and the Elastic IP a launch "+
+				"associates (and releases on terminate) is not something the orchestrator manages",
+			"Run the sweep with --no-detach, or pass --efa-interfaces 1 for a single EFA interface")
 	case cfg.EBSKMSKeyID != "":
 		return refuse("a customer-managed EBS KMS key", "the orchestrator's role has no grant on the key, so "+
 			"EC2 could not create the encrypted volumes", noDetach)

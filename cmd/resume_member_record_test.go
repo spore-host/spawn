@@ -150,6 +150,11 @@ func resumedMembers(t *testing.T, plat *platform.Platform, state *SweepState, pf
 	if err != nil {
 		return nil, err
 	}
+	// --efa's count, resolved as runResume resolves it (#1407), through the
+	// lookup the launched members were resolved with (foregroundMembers).
+	if err := resolveSweepEFA(cfgs, pending, testEFACapacity(4)); err != nil {
+		return nil, err
+	}
 	for _, c := range cfgs {
 		if c.AMI == "" {
 			c.AMI = "ami-0123456789abcdef0"
@@ -658,11 +663,6 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 			plat := testSweepPlat(t)
 			fgBefore, _ := launchedSweep(t, plat, recordParamFile())
 			before, err := pfOf(t)
-			if err != nil && len(flagPrereqs[n]) > 0 && strings.Contains(err.Error(), "cannot be used on a detached sweep") {
-				// Its prerequisites are themselves refused detached (--efa-secondary-type
-				// needs --efa-interfaces 2, #1404), so there is nothing to resume.
-				t.Skipf("a detached launch refuses --%s's prerequisites %v (%v)", n, flagPrereqs[n], err)
-			}
 			if err != nil {
 				t.Fatalf("baseline: %v", err)
 			}
