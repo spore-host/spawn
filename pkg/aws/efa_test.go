@@ -474,7 +474,8 @@ func TestLaunch_MultiEFAElasticIPFailureTerminates(t *testing.T) {
 // RunInstances rejects a multi-interface request whose interfaces carry no subnet
 // ("Each network interface requires either a subnet or a network interface ID",
 // seen on a real c8gn.48xlarge launch). Without --subnet-id or --az the launch
-// must stop before RunInstances with a usable message.
+// must stop before RunInstances with a usable message, and since #1410 before
+// any AWS call at all (ValidateEFASubnet, with the other pure checks).
 func TestLaunch_MultiEFANeedsSubnetOrAZ(t *testing.T) {
 	f := &fakeEC2{efaCards: 2}
 	c := newFakeEC2Client(t, f)
@@ -482,11 +483,33 @@ func TestLaunch_MultiEFANeedsSubnetOrAZ(t *testing.T) {
 		InstanceType: "c8gn.48xlarge", Region: "us-west-2", AMI: "ami-0123456789abcdef0", PricePerHour: 1,
 		EFAEnabled: true, EFAInterfaces: 2,
 	})
-	if err == nil || !strings.Contains(err.Error(), "--subnet-id or --az") {
+	if !errors.Is(err, ErrEFANeedsSubnet) || !strings.Contains(err.Error(), "pass --subnet-id, or --az to let spawn pick one") {
 		t.Fatalf("err = %v, want the subnet requirement", err)
 	}
-	if f.request("RunInstances") != nil {
-		t.Error("RunInstances was called without a subnet on every interface")
+	if a := f.actions(); len(a) != 0 {
+		t.Errorf("Launch made AWS calls before refusing: %v", a)
+	}
+}
+
+// ValidateEFASubnet refuses only more than one EFA interface with neither a
+// subnet nor an AZ (#1410).
+func TestValidateEFASubnet(t *testing.T) {
+	for _, tc := range []struct {
+		cfg     LaunchConfig
+		refused bool
+	}{
+		{LaunchConfig{EFAEnabled: true, EFAInterfaces: 2}, true},
+		{LaunchConfig{EFAEnabled: true, EFAInterfaces: 16}, true},
+		{LaunchConfig{EFAEnabled: true, EFAInterfaces: 2, AvailabilityZone: "us-east-1a"}, false},
+		{LaunchConfig{EFAEnabled: true, EFAInterfaces: 2, SubnetID: "subnet-1"}, false},
+		{LaunchConfig{EFAEnabled: true, EFAInterfaces: 1}, false},
+		{LaunchConfig{EFAEnabled: true}, false},
+		{LaunchConfig{EFAInterfaces: 2}, false},
+	} {
+		err := tc.cfg.ValidateEFASubnet()
+		if errors.Is(err, ErrEFANeedsSubnet) != tc.refused {
+			t.Errorf("%+v: err = %v, refused want %t", tc.cfg, err, tc.refused)
+		}
 	}
 }
 
