@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.150.0] - 2026-10-29
+
 ### Added
 
 - **`REAPER_LAUNCH_CONFIGS`: the deleter of the launch config objects**
@@ -28,6 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `launch_configs_accounts_denied`.
 
 ### Changed
+
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)). A launch
+  that sets any of the spored settings now kept in the per-launch config object
+  (notifications, webhooks, activity guards, metrics/tracing, web readiness; #1359)
+  writes that object to the account's staging bucket, creating and configuring the bucket
+  on first use. Such launches by `spawn launch`, `app launch`, `array retry`, `burst`,
+  `pool create`, `service`, `image import`, `resume` and `sweep resume` need the staging
+  bucket permissions: `s3:CreateBucket`, `s3:Get`/`PutBucketTagging`,
+  `s3:Get`/`PutLifecycleConfiguration`, `s3:ListBucket`, `s3:PutBucketOwnershipControls`,
+  `s3:PutBucketPublicAccessBlock`, `s3:PutEncryptionConfiguration` and `s3:PutObject`. A
+  launch that sets none of them makes no S3 call.
 
 - **spored writes its cost footprint as one tag, `spawn:cost-footprint`,
   not three** (#1428). The EBS rate and the auto-assigned and Elastic public
@@ -12986,7 +13000,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.149.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.150.0...HEAD
+[0.150.0]: https://github.com/spore-host/spawn/compare/v0.149.0...v0.150.0
 [0.149.0]: https://github.com/spore-host/spawn/compare/v0.148.0...v0.149.0
 [0.148.0]: https://github.com/spore-host/spawn/compare/v0.147.0...v0.148.0
 [0.147.0]: https://github.com/spore-host/spawn/compare/v0.146.0...v0.147.0
