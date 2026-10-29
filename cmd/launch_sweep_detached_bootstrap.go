@@ -76,6 +76,10 @@ type detachedBootstrap struct {
 	// its --command waits for, as a foreground member's (#1366), filling in the
 	// FSx mount name its tags carry: sweepStorage.member in production.
 	storageOf func(cfg *aws.LaunchConfig) (string, []string, error)
+	// efaOf resolves an --efa member's EFA interface count as a foreground
+	// member's (#1407), so detachedSettingsGuard refuses the count it would
+	// launch with: resolveSweepMemberEFA through memoEFACapacity in production.
+	efaOf func(cfg *aws.LaunchConfig) error
 }
 
 // newDetachedBootstrap returns the production detachedBootstrap: the local
@@ -84,7 +88,11 @@ func newDetachedBootstrap(ctx context.Context, client *aws.Client, plat *platfor
 	cache := map[string]string{}
 	var tagger *aws.LaunchTagger
 	storage := newSweepStorage(client, os.Stderr)
+	efa := memoEFACapacity(ctx, client)
 	return detachedBootstrap{
+		efaOf: func(cfg *aws.LaunchConfig) error {
+			return resolveSweepMemberEFA(cfg, efa)
+		},
 		storageOf: func(cfg *aws.LaunchConfig) (string, []string, error) {
 			return storage.member(ctx, cfg)
 		},
@@ -154,6 +162,18 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		}
 		if !orchestratorPassableProfile(cfg.IamInstanceProfile) {
 			return unpassableProfileError(fmt.Sprintf("param set %d", i), cfg.IamInstanceProfile)
+		}
+		// --efa's interface count, resolved as a foreground member's is
+		// (#1407), so the refusal below sees the count the member would
+		// launch with: --efa on a multi-card type is refused, never launched
+		// with one interface.
+		if cfg.EFAEnabled {
+			if b.efaOf == nil {
+				return fmt.Errorf("param set %d: no EFA resolver: --efa would launch one interface whatever the type", i)
+			}
+			if err := b.efaOf(&cfg); err != nil {
+				return fmt.Errorf("param set %d: %w", i, err)
+			}
 		}
 		// What the orchestrator cannot launch as configured is refused here,
 		// before anything is uploaded (#1353).

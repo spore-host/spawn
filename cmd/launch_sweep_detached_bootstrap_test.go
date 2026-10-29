@@ -40,6 +40,12 @@ func testDetachedBootstrap(t *testing.T) detachedBootstrap {
 		storageOf: func(cfg *aws.LaunchConfig) (string, []string, error) {
 			return newSweepStorage(&fakeStorageLookups{}, io.Discard).member(context.Background(), cfg)
 		},
+		// Launch's own EFA resolution (#1407), with DescribeInstanceTypes
+		// fixed: a type the tests do not name has one EFA card, so plain
+		// --efa is carried to a detached member rather than refused.
+		efaOf: func(cfg *aws.LaunchConfig) error {
+			return resolveSweepMemberEFA(cfg, testEFACapacity(1))
+		},
 	}
 }
 

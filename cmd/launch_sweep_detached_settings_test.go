@@ -327,8 +327,9 @@ func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 	}{
 		"fsx-create":          {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
 		"fsx-recall":          {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
-		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, want: "--efa-interfaces 4", alt: "--no-detach"},
-		"efa secondary type":  {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 2, EFASecondaryType: "efa"}, want: "--efa-secondary-type efa", alt: "--no-detach"},
+		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, row: map[string]interface{}{"instance_type": "p5en.48xlarge"}, want: "--efa with 4 EFA interfaces", alt: "--no-detach"},
+		"every-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa with 2 EFA interfaces", alt: "--efa-interfaces 1"},
+		"efa secondary type":  {base: aws.LaunchConfig{EFAEnabled: true, EFASecondaryType: "efa"}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa-secondary-type efa", alt: "--no-detach"},
 		"customer KMS key":    {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key", alt: "--no-detach"},
 		"vpc without subnet":  {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet", alt: "Pass --subnet"},
 		"hibernation pattern": {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern", alt: "--no-detach"},

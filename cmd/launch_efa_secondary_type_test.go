@@ -102,19 +102,3 @@ func TestLaunchDryRunShowsEFASecondaryType(t *testing.T) {
 		}
 	}
 }
-
-// A sweep carries it to a foreground member only with an explicit
-// --efa-interfaces above 1: a member launches with the count as given, and 0
-// there is one interface. Without one it is refused before anything launches,
-// naming the remedy.
-func TestSweepRefusesEFASecondaryTypeWithoutExplicitInterfaces(t *testing.T) {
-	for _, n := range []int{0, 1} {
-		err := sweepMemberGuard(spawnaws.LaunchConfig{EFAEnabled: true, EFAInterfaces: n, EFASecondaryType: "efa"})
-		if err == nil || !strings.Contains(err.Error(), "--efa-secondary-type") || !strings.Contains(err.Error(), "--efa-interfaces N") {
-			t.Errorf("--efa-interfaces %d: err = %v, want a refusal naming --efa-secondary-type and the remedy", n, err)
-		}
-	}
-	if err := sweepMemberGuard(spawnaws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 2, EFASecondaryType: "efa"}); err != nil {
-		t.Errorf("--efa-interfaces 2: refused: %v", err)
-	}
-}

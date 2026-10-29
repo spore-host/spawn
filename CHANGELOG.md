@@ -20,10 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no interface asks EC2 for a public IP. A card DescribeInstanceTypes says
   cannot take `efa` is refused before RunInstances, and so is the flag without
   multi-card EFA: it needs `--efa`, is refused with `--efa-interfaces 1`, and
-  `--efa` alone (every card) is refused on a type with one EFA card. A sweep
-  member carries it with an explicit `--efa-interfaces` of 2 or more (it does
-  not resolve 0 to the type's count, so that is refused); a detached sweep
-  refuses it, as it refuses multi-card EFA; `spawn task run` has no EFA. The
+  `--efa` alone (every card) is refused on a type with one EFA card. A
+  foreground sweep member carries it wherever its own type has more than one
+  EFA card (#1407); a detached sweep refuses it, as it refuses multi-card EFA;
+  `spawn task run` has no EFA. The
   `--dry-run` layout labels each card's interface `(primary)`, `(private IP)`
   or `(no IP)`, and `-o json` has `efa_secondary_type`. spawn adds no OS
   routing: Ubuntu's cloud-init (Netplan) and Amazon Linux's
@@ -35,6 +35,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aws.EFANetworkInterfacesWithSecondaryType`, `aws.EFASecondaryTypeEFA`,
   `aws.EFASecondaryTypeEFAOnly`. No new IAM: the interfaces ride the same
   RunInstances call.
+
+### Fixed
+
+- **A parameter sweep with `--efa` launched each member with one EFA
+  interface on a multi-card type** (#1407). A single `spawn launch --efa`
+  attaches one EFA per network card (`--efa-interfaces 0`, the default, is
+  the type's `MaximumEfaInterfaces`, #661); a sweep never resolved the 0, so
+  a c8gn.48xlarge member got 1 of 2 interfaces and a p5en.48xlarge member 1
+  of 16, and nothing said so. A foreground sweep (and `spawn sweep resume`)
+  now resolves each member's count from its own instance type and region,
+  before anything is created, with one DescribeInstanceTypes call per
+  distinct (region, type); an explicit `--efa-interfaces N` is kept, and one
+  above a row's type is refused naming the row. It also checks each region
+  has an Elastic IP for every multi-card member, as a single launch does. A
+  detached sweep resolves the count at `--detach` time and refuses `--efa` on
+  a multi-card type before anything is uploaded (the orchestrator does not
+  manage the Elastic IP such an instance needs), saying to use `--no-detach`,
+  or `--efa-interfaces 1` for a single EFA interface; on a single-card type
+  it is carried as before. On an instance type pattern (`a|b`) `--efa` needs
+  an explicit `--efa-interfaces`, since there is no one type to read.
+  `--efa-secondary-type efa` with plain `--efa` now works on a foreground
+  sweep of a multi-card type (#1404 refused it without an explicit
+  `--efa-interfaces` of 2 or more), and is still refused where a member's
+  resolved count is 1. No new IAM: `ec2:DescribeInstanceTypes` and the
+  Elastic IP quota read are what a single `--efa` launch already makes.
 
 ## [0.148.0] - 2026-10-28
 
