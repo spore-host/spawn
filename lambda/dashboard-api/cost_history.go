@@ -56,7 +56,9 @@ func handleGetCostHistory(ctx context.Context, cfg aws.Config, days int, cliIamA
 
 	since := time.Now().AddDate(0, 0, -days).Format(time.RFC3339)
 
-	result, err := dynamodbClient.Query(ctx, &dynamodb.QueryInput{
+	// Every page (#1421): one hourly record per user per hour, so a long window
+	// is many records, and a chart missing its tail would look like a cost drop.
+	items, err := queryAll(ctx, dynamodbClient, &dynamodb.QueryInput{
 		TableName:              aws.String(dynamoCostHistoryTable),
 		KeyConditionExpression: aws.String("user_id = :uid AND #ts >= :since"),
 		ExpressionAttributeNames: map[string]string{
@@ -72,10 +74,13 @@ func handleGetCostHistory(ctx context.Context, cfg aws.Config, days int, cliIamA
 		return errorResponse(500, fmt.Sprintf("Failed to query cost history: %v", err)), nil
 	}
 
-	history := make([]CostHistoryPoint, 0, len(result.Items))
-	for _, item := range result.Items {
+	history := make([]CostHistoryPoint, 0, len(items))
+	for _, item := range items {
 		var record CostHistoryRecord
 		if err := attributevalue.UnmarshalMap(item, &record); err != nil {
+			continue
+		}
+		if record.UserID != cliIamArn { // fail closed on every page
 			continue
 		}
 		history = append(history, CostHistoryPoint{

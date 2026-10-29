@@ -27,16 +27,19 @@ func handleListSweeps(ctx context.Context, cfg aws.Config, cliIamArn, teamID str
 
 	dynamodbClient := dynamodb.NewFromConfig(cfg)
 
-	// Personal sweeps via scan with user_id filter
+	// Personal sweeps via scan with user_id filter, over the whole table. This
+	// used to be one Scan page with Limit 200, and a Scan's Limit counts items
+	// EVALUATED before the filter: once the table held more than 200 sweeps, a
+	// user saw only their sweeps among an arbitrary 200, as if that were all of
+	// them (#1421).
 	scanInput := &dynamodb.ScanInput{
 		TableName:        aws.String(dynamoSweepTable),
 		FilterExpression: aws.String("user_id = :user_id"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":user_id": &types.AttributeValueMemberS{Value: cliIamArn},
 		},
-		Limit: aws.Int32(200),
 	}
-	result, err := dynamodbClient.Scan(ctx, scanInput)
+	personal, err := scanAll(ctx, dynamodbClient, scanInput)
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("Failed to query sweeps: %v", err)), nil
 	}
@@ -44,10 +47,13 @@ func handleListSweeps(ctx context.Context, cfg aws.Config, cliIamArn, teamID str
 	seen := make(map[string]struct{})
 	var sweeps []SweepInfo
 
-	appendSweepRecords := func(items []map[string]types.AttributeValue) {
+	appendSweepRecords := func(items []map[string]types.AttributeValue, owned func(SweepRecord) bool) {
 		for _, item := range items {
 			var sweep SweepRecord
 			if err := attributevalue.UnmarshalMap(item, &sweep); err != nil {
+				continue
+			}
+			if !owned(sweep) {
 				continue
 			}
 			if _, dup := seen[sweep.SweepID]; dup {
@@ -79,14 +85,19 @@ func handleListSweeps(ctx context.Context, cfg aws.Config, cliIamArn, teamID str
 		}
 	}
 
-	appendSweepRecords(result.Items)
+	// Fail closed on every page: a personal sweep is the caller's only if its
+	// user_id says so, whatever the filter returned.
+	appendSweepRecords(personal, func(s SweepRecord) bool { return s.UserID == cliIamArn })
 
 	// Team sweeps via team_id-index GSI
 	if teamID != "" {
 		if _, err := resolveTeamContext(ctx, cfg, teamID, cliIamArn); err != nil {
 			return errorResponse(403, "access denied"), nil
 		}
-		teamResult, err := dynamodbClient.Query(ctx, &dynamodb.QueryInput{
+		// Every page, and a failure is an error: this used to log a warning
+		// and return the personal sweeps alone, a partial list presented as
+		// complete (#1421).
+		teamItems, err := queryAll(ctx, dynamodbClient, &dynamodb.QueryInput{
 			TableName:              aws.String(dynamoSweepTable),
 			IndexName:              aws.String("team_id-index"),
 			KeyConditionExpression: aws.String("team_id = :tid"),
@@ -95,10 +106,9 @@ func handleListSweeps(ctx context.Context, cfg aws.Config, cliIamArn, teamID str
 			},
 		})
 		if err != nil {
-			log.Printf("warning: failed to query team sweeps: %v", err)
-		} else {
-			appendSweepRecords(teamResult.Items)
+			return errorResponse(500, fmt.Sprintf("Failed to query team sweeps: %v", err)), nil
 		}
+		appendSweepRecords(teamItems, func(s SweepRecord) bool { return s.TeamID == teamID })
 	}
 
 	elapsed := time.Since(startTime)

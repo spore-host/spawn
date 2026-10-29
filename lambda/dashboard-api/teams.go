@@ -135,8 +135,8 @@ func handleCreateTeam(ctx context.Context, cfg aws.Config, body, callerARN strin
 func handleListMyTeams(ctx context.Context, cfg aws.Config, callerARN string) (events.APIGatewayProxyResponse, error) {
 	ddb := dynamodb.NewFromConfig(cfg)
 
-	// Query memberships by caller ARN
-	result, err := ddb.Query(ctx, &dynamodb.QueryInput{
+	// Query memberships by caller ARN, every page (#1421)
+	memberships, err := queryAll(ctx, ddb, &dynamodb.QueryInput{
 		TableName:              aws.String(dynamoMembershipsTable),
 		IndexName:              aws.String("member_arn-index"),
 		KeyConditionExpression: aws.String("member_arn = :arn"),
@@ -154,9 +154,12 @@ func handleListMyTeams(ctx context.Context, cfg aws.Config, callerARN string) (e
 	}
 
 	var teams []TeamWithRole
-	for _, item := range result.Items {
+	for _, item := range memberships {
 		var m TeamMemberRecord
 		if err := attributevalue.UnmarshalMap(item, &m); err != nil {
+			continue
+		}
+		if m.MemberARN != callerARN { // fail closed on every page
 			continue
 		}
 
@@ -214,23 +217,25 @@ func handleGetTeam(ctx context.Context, cfg aws.Config, teamID, callerARN string
 		return errorResponse(500, "unmarshal team"), nil
 	}
 
-	// Fetch all members
-	membersResult, err := ddb.Query(ctx, &dynamodb.QueryInput{
+	// Fetch all members: every page, not the first 500 (#1421)
+	memberItems, err := queryAll(ctx, ddb, &dynamodb.QueryInput{
 		TableName:              aws.String(dynamoMembershipsTable),
 		KeyConditionExpression: aws.String("team_id = :tid"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":tid": &types.AttributeValueMemberS{Value: teamID},
 		},
-		Limit: aws.Int32(500),
 	})
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("query members: %v", err)), nil
 	}
 
 	var members []TeamMemberRecord
-	for _, item := range membersResult.Items {
+	for _, item := range memberItems {
 		var m TeamMemberRecord
 		if err := attributevalue.UnmarshalMap(item, &m); err != nil {
+			continue
+		}
+		if m.TeamID != teamID { // fail closed on every page
 			continue
 		}
 		members = append(members, m)
@@ -352,22 +357,23 @@ func handleDeleteTeam(ctx context.Context, cfg aws.Config, teamID, callerARN str
 
 	ddb := dynamodb.NewFromConfig(cfg)
 
-	// Delete all memberships
-	membersResult, err := ddb.Query(ctx, &dynamodb.QueryInput{
+	// Delete all memberships. Every page: this read the first 500 and then
+	// deleted the team record, orphaning any membership past the first page
+	// (#1421). A failed page stops before anything is deleted.
+	memberItems, err := queryAll(ctx, ddb, &dynamodb.QueryInput{
 		TableName:              aws.String(dynamoMembershipsTable),
 		KeyConditionExpression: aws.String("team_id = :tid"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":tid": &types.AttributeValueMemberS{Value: teamID},
 		},
 		ProjectionExpression: aws.String("team_id, member_arn"),
-		Limit:                aws.Int32(500),
 	})
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("query members: %v", err)), nil
 	}
 
 	var deleteErrs int
-	for _, item := range membersResult.Items {
+	for _, item := range memberItems {
 		var m TeamMemberRecord
 		if err := attributevalue.UnmarshalMap(item, &m); err != nil {
 			continue
