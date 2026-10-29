@@ -142,6 +142,9 @@ func TestSweepParamTagsAreDeterministic(t *testing.T) {
 // with no cap at all, which is also a user-reachable way to blow the limit.
 func TestUserSuppliedTagsSurvive(t *testing.T) {
 	cfg := maximalConfig()
+	// A sweep member, not also a job-array member: the #477 shape with both
+	// leaves no room for --tag values beside the slots spored needs (#1355).
+	cfg.JobArrayID = ""
 	cfg.Tags = map[string]string{"project": "gchp", "owner": "me"}
 	cfg.Parameters = map[string]string{}
 	for i := 0; i < 60; i++ {
@@ -238,7 +241,8 @@ func TestValidateTagCountCountsWhatLaunchResolves(t *testing.T) {
 	// name Launch resolves are in.
 	withPrice := cfg
 	withPrice.PricePerHour, withPrice.PriceSource = 1, "live"
-	n := len(builtTags(t, withPrice)) + len(postLaunchTags(cfg))
+	launch, reserve, _ := tagCounts(t, withPrice)
+	n := launch + reserve
 	for i := 0; n < awsMaxTagsPerResource; i++ {
 		cfg.Tags[fmt.Sprintf("user%02d", i)] = "v"
 		n++
@@ -255,23 +259,27 @@ func TestValidateTagCountCountsWhatLaunchResolves(t *testing.T) {
 }
 
 // An ephemeral FSx is created after RunInstances and its four tags are written
-// then; a failed write deletes the filesystem and terminates the instance. So
-// the launch must leave room for them.
+// then; a failed write deletes the filesystem and terminates the instance. Once
+// it is available spored writes spawn:fsx-id before it deletes
+// spawn:fsx-pending, and its association status (#1355). So the launch must
+// leave room for all of them: the three keys the launch does not write already
+// (spawn:fsx-mount-point is one key whoever writes it) and spored's three.
 func TestTagLimitLeavesRoomForAnEphemeralFSx(t *testing.T) {
 	cfg := LaunchConfig{Name: "n", TTL: "1h", InstanceType: "t3.micro", Region: "us-east-1", PricePerHour: 0.01}
-	base := len(builtTags(t, cfg))
+	launch, reserve, _ := tagCounts(t, cfg)
 	cfg.Tags = map[string]string{}
-	for i := 0; base+len(cfg.Tags) < awsMaxTagsPerResource; i++ {
+	for i := 0; launch+reserve+len(cfg.Tags) < awsMaxTagsPerResource; i++ {
 		cfg.Tags[fmt.Sprintf("user%02d", i)] = "v"
 	}
 	if _, err := buildTags(cfg, "123456789012", "arn:aws:iam::1:user/u", "acct"); err != nil {
-		t.Fatalf("a launch at exactly %d tags was refused: %v", awsMaxTagsPerResource, err)
+		t.Fatalf("a launch leaving exactly its reserve free was refused: %v", err)
 	}
 	cfg.FSxLustreCreate, cfg.FSxLifecycle = true, "ephemeral"
 	_, err := buildTags(cfg, "123456789012", "arn:aws:iam::1:user/u", "acct")
 	var limit *TagLimitError
-	if !errors.As(err, &limit) || limit.Count != awsMaxTagsPerResource+4 || !strings.Contains(err.Error(), "spawn:fsx-pending") {
-		t.Fatalf("the same launch with an ephemeral FSx to create after it: err=%v, want a refusal counting its 4 tags", err)
+	if !errors.As(err, &limit) || limit.Count != awsMaxTagsPerResource+7 || !strings.Contains(err.Error(), "spawn:fsx-pending") ||
+		!strings.Contains(err.Error(), "spawn:fsx-id") {
+		t.Fatalf("the same launch with an ephemeral FSx to create after it: err=%v, want a refusal counting its 7 tags", err)
 	}
 }
 
@@ -286,20 +294,31 @@ func paramKeysOf(tags []tagPair) []string {
 }
 
 // The monitoring setup docs/self-hosted-monitoring.md documents (metrics on,
-// bound beyond localhost) plus an idle CPU threshold fits on a maximal launch
-// (#1308). Since #1359 only --metrics takes a tag, the one Prometheus' EC2
-// discovery filters on; the bind address and the threshold are in the launch
-// config object. Every spored setting at once fits too (TestMaximalLaunchTagCount).
+// bound beyond localhost) plus an idle CPU threshold (#1308). Since #1359 only
+// --metrics takes a tag, the one Prometheus' EC2 discovery filters on; the
+// bind address and the threshold are in the launch config object.
+//
+// With the slots kept for spored's tags (#1355) it fits on the #477 maximal
+// shape as a sweep member, with the version, OS and price source a real
+// launch tags: 38 at launch + 10 kept = 48. The same shape as a job-array
+// member too is 53, 3 over, and is refused naming the slots spored needs.
 func TestMonitoringSettingsFitOnAMaximalLaunch(t *testing.T) {
 	cfg := maximalConfig()
 	cfg.IdleCPUPercent = 10
 	cfg.Observability = SporedObservability{MetricsEnabled: true, MetricsBind: "0.0.0.0"}
+	cfg.PricePerHour, cfg.SpawnVersion, cfg.TargetOS = 0, "0.150.0", "linux" // the pre-flight's stand-ins
+	withArray := cfg
+	cfg.JobArrayID, cfg.JobArrayName, cfg.JobArraySize, cfg.JobArrayIndex = "", "", 0, 0
 	if err := cfg.ValidateTagCount(); err != nil {
-		t.Fatalf("the pre-flight refuses the documented monitoring setup on a maximal launch: %v", err)
+		t.Fatalf("the pre-flight refuses the documented monitoring setup on a maximal sweep member: %v", err)
 	}
-	tags := builtTags(t, cfg) // fails the test if buildTags refuses it
-	if n := len(tags) + len(postLaunchTags(cfg)); n > awsMaxTagsPerResource {
-		t.Errorf("maximal launch + --metrics --metrics-bind --idle-cpu-threshold = %d tags with the ones spawn writes after launch, over AWS's %d", n, awsMaxTagsPerResource)
+	priced := cfg
+	priced.PricePerHour, priced.PriceSource = 0.085, "live"
+	tags := builtTags(t, priced) // fails the test if buildTags refuses it
+	launch, reserve, _ := tagCounts(t, priced)
+	t.Logf("maximal sweep member + --metrics --metrics-bind --idle-cpu-threshold: %d + %d kept = %d", launch, reserve, launch+reserve)
+	if launch+reserve > awsMaxTagsPerResource {
+		t.Errorf("maximal sweep member + --metrics --metrics-bind --idle-cpu-threshold = %d tags with its reserve, over AWS's %d", launch+reserve, awsMaxTagsPerResource)
 	}
 	have := map[string]string{}
 	for _, tg := range tags {
@@ -313,6 +332,11 @@ func TestMonitoringSettingsFitOnAMaximalLaunch(t *testing.T) {
 		if obj[k] != v {
 			t.Errorf("object %s = %q, want %q", k, obj[k], v)
 		}
+	}
+
+	var limit *TagLimitError
+	if err := withArray.ValidateTagCount(); !errors.As(err, &limit) || !strings.Contains(err.Error(), "slot(s) spored needs") {
+		t.Errorf("the same launch as a job-array member too: ValidateTagCount() = %v, want a refusal naming spored's slots", err)
 	}
 }
 
@@ -338,5 +362,91 @@ func TestFitVolumeTagsStaysWithinTheLimit(t *testing.T) {
 	}
 	if got := strings.Join(dropped, ","); got != "owner,team" {
 		t.Errorf("dropped = %s, want owner,team", got)
+	}
+}
+
+// tagCounts is how many tags a launch with cfg gives RunInstances, before
+// sweep parameters, and how many slots it keeps free for tags written after
+// it (tagReserve), whether or not buildTags refuses it.
+func tagCounts(t *testing.T, cfg LaunchConfig) (launch, reserve int, refused *TagLimitError) {
+	t.Helper()
+	cfg.Parameters = nil
+	tags, err := buildTags(cfg, "123456789012", "arn:aws:iam::1:user/u", "acct")
+	if errors.As(err, &refused) {
+		reserve = len(refused.Spored) + len(refused.PostLaunch)
+		return refused.Count - reserve, reserve, refused
+	}
+	if err != nil {
+		t.Fatalf("buildTags: %v", err)
+	}
+	return len(tags), tagReserveSize(cfg, tags), nil
+}
+
+// A launch must leave a slot free for each tag spored writes by itself once it
+// runs (#1355). #1336 allowed a launch at exactly 50: there every one of those
+// writes fails whole, and with spawn:compute-seconds unwritable a stop/start
+// resets the cost clock. Now that launch is refused before any AWS call
+// (ValidateTagCount is the pre-flight), saying how many slots spored needs;
+// with exactly the reserve free it goes ahead.
+func TestALaunchLeavesSporedItsSlots(t *testing.T) {
+	cfg := LaunchConfig{Name: "n", TTL: "1h", InstanceType: "t3.micro", Region: "us-east-1", PricePerHour: 0.01}
+	launch, reserve, _ := tagCounts(t, cfg)
+	cfg.Tags = map[string]string{}
+	for i := 0; launch+len(cfg.Tags) < awsMaxTagsPerResource; i++ {
+		cfg.Tags[fmt.Sprintf("user%02d", i)] = "v"
+	}
+	err := cfg.ValidateTagCount()
+	var limit *TagLimitError
+	if !errors.As(err, &limit) {
+		t.Fatalf("a launch writing %d tags, leaving none of its %d reserved slots: ValidateTagCount() = %v, want a *TagLimitError",
+			awsMaxTagsPerResource, reserve, err)
+	}
+	if limit.Count != awsMaxTagsPerResource+reserve || len(limit.Spored) != reserve {
+		t.Errorf("refusal counts %d tags with %d for spored, want %d with %d", limit.Count, len(limit.Spored), awsMaxTagsPerResource+reserve, reserve)
+	}
+	msg := err.Error()
+	for _, want := range []string{fmt.Sprintf("%d slot(s) spored needs", reserve), "spawn:compute-seconds", "spawn:last-heartbeat"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, msg)
+		}
+	}
+
+	for i := 0; i < reserve; i++ {
+		delete(cfg.Tags, fmt.Sprintf("user%02d", i))
+	}
+	if err := cfg.ValidateTagCount(); err != nil {
+		t.Errorf("a launch leaving exactly its %d reserved slots free was refused: %v", reserve, err)
+	}
+}
+
+// The reserve is the list less the keys the launch writes itself: an update
+// to a key the instance already carries takes no slot. A launch tagged with a
+// filesystem still being created writes spawn:fsx-pending and
+// spawn:fsx-mount-point itself, so only spored's other FSx tags are kept.
+func TestTheReserveSkipsKeysTheLaunchWrites(t *testing.T) {
+	cfg := LaunchConfig{Name: "n", TTL: "1h", InstanceType: "t3.micro", Region: "us-east-1", PricePerHour: 0.01,
+		FSxPending: "fs-3", FSxMountPoint: "/fsx"}
+	tags, err := buildTags(cfg, "123456789012", "arn:aws:iam::1:user/u", "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, tg := range tags {
+		have[*tg.Key] = true
+	}
+	if !have["spawn:fsx-pending"] || !have["spawn:fsx-mount-point"] {
+		t.Fatalf("the launch does not write its pending FSx's tags: %v", have)
+	}
+	spored, spawn := tagReserve(cfg, tags)
+	got := strings.Join(append(spored, spawn...), ",")
+	for _, k := range []string{"spawn:fsx-id", "spawn:fsx-dra-status", "spawn:fsx-dra-error"} {
+		if !strings.Contains(got, k) {
+			t.Errorf("reserve %s keeps no slot for %s", got, k)
+		}
+	}
+	for _, k := range []string{"spawn:fsx-pending", "spawn:fsx-mount-point"} {
+		if strings.Contains(got, k) {
+			t.Errorf("reserve %s keeps a slot for %s, which the launch already writes", got, k)
+		}
 	}
 }

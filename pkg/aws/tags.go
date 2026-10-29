@@ -350,8 +350,8 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	// Everything above is kept whatever the count, so a set that does not fit
 	// is refused here, before any AWS call the caller has yet to make, rather
 	// than by RunInstances after the launch's security groups, IAM and FSx
-	// exist (#1336). The count includes the tags spawn adds after the launch
-	// (postLaunchTags).
+	// exist (#1336). The count includes the slots kept for the tags spored and
+	// spawn write after the launch (tagReserve, #1355).
 	if err := checkTagLimit(config, tags, len(tags)-beforeCustom); err != nil {
 		return nil, err
 	}
@@ -376,7 +376,8 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	// convenience record of the sweep point, and the sweep manifest remains
 	// authoritative — so a truncated tag set beats a launch that cannot start.
 	if config.SweepID != "" && len(config.Parameters) > 0 {
-		budget := launchTagLimit(config) - len(tags)
+		limit := launchTagLimit(config, tags)
+		budget := limit - len(tags)
 		if budget < 0 {
 			budget = 0
 		}
@@ -395,11 +396,11 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 		if dropped := len(keys) - emitted; dropped > 0 {
 			fmt.Fprintf(os.Stderr,
 				"⚠️  %d of %d sweep parameters were not tagged: the launch already uses %d of "+
-					"the %d tags per resource it may use (AWS's %d, less %d spawn writes after launch).\n"+
+					"the %d tags per resource it may use (AWS's %d, less %d kept for the tags spored and spawn write after launch).\n"+
 					"   The instance still runs with the full parameter set in its environment; only the "+
 					"spawn:param:* record is truncated (first %d by name kept).\n",
-				dropped, len(keys), len(tags)-emitted, launchTagLimit(config), awsMaxTagsPerResource,
-				len(postLaunchTags(config)), emitted)
+				dropped, len(keys), len(tags)-emitted, limit, awsMaxTagsPerResource,
+				awsMaxTagsPerResource-limit, emitted)
 		}
 	}
 

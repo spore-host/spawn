@@ -29,6 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A launch keeps a tag slot free for every tag spored writes by itself**
+  (#1355). EC2 fails a `CreateTags` that would take an instance past 50 tags
+  whole, so an instance launched at the limit could never write
+  `spawn:compute-seconds` (a stop/start then reset the cost clock),
+  `spawn:last-heartbeat`, its cost footprint or its status tags. The launch
+  and its pre-flight now refuse, before any AWS call, a tag set that leaves
+  fewer slots than the tags spored and spawn write after the launch, less the
+  keys the launch writes itself, and the refusal says how many slots spored
+  needs: 7 on every instance (`compute-seconds`, `last-heartbeat`,
+  `spored-version`, `logged-in-count`, `ebs-hourly-cost`, `public-ipv4-count`,
+  `elastic-ipv4-count`), plus 2 with DNS, 3 for a web app or DCV session, 1
+  for a task's flush status, 7 for an ephemeral FSx (the 4 mount tags spawn
+  writes once it exists and 3 spored writes once it mounts), and 1 for Spot's
+  price. A launch at exactly 50 tags, which #1336 allowed, is now refused. The
+  list is `aws.PostLaunchTagKeys()` (new), and `aws.TagLimitError` gains
+  `Spored`. Tags written only when someone runs a command (`spawn extend`,
+  `spawn stop`/`start`, `spored config set`, `spawn dns register`, `spawn
+  plugin install`) are on the list but take no slot: the command reports a
+  failed write. A launch with every setting at once is now refused (58 of
+  50); without a job array and a web app it fits at exactly 50.
+
 - **spored's launch-fixed settings are a per-launch config object, not
   instance tags** (#1359). The settings only spored reads, at boot, and
   nothing changes after launch, 21 of them (`notify-url`, `notify-command`,
