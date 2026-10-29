@@ -223,12 +223,14 @@ type LaunchConfig struct {
 	CostLimit       float64
 	DNSName         string
 
-	// IdleCPUPercent is spored's idle CPU threshold, written as spawn:idle-cpu:
+	// IdleCPUPercent is spored's idle CPU threshold, written as idle-cpu in the
+	// launch config object (#1359):
 	// the instance counts as idle while CPU use is below it. 0 keeps spored's
 	// 5% (#1308).
 	IdleCPUPercent float64
-	// Observability is spored's metrics and tracing configuration, written as
-	// spawn:metrics-* / spawn:tracing-* tags (#1308).
+	// Observability is spored's metrics and tracing configuration, written into
+	// the launch config object, but for the spawn:metrics-enabled tag (#1308,
+	// #1359).
 	Observability SporedObservability
 
 	// DNSDomain and DNSEndpoint point spored at a custom DNS deployment (#891):
@@ -317,12 +319,14 @@ type LaunchConfig struct {
 	IMDSv2HopLimit int    // IMDSv2 hop limit (default: 1)
 
 	// Slack lifecycle notifications
-	SlackWorkspaceID   string // Slack workspace ID — injected as spawn:slack-workspace-id tag
-	NotifyURL          string // spore-bot Lambda Function URL — injected as spawn:notify-url tag
-	NotifyCommand      string // Slash command for workspace routing — injected as spawn:notify-command tag
-	NotifyPlatform     string // Chat platform: "slack"(default)/"teams"/"discord" — injected as spawn:notify-platform tag (#2)
-	ActivePortsRaw     string // comma-separated ports to monitor — injected as spawn:active-ports tag
-	ActiveProcessesRaw string // comma-separated process names — injected as spawn:active-processes tag
+	// The settings below to WebAuth are spored settings fixed at launch: they go
+	// into the launch config object (pkg/launchconfig, #1359), not tags.
+	SlackWorkspaceID   string // Slack workspace ID (slack-workspace-id)
+	NotifyURL          string // spore-bot Lambda Function URL (notify-url)
+	NotifyCommand      string // Slash command for workspace routing (notify-command)
+	NotifyPlatform     string // Chat platform: "slack"(default)/"teams"/"discord" (notify-platform, #2)
+	ActivePortsRaw     string // comma-separated ports to monitor (active-ports)
+	ActiveProcessesRaw string // comma-separated process names (active-processes)
 
 	// DCV application streaming
 	DCVSessionID string // NICE DCV session ID — activates DCV idle detection in spored (e.g. "console")
@@ -331,10 +335,10 @@ type LaunchConfig struct {
 	// Web-UI application streaming (#590). When AppMode=="web", spored probes the
 	// app's own HTTP port instead of a DCV session and fronts it with a TLS
 	// reverse proxy on :443 (no DCV). Mutually exclusive with DCVSessionID.
-	AppMode         string // "web" for a port-served app; empty otherwise — tag spawn:app-mode
-	ReadyPort       int    // container HTTP port to probe + proxy (e.g. 8888) — tag spawn:ready-port
-	ReadyHealthPath string // HTTP path probed for readiness (default "/") — tag spawn:ready-path
-	WebAuth         string // web proxy auth: "token" (default, spored gates :443 with a token) or "none" — tag spawn:web-auth
+	AppMode         string // "web" for a port-served app; empty otherwise (app-mode)
+	ReadyPort       int    // container HTTP port to probe + proxy, e.g. 8888 (ready-port)
+	ReadyHealthPath string // HTTP path probed for readiness, default "/" (ready-path)
+	WebAuth         string // web proxy auth: "token" (default, spored gates :443 with a token) or "none" (web-auth)
 
 	RootVolumeSizeGiB int32 // Override root EBS volume size in GiB (0 = use default 20 GiB)
 

@@ -9,9 +9,9 @@ import (
 )
 
 // SporedObservability is spored's metrics and tracing configuration. Launch
-// writes it as the spawn:metrics-* and spawn:tracing-* tags spored reads when it
-// starts (pkg/provider/ec2.go), so it is in effect from the first boot with no
-// spored restart (#1308). Zero values leave spored's own defaults in place
+// writes it into the launch config object spored reads when it starts (#1359;
+// only spawn:metrics-enabled stays a tag), so it is in effect from the first
+// boot with no spored restart (#1308). Zero values leave spored's own defaults in place
 // (pkg/observability.DefaultConfig).
 type SporedObservability struct {
 	// MetricsEnabled starts spored's Prometheus metrics server, and its
@@ -75,7 +75,8 @@ func (o SporedObservability) Validate() error {
 	return nil
 }
 
-// validateIdleCPU checks spored's idle CPU threshold (spawn:idle-cpu): the CPU
+// validateIdleCPU checks spored's idle CPU threshold (idle-cpu, in the launch
+// config object): the CPU
 // percentage below which the instance counts as idle. 0 means unset (spored's
 // 5%); a threshold must be above 0, since 0 would mean the CPU is never below
 // it and the idle stop never fires.

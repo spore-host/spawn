@@ -354,7 +354,7 @@ func init() {
 	launchCmd.Flags().StringVar(&notifyPlatform, "notify-platform", "", "Chat platform for lifecycle notifications: slack (default), teams, or discord")
 	launchCmd.Flags().StringVar(&activePorts, "active-ports", "", "TCP ports whose established connections are counted and reported (the spawn:logged-in-count tag). They do NOT prevent the idle stop: an abandoned browser tab holds a connection open forever. To keep a busy app alive, use --active-processes (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter)")
 	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents the idle stop while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
-	launchCmd.Flags().StringVar(&idleCPUThreshold, "idle-cpu-threshold", "", "CPU percentage below which spored counts the instance as idle (above 0, at most 100; default 5). Sets spawn:idle-cpu")
+	launchCmd.Flags().StringVar(&idleCPUThreshold, "idle-cpu-threshold", "", "CPU percentage below which spored counts the instance as idle (above 0, at most 100; default 5). Stored in the launch's config object, not a tag")
 	// spored's metrics and tracing (#1308), written as the tags spored reads
 	// when it starts, so they apply from the first boot. docs/self-hosted-monitoring.md.
 	launchCmd.Flags().BoolVar(&metricsEnabled, "metrics", false, "Start spored's Prometheus metrics server and tag the instance spawn:metrics-enabled=true, which deployment/prometheus's EC2 discovery matches. It listens on localhost unless --metrics-bind is set, and the security group must admit the scraper (see docs/self-hosted-monitoring.md)")

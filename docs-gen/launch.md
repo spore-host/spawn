@@ -81,7 +81,7 @@ spawn launch <name> [flags]
 | `--iam-role-tags` |  | stringSlice |  | Tags for IAM role (key=value format) |
 | `--iam-role` |  | string |  | IAM role name (creates if doesn't exist) |
 | `--iam-trust-services` |  | stringSlice | `[ec2]` | Services that can assume role |
-| `--idle-cpu-threshold` |  | string |  | CPU percentage below which spored counts the instance as idle (above 0, at most 100; default 5). Sets spawn:idle-cpu |
+| `--idle-cpu-threshold` |  | string |  | CPU percentage below which spored counts the instance as idle (above 0, at most 100; default 5). Stored in the launch's config object, not a tag |
 | `--idle-timeout` |  | string |  | Stop the instance after this much idleness (see --on-idle), e.g. 30m, 2h, 1d (defaults to 1h if neither --ttl nor --idle-timeout set) |
 | `--instance-names` |  | string |  | Instance name template (e.g., 'worker-{index}', default: '{job-array-name}-{index}') |
 | `--instance-profile` |  | string |  | Attach this EXISTING IAM instance profile by name, bypassing all --iam-role/--iam-policy/--iam-policy-file resolution and the spored-instance-profile default entirely. Use when you need a deterministic, auditable choice instead of spawn's create/reuse heuristic (#550) — e.g. a profile you've already scoped to a specific data bucket. A --nested-spawn role (spawn-instance-nested-*) named here requires --ttl, as --nested-spawn does. |

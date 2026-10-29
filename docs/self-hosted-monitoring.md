@@ -18,8 +18,8 @@ it on. **2. Discovery needs a tag.** `deployment/prometheus/prometheus.yaml`'s
 scraped: Prometheus reports a healthy config with zero targets.
 
 `spawn launch --metrics` does both. It writes `spawn:metrics-enabled=true`,
-which `spored` reads as its metrics config when it starts and which the
-discovery filter matches from the first scrape:
+which `spored` reads when it starts and which the discovery filter matches
+from the first scrape:
 
 ```sh
 spawn launch my-worker --instance-type c7g.large --metrics --metrics-bind 0.0.0.0
@@ -29,29 +29,32 @@ spawn launch my-worker --instance-type c7g.large --metrics --metrics-bind 0.0.0.
 default), so a scraper on another host can reach it. `--metrics-port`
 (1024-65535, default 9090) and `--metrics-path` (default `/metrics`) change
 the rest; each needs `--metrics`, and a launch with one but not the other is
-refused rather than started with a setting that does nothing. Each flag
-writes the matching tag (`spawn:metrics-port`, `spawn:metrics-bind`,
-`spawn:metrics-path`). `spawn launch --tag` cannot set any of them, because
-every `spawn:` key is reserved.
+refused rather than started with a setting that does nothing. These three are
+not tags: since v0.150.0 they are in the instance's launch config object, with
+the other `spored` settings fixed at launch (#1359), which `spored` reads at
+first boot and caches on the instance. `spawn:metrics-enabled` stays a tag
+because the discovery filter matches it. `spawn launch --tag` cannot set any
+of them, because every `spawn:` key is reserved.
 
 `spored` logs `Starting metrics server on <bind>:<port><path>` when it does start
 one, so that line's absence is the check.
 
 ### An instance that is already running
 
-The flags apply at launch only. For an instance launched without them, set
-the tags with the AWS CLI and restart `spored`, which reads them only when it
-starts:
+The flags apply at launch only. For an instance launched without them, tag it
+`spawn:metrics-enabled=true` with the AWS CLI and restart `spored`, which
+reads the tag only when it starts; the server then listens on `localhost:9090`.
+The bind address, port and path are fixed at launch (a tag with their names is
+not read since v0.150.0), so for a scraper on another host use an agent config
+file instead (see `example-local-config.yaml`); then the
+`spawn:metrics-enabled` tag is needed only for discovery:
 
 ```sh
 aws ec2 create-tags --region <region> --resources <instance-id> \
-  --tags Key=spawn:metrics-enabled,Value=true Key=spawn:metrics-bind,Value=0.0.0.0
+  --tags Key=spawn:metrics-enabled,Value=true
 spawn connect my-worker -- sudo systemctl restart spored
 ```
 
-An agent config file can turn the server on instead (see
-`example-local-config.yaml`); then the `spawn:metrics-enabled` tag is needed
-only for discovery, and no restart is needed for that:
 
 ```yaml
 observability:
@@ -72,8 +75,8 @@ default security group does not allow.
 fraction kept (0 to 1, default 0.1). The `xray` exporter is refused, because
 the instance role spawn creates does not grant `xray:PutTraceSegments`, so
 every span would be dropped. `--idle-cpu-threshold` sets the CPU percentage
-below which `spored` counts the instance as idle (default 5), written as
-`spawn:idle-cpu`.
+below which `spored` counts the instance as idle (default 5). All three are in
+the launch config object, not tags (#1359).
 
 ## What is in the tree
 
