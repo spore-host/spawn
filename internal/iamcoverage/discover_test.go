@@ -50,6 +50,8 @@ func TestDiscoversEveryShapeOfCall(t *testing.T) {
 		"ec2:RunInstances",         // implied (see TestImpliedActionsFollowTheCallSite)
 		"ec2:StopInstances",        // method value
 		"ec2:TerminateInstances",   // direct
+		"events:PutTargets",        // implied
+		"iam:PassRole",             // implied: RunInstances with IamInstanceProfile, a target's RoleArn
 		"lambda:InvokeFunctionUrl", // SigV4-signed for "lambda"
 		"s3:AbortMultipartUpload",  // transfer manager
 		"s3:CreateBucket",          // implied
@@ -170,6 +172,16 @@ func TestAWildcardNeverSatisfiesTheGate(t *testing.T) {
 	}
 	if g, _ := p.Grants("s3:GetObject"); g != NotGranted {
 		t.Error("a Deny must grant nothing")
+	}
+	// An Allow cancelled by an unconditional Deny on every resource (#1397).
+	denied, err := ParsePolicyJSON("t", `{"Statement":[
+		{"Effect":"Allow","Action":"iam:PassRole","Resource":"*"},
+		{"Effect":"Deny","Action":"iam:*","Resource":"*"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := denied.Grants("iam:PassRole"); g != Denied {
+		t.Errorf("Allow and an unconditional Deny: Grants = %v, want Denied", g)
 	}
 	if g, _ := p.Grants("sts:AssumeRole"); g != NotGranted {
 		t.Error("a trust-policy statement must grant nothing")

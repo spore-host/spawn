@@ -76,11 +76,20 @@ func (p *Policy) Merge(other *Policy) *Policy {
 // Grants reports how p covers action, and the source that does.
 func (p *Policy) Grants(action string) (Grant, string) {
 	a := strings.ToLower(action)
-	for d, src := range p.denied {
+	grant, src := p.allowed(a)
+	if grant == NotGranted {
+		return grant, src
+	}
+	for d, dsrc := range p.denied {
 		if ok, _ := path.Match(d, a); ok {
-			return Denied, src
+			return Denied, dsrc
 		}
 	}
+	return grant, src
+}
+
+// allowed is how p's Allow statements alone cover the lower-cased action a.
+func (p *Policy) allowed(a string) (Grant, string) {
 	if src, ok := p.exact[a]; ok {
 		return Exact, src
 	}
