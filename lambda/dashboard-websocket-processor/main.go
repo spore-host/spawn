@@ -251,18 +251,24 @@ func parseAutoscaleEvent(record events.DynamoDBEventRecord) (eventType string, e
 }
 
 // getActiveConnections retrieves all active connections from DynamoDB
-func getActiveConnections(ctx context.Context, dynamoClient *dynamodb.Client) ([]Connection, error) {
-	// Scan the connections table
-	result, err := dynamoClient.Scan(ctx, &dynamodb.ScanInput{
+func getActiveConnections(ctx context.Context, dynamoClient dynamodb.ScanAPIClient) ([]Connection, error) {
+	// Scan the connections table, every page: one Scan returns at most 1 MB, and
+	// a connection past the first page silently missed every broadcast (#1421).
+	var items []map[string]types.AttributeValue
+	p := dynamodb.NewScanPaginator(dynamoClient, &dynamodb.ScanInput{
 		TableName: aws.String(connectionsTable),
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan connections table: %w", err)
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan connections table: %w", err)
+		}
+		items = append(items, page.Items...)
 	}
 
 	// Unmarshal connections
 	var connections []Connection
-	for _, item := range result.Items {
+	for _, item := range items {
 		var conn Connection
 		if err := attributevalue.UnmarshalMap(item, &conn); err != nil {
 			fmt.Printf("Warning: failed to unmarshal connection: %v\n", err)

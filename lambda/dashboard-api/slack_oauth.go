@@ -303,19 +303,23 @@ func storeSlackWorkspace(ctx context.Context, cfg aws.Config, tableName string, 
 func rotateTokenByCurrentToken(ctx context.Context, cfg aws.Config, tableName, clientID, clientSecret, currentToken string) (string, error) {
 	client := dynamodb.NewFromConfig(cfg)
 
-	// Scan for workspace matching current token
-	result, err := client.Scan(ctx, &dynamodb.ScanInput{
+	// Scan for workspace matching current token. A filtered Scan's first page
+	// can be empty while a later one holds the match, so follow pages until one
+	// matches (#1421); a failed page is a scan error, not "not found".
+	item, err := scanFirst(ctx, client, &dynamodb.ScanInput{
 		TableName:        aws.String(tableName),
 		FilterExpression: aws.String("bot_token = :t"),
 		ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
 			":t": &dynamodbtypes.AttributeValueMemberS{Value: currentToken},
 		},
 	})
-	if err != nil || len(result.Items) == 0 {
+	if err != nil {
+		return "", fmt.Errorf("scan for workspace: %w", err)
+	}
+	if item == nil {
 		return "", fmt.Errorf("workspace not found for token")
 	}
 
-	item := result.Items[0]
 	refreshTokenAttr, ok := item["refresh_token"].(*dynamodbtypes.AttributeValueMemberS)
 	if !ok || refreshTokenAttr.Value == "" {
 		return "", fmt.Errorf("no refresh_token stored for workspace")

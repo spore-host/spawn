@@ -356,6 +356,9 @@ func lookupCliIamArnByEmail(ctx context.Context, cfg aws.Config, email string) (
 		},
 	}
 
+	// single-page: only the first match is used, and a Query without a
+	// FilterExpression returns an empty page only when nothing matches, so the
+	// first page is a complete answer to "is there a linked record".
 	result, err := dynamodbClient.Query(ctx, queryInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to query by email: %w", err)

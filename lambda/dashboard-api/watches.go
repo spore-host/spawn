@@ -14,6 +14,9 @@ import (
 const (
 	defaultWatchesTable = "lagotto-watches"
 	defaultHistoryTable = "lagotto-match-history"
+
+	// watchHistoryLimit bounds GET /api/watches/history to the newest matches.
+	watchHistoryLimit int32 = 100
 )
 
 // WatchInfo represents a lagotto watch for the dashboard API.
@@ -39,6 +42,9 @@ type WatchInfo struct {
 
 // MatchInfo represents a capacity match for the dashboard API.
 type MatchInfo struct {
+	// UserID is the owning principal, an authorization input like
+	// WatchInfo.UserID, so it is never serialized.
+	UserID           string  `json:"-" dynamodbav:"user_id"`
 	WatchID          string  `json:"watch_id" dynamodbav:"watch_id"`
 	Region           string  `json:"region" dynamodbav:"region"`
 	AvailabilityZone string  `json:"availability_zone" dynamodbav:"availability_zone"`
@@ -57,13 +63,18 @@ type WatchesResponse struct {
 	Watch   *WatchInfo  `json:"watch,omitempty"`
 	Matches []MatchInfo `json:"matches,omitempty"`
 	Error   string      `json:"error,omitempty"`
+	// Truncated is set when Matches is the newest watchHistoryLimit of a longer
+	// history (#1421).
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 func handleListWatches(ctx context.Context, cfg aws.Config, userARN string) (events.APIGatewayProxyResponse, error) {
 	client := dynamodb.NewFromConfig(cfg)
 	tableName := getEnvOrDefault("LAGOTTO_WATCHES_TABLE", defaultWatchesTable)
 
-	result, err := client.Query(ctx, &dynamodb.QueryInput{
+	// Every page, or an error: one page used to be all the dashboard read, so a
+	// user with more than a page of watches saw a partial list as complete (#1421).
+	items, err := queryAll(ctx, client, &dynamodb.QueryInput{
 		TableName:              aws.String(tableName),
 		IndexName:              aws.String("user_id-index"),
 		KeyConditionExpression: aws.String("user_id = :uid"),
@@ -75,10 +86,16 @@ func handleListWatches(ctx context.Context, cfg aws.Config, userARN string) (eve
 		return errorResponse(500, fmt.Sprintf("query watches: %v", err)), nil
 	}
 
-	watches := make([]WatchInfo, 0, len(result.Items))
-	for _, item := range result.Items {
+	watches := make([]WatchInfo, 0, len(items))
+	for _, item := range items {
 		var w WatchInfo
 		if err := attributevalue.UnmarshalMap(item, &w); err != nil {
+			continue
+		}
+		// The key condition already selects the caller's watches; this is the
+		// same fail-closed comparison handleGetWatch makes, on every page, so a
+		// record without the caller's user_id is never returned (#821).
+		if w.UserID != userARN {
 			continue
 		}
 		watches = append(watches, w)
@@ -135,7 +152,11 @@ func handleWatchHistory(ctx context.Context, cfg aws.Config, userARN string) (ev
 	client := dynamodb.NewFromConfig(cfg)
 	tableName := getEnvOrDefault("LAGOTTO_HISTORY_TABLE", defaultHistoryTable)
 
-	result, err := client.Query(ctx, &dynamodb.QueryInput{
+	// The newest watchHistoryLimit matches, deliberately bounded: history grows
+	// with every poll match and the dashboard shows recent activity. The bound is
+	// reached across pages, not assumed of one, and Truncated says when older
+	// matches exist, so the list never passes for the whole history (#1421).
+	items, truncated, err := queryUpTo(ctx, client, &dynamodb.QueryInput{
 		TableName:              aws.String(tableName),
 		IndexName:              aws.String("user_id-index"),
 		KeyConditionExpression: aws.String("user_id = :uid"),
@@ -143,23 +164,27 @@ func handleWatchHistory(ctx context.Context, cfg aws.Config, userARN string) (ev
 			":uid": &dynamodbtypes.AttributeValueMemberS{Value: userARN},
 		},
 		ScanIndexForward: aws.Bool(false),
-		Limit:            aws.Int32(100),
-	})
+	}, watchHistoryLimit)
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("query history: %v", err)), nil
 	}
 
-	matches := make([]MatchInfo, 0, len(result.Items))
-	for _, item := range result.Items {
+	matches := make([]MatchInfo, 0, len(items))
+	for _, item := range items {
 		var m MatchInfo
 		if err := attributevalue.UnmarshalMap(item, &m); err != nil {
+			continue
+		}
+		// Fail closed, as in handleListWatches: only the caller's records.
+		if m.UserID != userARN {
 			continue
 		}
 		matches = append(matches, m)
 	}
 
 	return successResponse(WatchesResponse{
-		Success: true,
-		Matches: matches,
+		Success:   true,
+		Matches:   matches,
+		Truncated: truncated,
 	})
 }

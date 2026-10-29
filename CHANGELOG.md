@@ -110,6 +110,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn:version` is its own (spawn-ts writes its library version, e.g.
   0.7.0) and names no spored.
 
+- **`GET /api/sweeps?team_id=` fails when the team sweeps cannot be read**
+  (#1421). A failed team-sweeps Query used to be logged and the personal
+  sweeps returned alone, with `success: true`; it is now a 500.
+
+### Fixed
+
+- **The dashboard reads every DynamoDB page** (#1421). `GET /api/watches`,
+  `/api/cost-history`, `/api/sweeps` (personal and team), `/teams`,
+  `/teams/{id}` and `DELETE /teams/{id}` read only the first Query or Scan
+  page (at most 1 MB), so a user past one page saw a partial list as if it
+  were complete. The personal sweeps Scan was the reachable case: its
+  `Limit: 200` counts items evaluated before the `user_id` filter, so once the
+  table held more than 200 sweeps a user saw only theirs among an arbitrary
+  200. Deleting a team read the first 500 memberships and then deleted the
+  team record, orphaning the rest. The Slack token rotation's workspace Scan
+  could report "not found" for a match on a later page, and the websocket
+  processor's connections Scan skipped every connection past the first page
+  for broadcasts. Each now follows `LastEvaluatedKey` to the end, a failed
+  page is an error (500) rather than a partial list, and every page's items
+  are checked against the caller, fail-closed, as `GET /api/watches/{id}`
+  already was. `GET /api/watches/history` stays bounded to the newest 100
+  matches, reached across pages, and now sets `"truncated": true` when older
+  matches exist. Redeploy `dashboard-api` and `dashboard-websocket-processor`
+  from a release tag to pick it up.
+
 ## [0.149.0] - 2026-10-29
 
 ### Added
