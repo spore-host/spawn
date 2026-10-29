@@ -134,3 +134,48 @@ func TestUpgradeSporedRefusesToStrandLaunchSettings(t *testing.T) {
 		}
 	}
 }
+
+// #1423: the spored the tags-only refusal tells the user to pin comes from
+// spawn:version only on an instance spawn itself launched. spawn-ts writes its
+// own library version there (0.7.0, no such spored), so its hint names the
+// spored the instance reports, or the frozen tags-reading spored.
+func TestUpgradeSporedTagsOnlyHintNamesARealSpored(t *testing.T) {
+	settings := map[string]string{"spawn:managed": "true", "spawn:notify-url": "https://n"}
+	with := func(extra map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range settings {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	for _, tc := range []struct {
+		name      string
+		tags      map[string]string
+		want, not string
+	}{
+		{"spawn-ts instance", with(map[string]string{"spawn:created-by": "spawn-ts", "spawn:version": "0.7.0", "spawn:spored-version": "0.149.0"}),
+			"--version 0.149.0", "--version 0.7.0"},
+		{"spawn-ts instance on an older spored", with(map[string]string{"spawn:created-by": "spawn-ts", "spawn:version": "0.7.0", "spawn:spored-version": "0.141.2"}),
+			"--version 0.141.2", "--version 0.7.0"},
+		{"spawn instance", with(map[string]string{"spawn:created-by": "spawn", "spawn:version": "0.142.0", "spawn:spored-version": "0.141.2"}),
+			"--version 0.142.0", ""},
+		{"neither version", with(nil), "--version 0.149.0", ""},
+		{"spawn instance with a dev version", with(map[string]string{"spawn:created-by": "spawn", "spawn:version": "dev"}),
+			"--version 0.149.0", "--version dev"},
+	} {
+		err := launchConfigUpgradeGuard(tc.tags, launchconfig.FirstSporedVersion)
+		if err == nil {
+			t.Errorf("%s: not refused", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to name %q", tc.name, err, tc.want)
+		}
+		if tc.not != "" && strings.Contains(err.Error(), tc.not) {
+			t.Errorf("%s: err = %v, names %q", tc.name, err, tc.not)
+		}
+	}
+}
