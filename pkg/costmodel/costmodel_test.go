@@ -125,3 +125,68 @@ func TestFromTags(t *testing.T) {
 		t.Error("IPv4Measured must be true exactly when a count tag is present")
 	}
 }
+
+// The footprint in one tag (#1428): what EncodeFootprint writes,
+// MeasuredFromTags reads back, and a reader gets the same footprint from it as
+// from the three tags a spored before #1428 writes.
+func TestFootprintTagReadsLikeTheLegacyThree(t *testing.T) {
+	m := Measured{EBSPerHour: 0.021918, PublicIPv4: 1, ElasticIPv4: 2, IPv4Known: true}
+	v := EncodeFootprint(m)
+	if v != "v1:0.021918/1/2" {
+		t.Errorf("EncodeFootprint = %q, want v1:0.021918/1/2", v)
+	}
+	one := map[string]string{"spawn:price-per-hour": "1.5", "spawn:cost-footprint": v}
+	legacy := map[string]string{
+		"spawn:price-per-hour":     "1.5",
+		"spawn:ebs-hourly-cost":    "0.021918",
+		"spawn:public-ipv4-count":  "1",
+		"spawn:elastic-ipv4-count": "2",
+	}
+	if a, b := MeasuredFromTags(one, "spawn"), MeasuredFromTags(legacy, "spawn"); a != m || b != m {
+		t.Errorf("MeasuredFromTags: one tag %+v, legacy %+v, want %+v", a, b, m)
+	}
+	if a, b := FromTags(one, "spawn"), FromTags(legacy, "spawn"); a != b || a.EBSPerHour != m.EBSPerHour {
+		t.Errorf("FromTags: one tag %+v, legacy %+v", a, b)
+	}
+	if !IPv4Measured(one, "spawn") || !IPv4Measured(legacy, "spawn") {
+		t.Error("IPv4Measured must be true from either form")
+	}
+	// A footprint of zero addresses is still a measurement.
+	if !IPv4Measured(map[string]string{"spawn:cost-footprint": "v1:0.000000/0/0"}, "spawn") {
+		t.Error("a recorded zero count is not a measurement")
+	}
+	// Both present (spored upgraded past #1428): each figure the larger.
+	both := map[string]string{"spawn:cost-footprint": "v1:0.010000/3/0", "spawn:ebs-hourly-cost": "0.02", "spawn:elastic-ipv4-count": "1"}
+	if got := MeasuredFromTags(both, "spawn"); got != (Measured{EBSPerHour: 0.02, PublicIPv4: 3, ElasticIPv4: 1, IPv4Known: true}) {
+		t.Errorf("both forms: %+v, want the larger of each", got)
+	}
+	if n := len(EncodeFootprint(Measured{EBSPerHour: 1e15, PublicIPv4: 1 << 30, ElasticIPv4: 1 << 30})); n > 256 {
+		t.Errorf("a huge footprint encodes to %d characters, over EC2's 256", n)
+	}
+}
+
+func TestParseFootprint(t *testing.T) {
+	for v, want := range map[string]bool{
+		"v1:0.5/1/2":       true,
+		"v2:0.5/1/2/extra": true, // a later version may only append
+		"v1:0.5/1":         false,
+		"0.5/1/2":          false,
+		"v0:0.5/1/2":       false,
+		"vx:0.5/1/2":       false,
+		"v1:-1/1/2":        false,
+		"v1:0.5/-1/2":      false,
+		"v1:NaN/1/2":       false,
+		"v1:Inf/1/2":       false,
+		"":                 false,
+	} {
+		if _, ok := ParseFootprint(v); ok != want {
+			t.Errorf("ParseFootprint(%q) ok = %v, want %v", v, ok, want)
+		}
+	}
+	if m, _ := ParseFootprint("v2:0.5/1/2/9"); m != (Measured{EBSPerHour: 0.5, PublicIPv4: 1, ElasticIPv4: 2, IPv4Known: true}) {
+		t.Errorf("a v2 value's first three fields: %+v", m)
+	}
+	if got := EncodeFootprint(Measured{EBSPerHour: -1, PublicIPv4: -2}); got != "v1:0.000000/0/0" {
+		t.Errorf("negative figures encode as %q", got)
+	}
+}

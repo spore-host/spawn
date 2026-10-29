@@ -77,7 +77,7 @@ func billableResourcesAt(instance *aws.InstanceInfo, rate statusRate) []billable
 	out = append(out, compute)
 
 	// EBS. The rate was resolved once at first boot and cached on the instance
-	// (spawn:ebs-hourly-cost), so this needs no DescribeVolumes. Counted by
+	// (spawn:cost-footprint), so this needs no DescribeVolumes. Counted by
 	// --cost-limit since #616 (on wall-clock time, so stopped time counts too), and
 	// reclaimed by the termination the cap triggers (DeleteOnTermination).
 	fp := enforcedFootprint(instance)

@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **spored writes its cost footprint as one tag, `spawn:cost-footprint`,
+  not three** (#1428). The EBS rate and the auto-assigned and Elastic public
+  IPv4 counts that `--cost-limit` is enforced from are now one versioned value,
+  `v1:<EBS $/hr>/<auto-assigned>/<Elastic>` (for example
+  `v1:0.002192/1/0`), so a launch keeps 5 slots for spored on every instance
+  instead of 7. A maximal launch now needs 56 of 50 (was 58), 48 without a job
+  array and a web app (was 50); the documented monitoring setup on the #477
+  maximal sweep member needs 46 (was 48), and as a job-array member too 51
+  (was 53), still 1 over. Every reader (`spawn status`, `spawn cost`, `spawn
+  extend --cost-limit`, and spored's own enforcement) reads the new tag and
+  falls back to `spawn:ebs-hourly-cost`, `spawn:public-ipv4-count` and
+  `spawn:elastic-ipv4-count`, which an instance whose spored predates this
+  keeps writing; where both are present each figure is the larger. Nothing
+  writes the three old tags any more. New in `pkg/costmodel`: `TagFootprint`,
+  `LegacyFootprintTags`, `Measured`, `EncodeFootprint`, `ParseFootprint`,
+  `MeasuredFromTags`; `FootprintTags` is now just `TagFootprint`.
+
 - **A launch keeps a tag slot free for every tag spored writes by itself**
   (#1355). EC2 fails a `CreateTags` that would take an instance past 50 tags
   whole, so an instance launched at the limit could never write

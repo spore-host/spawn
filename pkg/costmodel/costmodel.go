@@ -40,6 +40,7 @@
 package costmodel
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -62,18 +63,119 @@ const hoursPerMonth = 730.0
 
 // Tag suffixes (after the "spawn:" prefix) the rates are cached in. spored
 // measures them from the instance's own volumes and addresses and writes them;
-// every reader reads them from here.
+// every reader reads them from here (MeasuredFromTags).
 const (
-	TagEBSHourlyCost  = "ebs-hourly-cost"
-	TagPublicIPv4     = "public-ipv4-count"  // auto-assigned (Amazon-owned) addresses
-	TagElasticIPv4    = "elastic-ipv4-count" // Elastic IPs associated to the instance
+	// TagFootprint is the measured footprint in one tag (#1428), in the form
+	// EncodeFootprint writes: "v1:<EBS $/hr>/<auto-assigned IPv4>/<Elastic IPv4>".
+	// It is the only footprint tag spored writes since #1428.
+	TagFootprint = "cost-footprint"
+
+	// The three tags spored wrote before #1428, one value each. An instance
+	// whose spored predates #1428 (its spored is pinned at launch) keeps
+	// writing them, so every reader still reads them, through
+	// MeasuredFromTags; nothing writes them any more.
+	TagEBSHourlyCost = "ebs-hourly-cost"
+	TagPublicIPv4    = "public-ipv4-count"  // auto-assigned (Amazon-owned) addresses
+	TagElasticIPv4   = "elastic-ipv4-count" // Elastic IPs associated to the instance
+
 	TagPricePerHour   = "price-per-hour"
 	TagComputeSeconds = "compute-seconds"
 )
 
 // FootprintTags are the suffixes of the footprint tags spored writes on every
-// instance, which a launch keeps a slot free for (#1355).
-var FootprintTags = []string{TagEBSHourlyCost, TagPublicIPv4, TagElasticIPv4}
+// instance, which a launch keeps a slot free for (#1355). One since #1428.
+var FootprintTags = []string{TagFootprint}
+
+// LegacyFootprintTags are the footprint tags a spored before #1428 writes, read
+// as a fallback (MeasuredFromTags) and never written.
+var LegacyFootprintTags = []string{TagEBSHourlyCost, TagPublicIPv4, TagElasticIPv4}
+
+// footprintVersion prefixes the spawn:cost-footprint value. A later version may only
+// APPEND fields, so a reader of this one still reads the first three
+// (ParseFootprint).
+const footprintVersion = "v1"
+
+// Measured is the part of a Footprint spored measures on the instance: what is
+// recorded in spawn:cost-footprint, or in the three tags before it.
+type Measured struct {
+	EBSPerHour  float64
+	PublicIPv4  int
+	ElasticIPv4 int
+	// IPv4Known: spored has recorded the public IPv4 counts. An instance whose
+	// spored predates #51 has no count, and its enforcement does not count
+	// IPv4.
+	IPv4Known bool
+}
+
+// EncodeFootprint is the spawn:cost-footprint value for a measured footprint:
+// "v1:" then the EBS $/hr to six decimals, the auto-assigned and the Elastic
+// IPv4 count, separated by "/" (a character AWS allows in a tag value in every
+// service, unlike ","). At most 3+ (a 20-digit float) + 2 counts: far inside
+// EC2's 256-character limit. A negative or non-finite figure is written as 0.
+func EncodeFootprint(m Measured) string {
+	ebs := m.EBSPerHour
+	if !(ebs >= 0) || math.IsInf(ebs, 0) {
+		ebs = 0
+	}
+	return footprintVersion + ":" + strconv.FormatFloat(ebs, 'f', 6, 64) + "/" +
+		strconv.Itoa(max(m.PublicIPv4, 0)) + "/" + strconv.Itoa(max(m.ElasticIPv4, 0))
+}
+
+// ParseFootprint reads a spawn:cost-footprint value. ok is false when it is not a
+// footprint this reader understands: then the reader falls back to the legacy
+// tags. Any "vN:" version is accepted as long as its first three fields parse,
+// since a later version may only append fields.
+func ParseFootprint(v string) (m Measured, ok bool) {
+	ver, body, found := strings.Cut(strings.TrimSpace(v), ":")
+	if !found || len(ver) < 2 || ver[0] != 'v' {
+		return Measured{}, false
+	}
+	if n, err := strconv.Atoi(ver[1:]); err != nil || n < 1 {
+		return Measured{}, false
+	}
+	f := strings.Split(body, "/")
+	if len(f) < 3 {
+		return Measured{}, false
+	}
+	ebs, err := strconv.ParseFloat(f[0], 64)
+	if err != nil || !(ebs >= 0) || math.IsInf(ebs, 0) {
+		return Measured{}, false
+	}
+	pub, err1 := strconv.Atoi(f[1])
+	eip, err2 := strconv.Atoi(f[2])
+	if err1 != nil || err2 != nil || pub < 0 || eip < 0 {
+		return Measured{}, false
+	}
+	return Measured{EBSPerHour: ebs, PublicIPv4: pub, ElasticIPv4: eip, IPv4Known: true}, true
+}
+
+// MeasuredFromTags is THE reader of the measured footprint, keyed by full tag
+// name with the given prefix ("spawn"): spawn:cost-footprint, and the three tags a
+// spored before #1428 writes. When both are present (an instance whose spored
+// was upgraded past #1428) each figure is the larger, since a recorded
+// footprint never goes down (pkg/provider MeasureCostFootprint).
+func MeasuredFromTags(tags map[string]string, prefix string) Measured {
+	key := func(s string) string { return prefix + ":" + s }
+	m, _ := ParseFootprint(tags[key(TagFootprint)])
+	_, a := tags[key(TagPublicIPv4)]
+	_, e := tags[key(TagElasticIPv4)]
+	return Measured{
+		EBSPerHour:  max(m.EBSPerHour, parseFloat(tags[key(TagEBSHourlyCost)])),
+		PublicIPv4:  max(m.PublicIPv4, parseCount(tags[key(TagPublicIPv4)])),
+		ElasticIPv4: max(m.ElasticIPv4, parseCount(tags[key(TagElasticIPv4)])),
+		IPv4Known:   m.IPv4Known || a || e,
+	}
+}
+
+// Max is each figure the larger of m and o.
+func (m Measured) Max(o Measured) Measured {
+	return Measured{
+		EBSPerHour:  max(m.EBSPerHour, o.EBSPerHour),
+		PublicIPv4:  max(m.PublicIPv4, o.PublicIPv4),
+		ElasticIPv4: max(m.ElasticIPv4, o.ElasticIPv4),
+		IPv4Known:   m.IPv4Known || o.IPv4Known,
+	}
+}
 
 // Footprint is what an instance pays for by the hour, split by how each part
 // is timed.
@@ -132,22 +234,21 @@ func (f Footprint) IPv4PerHour() float64 {
 // FromTags reads a Footprint from an instance's tags, keyed by full tag name
 // with the given prefix ("spawn"). The compute rate is spawn:price-per-hour.
 func FromTags(tags map[string]string, prefix string) Footprint {
-	key := func(s string) string { return prefix + ":" + s }
+	m := MeasuredFromTags(tags, prefix)
 	return Footprint{
-		ComputePerHour: parseFloat(tags[key(TagPricePerHour)]),
-		EBSPerHour:     parseFloat(tags[key(TagEBSHourlyCost)]),
-		PublicIPv4:     parseCount(tags[key(TagPublicIPv4)]),
-		ElasticIPv4:    parseCount(tags[key(TagElasticIPv4)]),
+		ComputePerHour: parseFloat(tags[prefix+":"+TagPricePerHour]),
+		EBSPerHour:     m.EBSPerHour,
+		PublicIPv4:     m.PublicIPv4,
+		ElasticIPv4:    m.ElasticIPv4,
 	}
 }
 
 // IPv4Measured reports whether spored has recorded the instance's public IPv4
-// addresses (either count tag present). An instance whose spored predates #51
-// has neither, and its enforcement does not count IPv4.
+// addresses (spawn:cost-footprint, or either legacy count tag, present). An
+// instance whose spored predates #51 has none, and its enforcement does not
+// count IPv4.
 func IPv4Measured(tags map[string]string, prefix string) bool {
-	_, a := tags[prefix+":"+TagPublicIPv4]
-	_, e := tags[prefix+":"+TagElasticIPv4]
-	return a || e
+	return MeasuredFromTags(tags, prefix).IPv4Known
 }
 
 func parseFloat(s string) float64 {

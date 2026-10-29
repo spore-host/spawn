@@ -511,8 +511,8 @@ func (p *EC2Provider) CountOtherManagedInstances(ctx context.Context) int {
 // MeasureCostFootprint measures what this instance pays for by the hour
 // beside compute — every attached EBS volume (size, IOPS, throughput) and every
 // public IPv4 address on any of its interfaces — and records it in the
-// spawn:ebs-hourly-cost, spawn:public-ipv4-count and spawn:elastic-ipv4-count
-// tags that --cost-limit is enforced from (pkg/costmodel, #51).
+// spawn:cost-footprint tag that --cost-limit is enforced from (pkg/costmodel, #51;
+// one tag since #1428, which had three).
 //
 // It measures every time it is called, not once: a volume attached or an
 // Elastic IP associated after the first boot (the launch EIP of a
@@ -556,7 +556,7 @@ func (p *EC2Provider) MeasureCostFootprint(ctx context.Context) (CostFootprint, 
 	log.Printf("Cost footprint: %d vol(s) $%.4f/hr EBS, %d auto-assigned + %d Elastic public IPv4",
 		len(volOut.Volumes), fp.EBSHourlyCost, fp.PublicIPv4, fp.ElasticIPv4)
 
-	tags := make([]types.Tag, 0, 3)
+	tags := make([]types.Tag, 0, 1)
 	for _, t := range footprintTagWrites(fp, inst.Tags) {
 		tags = append(tags, types.Tag{Key: aws.String(t[0]), Value: aws.String(t[1])})
 	}
@@ -617,29 +617,27 @@ func instanceAddresses(inst types.Instance) []costmodel.Address {
 }
 
 // footprintTagWrites is the tags (key, value) to write for a measured
-// footprint: each one whose value would RISE above what the instance already
-// carries (see MeasureCostFootprint for why it never falls), or is absent.
+// footprint: the one spawn:cost-footprint tag (#1428), when a figure would RISE above
+// what the instance already records (see MeasureCostFootprint for why it never
+// falls) or it is absent. What it records is read as every reader reads it
+// (costmodel.MeasuredFromTags), so the three tags a spored before #1428 wrote
+// count too, and each figure written is the larger of the measured and the
+// recorded one. Those three are never written: a launch keeps one slot for
+// the footprint, not four.
 func footprintTagWrites(fp CostFootprint, current []types.Tag) [][2]string {
 	have := map[string]string{}
 	for _, t := range current {
 		have[aws.ToString(t.Key)] = aws.ToString(t.Value)
 	}
-	var out [][2]string
-	ebsKey := tagprefix.Tag(costmodel.TagEBSHourlyCost)
-	old, ok := have[ebsKey]
-	if oldV, err := strconv.ParseFloat(old, 64); !ok || err != nil || fp.EBSHourlyCost > oldV {
-		out = append(out, [2]string{ebsKey, strconv.FormatFloat(fp.EBSHourlyCost, 'f', 6, 64)})
+	recorded := costmodel.MeasuredFromTags(have, tagprefix.Prefix())
+	value := costmodel.EncodeFootprint(recorded.Max(costmodel.Measured{
+		EBSPerHour: fp.EBSHourlyCost, PublicIPv4: fp.PublicIPv4, ElasticIPv4: fp.ElasticIPv4,
+	}))
+	key := tagprefix.Tag(costmodel.TagFootprint)
+	if old, ok := have[key]; ok && old == value {
+		return nil
 	}
-	for _, c := range []struct {
-		key string
-		n   int
-	}{{tagprefix.Tag(costmodel.TagPublicIPv4), fp.PublicIPv4}, {tagprefix.Tag(costmodel.TagElasticIPv4), fp.ElasticIPv4}} {
-		old, ok := have[c.key]
-		if oldN, err := strconv.Atoi(old); !ok || err != nil || c.n > oldN {
-			out = append(out, [2]string{c.key, strconv.Itoa(c.n)})
-		}
-	}
-	return out
+	return [][2]string{{key, value}}
 }
 
 // loadConfig is spored's configuration: the instance's tags, then the
@@ -691,6 +689,7 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 	}
 
 	var instanceName string
+	footprint := map[string]string{}
 	for _, tag := range tags {
 		if tag.Key == nil || tag.Value == nil {
 			continue
@@ -721,18 +720,12 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			if s, err := strconv.ParseInt(*tag.Value, 10, 64); err == nil {
 				config.ComputeSeconds = s
 			}
-		case tagprefix.Tag(costmodel.TagEBSHourlyCost):
-			if f, err := strconv.ParseFloat(*tag.Value, 64); err == nil {
-				config.EBSHourlyCost = f
-			}
-		case tagprefix.Tag(costmodel.TagPublicIPv4):
-			if n, err := strconv.Atoi(*tag.Value); err == nil && n > 0 {
-				config.PublicIPv4Count = n
-			}
-		case tagprefix.Tag(costmodel.TagElasticIPv4):
-			if n, err := strconv.Atoi(*tag.Value); err == nil && n > 0 {
-				config.ElasticIPv4Count = n
-			}
+		case tagprefix.Tag(costmodel.TagFootprint), tagprefix.Tag(costmodel.TagEBSHourlyCost),
+			tagprefix.Tag(costmodel.TagPublicIPv4), tagprefix.Tag(costmodel.TagElasticIPv4):
+			// The measured footprint: spawn:cost-footprint, or the three tags a
+			// spored before #1428 wrote. Read after the loop, as every
+			// reader reads it.
+			footprint[*tag.Key] = *tag.Value
 		case tagprefix.Tag("idle-timeout"):
 			if duration, err := ttlpkg.ParseDuration(*tag.Value); err == nil {
 				config.IdleTimeout = duration
@@ -814,6 +807,8 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			config.Observability.Tracing.Endpoint = *tag.Value
 		}
 	}
+	m := costmodel.MeasuredFromTags(footprint, tagprefix.Prefix())
+	config.EBSHourlyCost, config.PublicIPv4Count, config.ElasticIPv4Count = m.EBSPerHour, m.PublicIPv4, m.ElasticIPv4
 
 	// Set default completion file if on-complete is set but file isn't specified
 	if config.OnComplete != "" && config.CompletionFile == "" {

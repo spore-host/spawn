@@ -9,8 +9,9 @@ import (
 
 // enforcedFootprint is what spored enforces --cost-limit with, read from the
 // tags it keeps current: the on-demand rate (spawn:price-per-hour), every
-// attached EBS volume (spawn:ebs-hourly-cost) and every public IPv4 address
-// (spawn:public-ipv4-count, spawn:elastic-ipv4-count) (#51).
+// attached EBS volume and every public IPv4 address (#51), in spawn:cost-footprint
+// or, from a spored before #1428, the three tags it replaced
+// (costmodel.MeasuredFromTags).
 func enforcedFootprint(instance *aws.InstanceInfo) costmodel.Footprint {
 	if instance == nil {
 		return costmodel.Footprint{}

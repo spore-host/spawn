@@ -125,6 +125,13 @@ var externallyWrittenTags = map[string]string{
 	// Read by spored and used by nothing: no exporter consults an endpoint, so
 	// #1308 added no launch flag for it.
 	"spawn:tracing-endpoint": "set out of band with aws ec2 create-tags; no tracing exporter reads it (#1335)",
+	// Legacy: the cost footprint as three tags, which a spored before #1428
+	// writes (spored is pinned at launch, so older instances keep writing
+	// them); costmodel.MeasuredFromTags reads them as the fallback to
+	// spawn:cost-footprint.
+	"spawn:ebs-hourly-cost":    "written by spored before #1428, read for instances running it",
+	"spawn:public-ipv4-count":  "written by spored before #1428, read for instances running it",
+	"spawn:elastic-ipv4-count": "written by spored before #1428, read for instances running it",
 }
 
 // writtenOutOfTheScansSight are keys spawn does write, in a shape
@@ -132,9 +139,7 @@ var externallyWrittenTags = map[string]string{
 // tagprefix.Tag(costmodel.Tag...), became visible when the scan learned to
 // resolve a constant argument (#1359). Add one only with the writer named.
 var writtenOutOfTheScansSight = map[string]string{
-	"spawn:ebs-hourly-cost":    "spored, pkg/provider footprintTagWrites ([2]string pairs)",
-	"spawn:public-ipv4-count":  "spored, pkg/provider footprintTagWrites ([2]string pairs)",
-	"spawn:elastic-ipv4-count": "spored, pkg/provider footprintTagWrites ([2]string pairs)",
+	"spawn:cost-footprint": "spored, pkg/provider footprintTagWrites ([2]string pairs)",
 }
 
 // readOutsideThisRepo are keys buildTags writes that no reader in this repo

@@ -85,10 +85,10 @@ type Config struct {
 	TagOnlySettings []string
 
 	ComputeSeconds int64   // accumulated compute seconds since launch (updated by spored)
-	EBSHourlyCost  float64 // EBS cost per hour of every attached volume (spawn:ebs-hourly-cost, measured by spored, #51)
+	EBSHourlyCost  float64 // EBS cost per hour of every attached volume (spawn:cost-footprint, measured by spored, #51, #1428)
 	// PublicIPv4Count and ElasticIPv4Count are the instance's public IPv4
-	// addresses, auto-assigned and Elastic (spawn:public-ipv4-count,
-	// spawn:elastic-ipv4-count): $0.005/hr each, counted by --cost-limit (#51).
+	// addresses, auto-assigned and Elastic (spawn:cost-footprint): $0.005/hr
+	// each, counted by --cost-limit (#51).
 	PublicIPv4Count  int
 	ElasticIPv4Count int
 	IdleTimeout      time.Duration

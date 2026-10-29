@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -111,8 +112,9 @@ func TestCostDisplaysAndExtendShareTheEnforcedAccounting(t *testing.T) {
 // parser of spored's config; everything else uses costmodel.FromTags.
 func TestNoCostRateTagReadOutsideTheModel(t *testing.T) {
 	root := ".."
-	suffixes := []string{costmodel.TagEBSHourlyCost, costmodel.TagPublicIPv4, costmodel.TagElasticIPv4}
-	consts := map[string]bool{"TagEBSHourlyCost": true, "TagPublicIPv4": true, "TagElasticIPv4": true}
+	suffixes := append([]string{}, costmodel.FootprintTags...)
+	suffixes = append(suffixes, costmodel.LegacyFootprintTags...)
+	consts := map[string]bool{"TagFootprint": true, "TagEBSHourlyCost": true, "TagPublicIPv4": true, "TagElasticIPv4": true}
 	fset := token.NewFileSet()
 	files, decls := 0, 0
 	var bad []string
@@ -176,5 +178,67 @@ func TestNoCostRateTagReadOutsideTheModel(t *testing.T) {
 	}
 	for _, b := range bad {
 		t.Errorf("%s — read cost-footprint tags through costmodel.FromTags (or enforcedFootprint), not directly", b)
+	}
+}
+
+// Every CLI reader of the cost footprint (spawn status, stopped and running,
+// spawn cost, spawn extend --cost-limit) shows the same figures for an
+// instance whose spored writes the one spawn:cost-footprint tag (#1428) as for
+// one whose older spored writes the three tags before it. That every reader
+// goes through pkg/costmodel is TestNoCostRateTagReadOutsideTheModel's gate.
+func TestEveryCostReaderReadsTheFootprintEitherWay(t *testing.T) {
+	launch := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	now := launch.Add(10 * time.Hour)
+	forms := map[string]func(*aws.InstanceInfo){
+		"legacy three tags": func(*aws.InstanceInfo) {},
+		"one tag": func(i *aws.InstanceInfo) {
+			for _, s := range costmodel.LegacyFootprintTags {
+				delete(i.Tags, "spawn:"+s)
+			}
+			i.Tags["spawn:cost-footprint"] = "v1:0.100000/1/1"
+		},
+	}
+	type seen struct {
+		footprint costmodel.Footprint
+		ipv4      bool
+		stopped   ec2StatusReport
+		cost      string
+		extend    costLimitDecision
+		billable  []billableResource
+	}
+	got := map[string]seen{}
+	for name, apply := range forms {
+		inst := costedInstance(launch, "stopped")
+		apply(inst)
+		running := costedInstance(launch, "running")
+		apply(running)
+		running.Tags["spawn:cost-limit"] = "5"
+		got[name] = seen{
+			footprint: enforcedFootprint(inst),
+			ipv4:      costmodel.IPv4Measured(inst.Tags, "spawn"),
+			stopped:   buildEC2StatusReport(inst, tagStatusRate(inst), now),
+			cost:      singleInstanceCostReport(inst, now),
+			extend:    decideCostLimit(running, now.Add(5*time.Hour), now, 0, false),
+			billable:  billableResources(running),
+		}
+	}
+	legacy, one := got["legacy three tags"], got["one tag"]
+	if want := (costmodel.Footprint{ComputePerHour: 1, EBSPerHour: 0.1, PublicIPv4: 1, ElasticIPv4: 1}); legacy.footprint != want {
+		t.Fatalf("fixture: legacy footprint %+v, want %+v", legacy.footprint, want)
+	}
+	if one.footprint != legacy.footprint || one.ipv4 != legacy.ipv4 {
+		t.Errorf("footprint: one tag %+v (IPv4 known %v), legacy %+v (%v)", one.footprint, one.ipv4, legacy.footprint, legacy.ipv4)
+	}
+	if !reflect.DeepEqual(one.stopped, legacy.stopped) {
+		t.Errorf("stopped spawn status differs:\none tag: %+v\nlegacy:  %+v", one.stopped, legacy.stopped)
+	}
+	if one.cost != legacy.cost {
+		t.Errorf("spawn cost differs:\none tag:\n%s\nlegacy:\n%s", one.cost, legacy.cost)
+	}
+	if !reflect.DeepEqual(one.extend, legacy.extend) {
+		t.Errorf("spawn extend's cost-limit decision differs:\none tag: %+v\nlegacy:  %+v", one.extend, legacy.extend)
+	}
+	if !reflect.DeepEqual(one.billable, legacy.billable) {
+		t.Errorf("spawn status billable resources differ:\none tag: %+v\nlegacy:  %+v", one.billable, legacy.billable)
 	}
 }
