@@ -27,12 +27,13 @@ import (
 const (
 	bodyStepName   = "Publish the bootstrap body to S3"
 	checkStepName  = "Check the released spawn prints the published body"
-	sporedStepName = "Upload spored binaries to S3"
+	sporedStepName = "Publish the versioned spored to S3"
 	fakeBody       = "fake bootstrap body\nprinted by spawn bootstrap-body\n"
 )
 
 type releaseStep struct {
 	Name string            `yaml:"name"`
+	ID   string            `yaml:"id"`
 	Uses string            `yaml:"uses"`
 	Run  string            `yaml:"run"`
 	If   string            `yaml:"if"`
@@ -155,24 +156,54 @@ func newRelSandbox(t *testing.T, goExit int, releasedBody string) *relSandbox {
 	sb.write("dist/spawn_linux_amd64_v1/spawn", "#!/bin/bash\n[ \"$1\" = bootstrap-body ] || exit 64\nprintf '%s' '"+releasedBody+"'\n")
 	// go: `go run -ldflags "-X .../cmd.Version=V" . bootstrap-body` from the
 	// tagged source. Records its arguments; fails when goExit is non-zero.
-	sb.write("bin/go", "#!/bin/bash\necho \"$*\" >> "+filepath.Join(dir, "go-calls")+"\n[ \"$1\" = run ] && [ \"${!#}\" = bootstrap-body ] || exit 64\nprintf '%s' '"+fakeBody+"'\nexit "+strconv.Itoa(goExit)+"\n")
-	// aws: `kms sign` returns "KMS(<hex of the digest file>)"; `s3 cp SRC
-	// s3://B/K --region R` copies into the mirror, refusing a region not B's.
+	// `go run . spored-signing-key` prints $FAKE_SIGNING_PUB. `go build ... -o
+	// OUT PKG` records its arguments and GO*/CGO_* environment in go-builds and
+	// writes "spored GOOS/GOARCH" to OUT.
+	sb.write("bin/go", `#!/bin/bash
+echo "$*" >> `+filepath.Join(dir, "go-calls")+`
+if [ "$1" = build ]; then
+  { echo CALL; env | grep -E '^C?GO' | sort | sed 's/^/env /'; for a in "$@"; do printf 'arg %s\n' "$a"; done; echo END; } >> `+filepath.Join(dir, "go-builds")+`
+  o=""; prev=""; for a in "$@"; do [ "$prev" = -o ] && o="$a"; prev="$a"; done
+  printf 'spored %s/%s\n' "$GOOS" "$GOARCH" > "$o"
+  exit 0
+fi
+if [ "$1" = run ] && [ "${!#}" = spored-signing-key ]; then cat "$FAKE_SIGNING_PUB"; exit 0; fi
+[ "$1" = run ] && [ "${!#}" = bootstrap-body ] || exit 64
+printf '%s' '`+fakeBody+`'
+exit `+strconv.Itoa(goExit)+"\n")
+	// aws: `kms sign` returns "KMS(<hex of the digest file>)", or, with
+	// $FAKE_KMS_KEY set, a real base64 DER ECDSA signature of the digest by that
+	// key, as KMS returns; `s3 cp SRC s3://B/K --region R` copies into the
+	// mirror and `s3 cp s3://B/K DST` out of it, refusing a region not B's.
 	sb.write("bin/aws", `#!/bin/bash
 if [ "$1" = kms ] && [ "$2" = sign ]; then
   while [ $# -gt 0 ]; do [ "$1" = --message ] && f="${2#fileb://}"; shift; done
+  if [ -n "${FAKE_KMS_KEY:-}" ]; then
+    openssl pkeyutl -sign -inkey "$FAKE_KMS_KEY" -in "$f" | openssl base64 -A && echo
+    exit $?
+  fi
   printf 'KMS(%s)\n' "$(od -An -tx1 "$f" | tr -d ' \n')"
   exit 0
 fi
 if [ "$1" = s3 ] && [ "$2" = cp ]; then
-  src="$3"; dst="${4#s3://}"; region=""
+  src="$3"; dst="$4"; region=""
   while [ $# -gt 0 ]; do [ "$1" = --region ] && region="$2"; shift; done
+  if [ "${src#s3://}" != "$src" ]; then
+    src="${src#s3://}"
+    [ "${src%%/*}" = "spawn-binaries-$region" ] || { echo "region $region for $src" >&2; exit 1; }
+    cp "`+sb.mirror+`/$src" "$dst"
+    exit $?
+  fi
+  dst="${dst#s3://}"
   [ "${dst%%/*}" = "spawn-binaries-$region" ] || { echo "region $region for $dst" >&2; exit 1; }
   mkdir -p "`+sb.mirror+`/$(dirname "$dst")" && cp "$src" "`+sb.mirror+`/$dst"
   exit $?
 fi
 echo "unexpected aws $*" >&2; exit 1
 `)
+	// gh: `gh release view TAG ... --jq .isDraft` prints $FAKE_GH_DRAFT, or
+	// fails as for a release that does not exist when it is unset.
+	sb.write("bin/gh", "#!/bin/bash\n[ \"$1 $2\" = \"release view\" ] || exit 64\n[ -n \"${FAKE_GH_DRAFT:-}\" ] || { echo 'release not found' >&2; exit 1; }\necho \"$FAKE_GH_DRAFT\"\n")
 	if _, err := exec.LookPath("sha256sum"); err != nil {
 		sb.write("bin/sha256sum", "#!/bin/bash\nexec shasum -a 256 \"$@\"\n")
 	}
@@ -186,8 +217,9 @@ func (sb *relSandbox) write(rel, body string) {
 	}
 }
 
-// run executes the named step with the job's env, as the runner would.
-func (sb *relSandbox) run(name, keyID string) (string, error) {
+// run executes the named step with the job's env, as the runner would, plus
+// any extra KEY=VALUE pairs for the stand-in tools.
+func (sb *relSandbox) run(name, keyID string, extra ...string) (string, error) {
 	sb.t.Helper()
 	// sign_blob writes its digest under /tmp; keep that inside the sandbox.
 	script := strings.ReplaceAll(sb.job.step(sb.t, name).Run, "/tmp/", sb.dir+"/")
@@ -195,7 +227,8 @@ func (sb *relSandbox) run(name, keyID string) (string, error) {
 	cmd := exec.Command("bash", "-c", script) //nolint:gosec // the repo's own release steps
 	cmd.Dir = sb.dir
 	cmd.Env = []string{"PATH=" + filepath.Join(sb.dir, "bin") + ":" + os.Getenv("PATH"), "HOME=" + sb.dir,
-		"GITHUB_REF_NAME=v9.9.9", "SPORED_SIGNING_KEY_ID=" + keyID, "RUNNER_TEMP=" + filepath.Join(sb.dir, "rt")}
+		"GITHUB_REF_NAME=v9.9.9", "GITHUB_REPOSITORY=spore-host/spawn", "SPORED_SIGNING_KEY_ID=" + keyID, "RUNNER_TEMP=" + filepath.Join(sb.dir, "rt")}
+	cmd.Env = append(cmd.Env, extra...)
 	for k, v := range sb.job.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -230,7 +263,11 @@ func TestReleasePublishesTheSignedBootstrapBodyBesideSpored(t *testing.T) {
 	if out, err := sb.run(bodyStepName, "alias/test-signing"); err != nil {
 		t.Fatalf("the body step failed: %v\n%s", err, out)
 	}
-	if out, err := sb.run(sporedStepName, "alias/test-signing"); err != nil {
+	keys := sb.signingKeys("release")
+	if out, err := sb.run(sporedBuildStepName, ""); err != nil {
+		t.Fatalf("the spored build step failed: %v\n%s", err, out)
+	}
+	if out, err := sb.run(sporedStepName, "alias/test-signing", signEnv(keys, keys)...); err != nil {
 		t.Fatalf("the spored step failed: %v\n%s", err, out)
 	}
 	if out, err := sb.run(checkStepName, "alias/test-signing"); err != nil {
