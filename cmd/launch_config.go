@@ -707,7 +707,8 @@ __SPORED_WINDOWS_VERIFIED_INSTALL__
 	// Spliced in AFTER Sprintf, deliberately: the generated PowerShell is not a
 	// format string, and a percent sign in it (PowerShell's ForEach-Object alias) would be
 	// read as a verb.
-	install, err := sporedinstall.WindowsInstallScript(sporedinstall.SigningKeyPEM)
+	// The spored of this spawn's own release (#1412), as the Linux bootstrap.
+	install, err := sporedinstall.WindowsInstallScript(sporedinstall.SigningKeyPEM, launcher.SporedVersion())
 	if err != nil {
 		return "", fmt.Errorf("build the Windows spored install: %w", err)
 	}

@@ -124,7 +124,7 @@ var (
 	unitWrite   = regexp.MustCompile(`(?m)^cat > /etc/systemd/system/spored\.service <<'(\w+)'$`)
 	unitRelabel = regexp.MustCompile(`(?m)^\s*` + sporedinstall.RelabelFuncName + ` /etc/systemd/system/spored\.service$`)
 	unitStart   = regexp.MustCompile(`(?m)^\s*systemctl start spored$`)
-	installCall = regexp.MustCompile(`(?m)^\s*if ! ` + sporedinstall.FuncName + ` `)
+	installCall = regexp.MustCompile(`(?m)^\s*if ! ` + sporedinstall.BucketInstallFuncName + ` `)
 	relabelDef  = regexp.MustCompile(`(?m)^` + sporedinstall.RelabelFuncName + `\(\) \{$`)
 )
 

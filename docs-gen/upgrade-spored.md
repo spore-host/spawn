@@ -6,8 +6,10 @@ lifecycle state (the TTL deadline, accumulated compute-seconds, and the
 completion / pre-stop / idle / FSx config all live in EC2 tags that the new
 spored re-reads on boot).
 
-The default target is the latest released version; pin one with --version. A
-downgrade is refused unless --allow-downgrade is given. The swap is driven over SSM
+The default target is this spawn's own version, the spored a launch by this
+spawn installs (for a development build of spawn, which has no published spored,
+the latest release); pin another with --version. A downgrade is refused unless
+--allow-downgrade is given. The swap is driven over SSM
 (keyless — works on private-subnet / no-public-IP instances), so the instance
 must have the SSM agent online and an instance profile (the spored role attaches
 AmazonSSMManagedInstanceCore, so spawn-launched instances already qualify).
@@ -26,6 +28,6 @@ spawn upgrade-spored <instance-id|name> [flags]
 |------|-------|------|---------|-------------|
 | `--allow-downgrade` |  | bool |  | Allow a downgrade (target older than the running version) |
 | `--timeout` |  | duration | `5m0s` | How long to wait for the on-instance upgrade to complete |
-| `--version` |  | string |  | Target spored version (e.g. 0.64.0); default: latest release |
+| `--version` |  | string |  | Target spored version (e.g. 0.64.0); default: this spawn's version (latest release for a dev build) |
 | `--yes` | `-y` | bool |  | Skip the confirmation prompt |
 

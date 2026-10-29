@@ -100,3 +100,51 @@ func TestWindowsBootstrapParsesAsPowerShell(t *testing.T) {
 			"without spored, silently:\n%s", out)
 	}
 }
+
+// #1412: a Windows launch by a release of spawn installs that release's
+// spored, from spawn/versions/<version>/ and nowhere else; a dev build installs
+// the latest. That the sources are honoured, and that a missing versioned
+// spored installs nothing, is executed in pkg/sporedinstall; this is the wiring.
+func TestWindowsBootstrapInstallsThisSpawnsSpored(t *testing.T) {
+	sources := func(t *testing.T, ud string) []string {
+		t.Helper()
+		var out []string
+		for _, line := range strings.Split(ud, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "@{ u = ") {
+				out = append(out, strings.TrimSpace(line))
+			}
+		}
+		if len(out) == 0 {
+			t.Fatal("found no spored source in the Windows user-data; the anchor has gone stale")
+		}
+		return out
+	}
+	t.Run("release build", func(t *testing.T) {
+		pinCallerVersion(t, "9.9.9")
+		ud, err := buildWindowsUserData("ssh-ed25519 AAAATESTKEY test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := sources(t, ud)
+		for _, s := range src {
+			if !strings.Contains(s, "/spawn/versions/9.9.9/spored-windows-amd64.exe") {
+				t.Errorf("a release build's Windows bootstrap reads a spored that is not its own: %s", s)
+			}
+		}
+		if len(src) != 2 || !strings.Contains(src[0], "$bucket") || !strings.Contains(src[1], "spawn-binaries-us-east-1") {
+			t.Errorf("want the regional then the us-east-1 versioned spored, got %v", src)
+		}
+	})
+	t.Run("dev build", func(t *testing.T) {
+		pinCallerVersion(t, "dev")
+		ud, err := buildWindowsUserData("ssh-ed25519 AAAATESTKEY test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range sources(t, ud) {
+			if strings.Contains(s, "/versions/") {
+				t.Errorf("a dev build's Windows bootstrap pins a spored version: %s", s)
+			}
+		}
+	})
+}

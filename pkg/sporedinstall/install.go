@@ -26,6 +26,7 @@ package sporedinstall
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -111,6 +112,49 @@ const CurlRetryFuncName = "spore_curl_retry"
 // file's SELinux label to the policy default (#1052). Callers that write the
 // spored systemd unit call it on the unit too; it is a no-op without SELinux.
 const RelabelFuncName = "spore_selinux_relabel"
+
+// BucketInstallFuncName is the shell function VerifiedInstallFunc defines that
+// every install path calls (#1412): it picks spored's sources in the
+// spawn-binaries buckets from PinVar, then installs through FuncName.
+//
+//	spore_install_spored_from_buckets <binary-name> <regional-bucket-url> <fallback-bucket-url>
+//
+// With PinVar set, the only sources are spawn/versions/<PinVar>/ in the
+// regional bucket and then in the fallback bucket, never the unversioned
+// latest: a missing versioned object fails exactly as a bad signature does. With
+// PinVar empty (a dev build of spawn, which has no published release), the
+// latest paths, as before.
+const BucketInstallFuncName = "spore_install_spored_from_buckets"
+
+// PinVar is the shell variable naming the spawn release whose spored the
+// script installs. PinScript assigns it.
+const PinVar = "SPAWN_SPORED_VERSION"
+
+// releaseVersionRe is the shape of a published spawn release: the release
+// workflow publishes spored and the bootstrap body under
+// spawn/versions/<version>/ for exactly these. A pseudo-version, a +dirty build
+// or "dev" matches none.
+var releaseVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// ReleaseVersion returns v, without a leading "v", when it names a published
+// spawn release, and "" otherwise.
+func ReleaseVersion(v string) string {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if !releaseVersionRe.MatchString(v) {
+		return ""
+	}
+	return v
+}
+
+// PinScript emits the assignment of PinVar to version, for every script that
+// calls BucketInstallFuncName (#1412). Pass the version of the spawn that
+// renders the script, from ReleaseVersion (or launcher.SporedVersion), so a
+// launch installs the spored of its own release and a dev build installs the
+// latest. Any non-empty version pins, single-quoted, so a version with no
+// published spored fails the install rather than falling back to latest.
+func PinScript(version string) string {
+	return "\n" + PinVar + "='" + strings.ReplaceAll(version, "'", `'\''`) + "'\n"
+}
 
 // VerifiedInstallFunc returns the definition of a shell function that downloads
 // and installs spored, failing closed at every step.
@@ -288,6 +332,20 @@ func VerifiedInstallFunc() string {
     %[5]s %[3]s
     return 0
 }
+
+# Usage: %[6]s <binary-name> <regional-bucket-url> <fallback-bucket-url>
+# With %[7]s set, only that spawn release's spawn/versions/<v>/ objects
+# (#1412), never the unversioned latest: a launch runs the spored of the spawn
+# that launched it. Empty: a dev build of spawn, so the latest.
+%[6]s() {
+    local v="${%[7]s:-}"
+    if [ -n "$v" ]; then
+        echo "Installing spored $v, the version of the spawn that rendered this script"
+        %[1]s "$1" "$2/spawn/versions/$v" "$3/spawn/versions/$v"
+    else
+        %[1]s "$1" "$2/spawn" "$2" "$3/spawn" "$3"
+    fi
+}
 # --- end spored verified install -------------------------------------------
-`, FuncName, SigningKeyPath, Dest, CurlRetryFuncName, RelabelFuncName)
+`, FuncName, SigningKeyPath, Dest, CurlRetryFuncName, RelabelFuncName, BucketInstallFuncName, PinVar)
 }

@@ -48,7 +48,7 @@ func TestBootstrap_Shellcheck(t *testing.T) {
 			// stub only assigns the variables the body reads.
 			body := BootstrapBody()
 			fetch := bodyStub("0.143.0", body)
-			stub, err := buildLinuxBootstrap(cfg, "0.143.0", body)
+			stub, err := buildLinuxBootstrap(cfg, "0.143.0", "", body)
 			if err != nil {
 				t.Fatalf("buildLinuxBootstrap (stub): %v", err)
 			}

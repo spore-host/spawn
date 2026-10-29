@@ -45,7 +45,7 @@ func decodedBurstUserData(t *testing.T, userData string) string {
 func TestBurstMembersInstallAndVerifySpored(t *testing.T) {
 	// Invocations, anchored at line start, so a comment or an echo naming the
 	// step cannot satisfy them (CLAUDE.md gate rule 3).
-	install := regexp.MustCompile(`(?m)^if ! spore_install_verified_spored "\$BINARY"`)
+	install := regexp.MustCompile(`(?m)^if ! spore_install_spored_from_buckets "\$BINARY"`)
 	abort := regexp.MustCompile(`(?m)^\s+exit 1$`)
 	start := regexp.MustCompile(`(?m)^systemctl start spored$`)
 	waitOnly := regexp.MustCompile(`(?m)^while \[ ! -f /usr/local/bin/spored \]`)
@@ -67,7 +67,7 @@ func TestBurstMembersInstallAndVerifySpored(t *testing.T) {
 		if waitOnly.MatchString(script) {
 			t.Error("burst user-data still only waits for a preinstalled spored (#924)")
 		}
-		if i, j := strings.Index(script, "spore_install_verified_spored \"$BINARY\""), strings.Index(script, "systemctl start spored"); i < 0 || j < i {
+		if i, j := strings.Index(script, "spore_install_spored_from_buckets \"$BINARY\""), strings.Index(script, "systemctl start spored"); i < 0 || j < i {
 			t.Error("spored must be installed and verified before it is started")
 		}
 	}

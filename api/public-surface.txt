@@ -735,6 +735,7 @@ func ImageStateCleanupScript(instanceID, completionFile string) string
 func NewStagedFiles(uri, region, command, taskFlushScript string) StagedFiles
 func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig, opts Options) (*aws.LaunchResult, error)
 func PublishedBodyVersion() string
+func SporedVersion() string
 func StagedFilesObject(command, taskFlushScript string) []byte
 type BootstrapConfig struct
 type Options struct

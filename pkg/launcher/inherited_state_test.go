@@ -96,7 +96,7 @@ func TestBodyDiscardsInheritedStateBeforeAnythingReadsIt(t *testing.T) {
 		return loc[0]
 	}
 	discard := at(`^/usr/local/bin/spored discard-inherited-state \|\| true$`)
-	if install := at(`^if ! spore_install_verified_spored `); discard < install {
+	if install := at(`^if ! spore_install_spored_from_buckets `); discard < install {
 		t.Error("the discard runs before spored is installed, so on a launch whose image has no spored it cannot run")
 	}
 	for what, re := range map[string]string{

@@ -51,12 +51,12 @@ func TestStagedFilesAreTheInlineFiles(t *testing.T) {
 	for name, cfg := range stagedConfigs() {
 		for _, version := range []string{testRelease, ""} {
 			t.Run(name+"/release="+version, func(t *testing.T) {
-				inline, err := buildLinuxBootstrap(cfg, version, BootstrapBody())
+				inline, err := buildLinuxBootstrap(cfg, version, "", BootstrapBody())
 				if err != nil {
 					t.Fatal(err)
 				}
 				scfg := staged(cfg)
-				out, err := buildLinuxBootstrap(scfg, version, BootstrapBody())
+				out, err := buildLinuxBootstrap(scfg, version, "", BootstrapBody())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -90,7 +90,7 @@ func TestStagedFilesAreTheInlineFiles(t *testing.T) {
 // that would accept bytes other than the ones the launcher stages.
 func TestStagedFilesRefusesAnotherLaunchsObject(t *testing.T) {
 	cfg := staged(BootstrapConfig{Username: "ec2-user", Command: "echo hi", TaskFlushScript: "echo flush\n"})
-	if _, err := buildLinuxBootstrap(cfg, testRelease, BootstrapBody()); err != nil {
+	if _, err := buildLinuxBootstrap(cfg, testRelease, "", BootstrapBody()); err != nil {
 		t.Fatalf("a matching reference was refused: %v", err)
 	}
 	for name, mutate := range map[string]func(*BootstrapConfig){
@@ -108,7 +108,7 @@ func TestStagedFilesRefusesAnotherLaunchsObject(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := cfg
 			mutate(&c)
-			if _, err := buildLinuxBootstrap(c, testRelease, BootstrapBody()); err == nil {
+			if _, err := buildLinuxBootstrap(c, testRelease, "", BootstrapBody()); err == nil {
 				t.Error("built a bootstrap whose staged reference does not match its config")
 			}
 		})
@@ -143,7 +143,7 @@ func TestStagedFilesFetchRunsOnlyTheStagedObject(t *testing.T) {
 
 	const flush = "#!/bin/bash\necho flushed\n"
 	cfg := staged(BootstrapConfig{Username: "tester", Command: "echo the-command", TaskFlushScript: flush})
-	script, err := buildLinuxBootstrap(cfg, testRelease, string(body))
+	script, err := buildLinuxBootstrap(cfg, testRelease, "", string(body))
 	if err != nil {
 		t.Fatal(err)
 	}

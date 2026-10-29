@@ -21,6 +21,7 @@ import (
 	"github.com/spore-host/libs/catalog"
 	"github.com/spore-host/spawn/internal/shellmin"
 	spawnclient "github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
@@ -770,10 +771,8 @@ ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 # (GHSA-3x4q-99gh-fxhx, #819). It now uses the same fail-closed installer as the
 # normal boot path. On failure the AMI's existing spored stays in place, which is
 # a real fallback; running an unverified download is not.
-if ! spore_install_verified_spored "spored-linux-${ARCH}" \
-      "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn" \
+if ! spore_install_spored_from_buckets "spored-linux-${ARCH}" \
       "https://spawn-binaries-${REGION}.s3.amazonaws.com" \
-      "https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn" \
       "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
   echo "WARNING: could not install a verified spored; keeping the version baked into the AMI"
 fi
@@ -935,10 +934,8 @@ ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 # (GHSA-3x4q-99gh-fxhx, #819). It now uses the same fail-closed installer as the
 # normal boot path. On failure the AMI's existing spored stays in place, which is
 # a real fallback; running an unverified download is not.
-if ! spore_install_verified_spored "spored-linux-${ARCH}" \
-      "https://spawn-binaries-${REGION}.s3.amazonaws.com/spawn" \
+if ! spore_install_spored_from_buckets "spored-linux-${ARCH}" \
       "https://spawn-binaries-${REGION}.s3.amazonaws.com" \
-      "https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn" \
       "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
   echo "WARNING: could not install a verified spored; keeping the version baked into the AMI"
 fi
@@ -1261,8 +1258,9 @@ var sessionHTMLTemplate = `<!DOCTYPE html>
 // producing a script that still builds.
 const sporedInstallerSentinel = "# __SPORED_INSTALLER__"
 
-// spliceSporedInstaller replaces the sentinel with the signing key and the one
-// shared download-verify-install shell function.
+// spliceSporedInstaller replaces the sentinel with the signing key, the spored
+// version to install (this spawn's release, #1412) and the one shared
+// download-verify-install shell function.
 //
 // Both app user-data paths used to install spored with a bare curl, a chmod and
 // an "mv ... || true" — no checksum, no signature, and the install failing
@@ -1276,5 +1274,6 @@ const sporedInstallerSentinel = "# __SPORED_INSTALLER__"
 // generated output, not this function.
 func spliceSporedInstaller(script string) string {
 	return strings.Replace(script, sporedInstallerSentinel,
-		shellmin.Strip(sporedinstall.KeySetupScript())+shellmin.Strip(sporedinstall.VerifiedInstallFunc()), 1)
+		shellmin.Strip(sporedinstall.KeySetupScript())+sporedinstall.PinScript(launcher.SporedVersion())+
+			shellmin.Strip(sporedinstall.VerifiedInstallFunc()), 1)
 }
