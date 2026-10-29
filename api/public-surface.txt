@@ -713,6 +713,7 @@ field BootstrapConfig.InlineBody bool
 field BootstrapConfig.LaunchConfig []byte
 field BootstrapConfig.Plugins []plugin.Declaration
 field BootstrapConfig.PublicKey []byte
+field BootstrapConfig.ReadsLaunchConfig bool
 field BootstrapConfig.ReadyGates []string
 field BootstrapConfig.ReadyMountPoints []string
 field BootstrapConfig.StagedFiles *StagedFiles

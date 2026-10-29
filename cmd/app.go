@@ -835,7 +835,7 @@ echo 'Starting web app container on 127.0.0.1:%d...'
 docker run -d --restart unless-stopped %s-p 127.0.0.1:%d:%d %s%s || echo 'WARNING: docker run failed'
 echo "web app container started"
 `, login, image, image, port, gpuFlag, port, port, image, argStr)
-	return base64.StdEncoding.EncodeToString([]byte(spliceSporedInstaller(script)))
+	return base64.StdEncoding.EncodeToString([]byte(spliceSporedInstaller(script, true)))
 }
 
 // desktopInitPath is where the desktop-session launcher is installed; DCV runs
@@ -1017,7 +1017,7 @@ dcv create-session \
 
 echo "DCV session '%s' created for: %s"
 `, dcvInstallBlock(), preCreate, sessionID, initCommand, sessionID, sessionID, label)
-	return base64.StdEncoding.EncodeToString([]byte(spliceSporedInstaller(script)))
+	return base64.StdEncoding.EncodeToString([]byte(spliceSporedInstaller(script, false)))
 }
 
 // getSessionsDir returns the path to ~/.spawn/sessions/, creating it if necessary.
@@ -1272,8 +1272,13 @@ const sporedInstallerSentinel = "# __SPORED_INSTALLER__"
 // If the sentinel is absent the script is returned unchanged, which would be a
 // silent downgrade — so TestEveryAppUserDataInstallsSporedVerified asserts the
 // generated output, not this function.
-func spliceSporedInstaller(script string) string {
+//
+// readsLaunchConfig is whether the launch has a launch config object (#1359):
+// a web app does (app-mode, ready-port, web-auth), a DCV app does not (its
+// dcv-session-id and app-name are tags). A dev build of spawn then installs
+// only a spored that reads it (#1419).
+func spliceSporedInstaller(script string, readsLaunchConfig bool) string {
 	return strings.Replace(script, sporedInstallerSentinel,
-		shellmin.Strip(sporedinstall.KeySetupScript())+sporedinstall.PinScript(launcher.SporedVersion())+
+		shellmin.Strip(sporedinstall.KeySetupScript())+sporedinstall.PinScriptFor(launcher.SporedVersion(), readsLaunchConfig)+
 			shellmin.Strip(sporedinstall.VerifiedInstallFunc()), 1)
 }

@@ -130,6 +130,24 @@ const BucketInstallFuncName = "spore_install_spored_from_buckets"
 // script installs. PinScript assigns it.
 const PinVar = "SPAWN_SPORED_VERSION"
 
+// CurrentPrefix is where a dev build of spawn installs spored from (#1419):
+// spawn/current/ in the spawn-binaries buckets, which the release workflow
+// moves to each release from v0.150.0 on, once it is published. The
+// unversioned spawn/spored-* (and bucket-root spored-*) keys are frozen at
+// v0.149.0, the last spored that reads the launch-fixed settings from tags
+// (#1359): spawn releases before v0.149.0 install them, and keep a spored that
+// reads what they write.
+const CurrentPrefix = "spawn/current"
+
+// FrozenLatestVersion is the release the unversioned spawn/spored-* keys are
+// frozen at (#1419).
+const FrozenLatestVersion = "0.149.0"
+
+// ReadsLaunchConfigVar is the shell variable PinScriptFor sets when the launch
+// has a launch config object (#1359). A dev build's install then takes
+// spored only from CurrentPrefix: the frozen latest would ignore the object.
+const ReadsLaunchConfigVar = "SPAWN_SPORED_READS_LAUNCH_CONFIG"
+
 // releaseVersionRe is the shape of a published spawn release: the release
 // workflow publishes spored and the bootstrap body under
 // spawn/versions/<version>/ for exactly these. A pseudo-version, a +dirty build
@@ -153,7 +171,20 @@ func ReleaseVersion(v string) string {
 // latest. Any non-empty version pins, single-quoted, so a version with no
 // published spored fails the install rather than falling back to latest.
 func PinScript(version string) string {
-	return "\n" + PinVar + "='" + strings.ReplaceAll(version, "'", `'\''`) + "'\n"
+	return PinScriptFor(version, false)
+}
+
+// PinScriptFor is PinScript for a launch that has, or has not, a launch config
+// object (#1359). With one, a dev build may install spored only from
+// CurrentPrefix, never fall back to the frozen latest, which would ignore it.
+func PinScriptFor(version string, readsLaunchConfig bool) string {
+	s := "\n" + PinVar + "='" + strings.ReplaceAll(version, "'", `'\''`) + "'\n"
+	// A release build installs its own version whatever the launch holds, so
+	// its script is exactly PinScript's (TestAReleaseBuildsScriptIsUnchanged).
+	if readsLaunchConfig && version == "" {
+		s += ReadsLaunchConfigVar + "=1\n"
+	}
+	return s
 }
 
 // VerifiedInstallFunc returns the definition of a shell function that downloads
@@ -336,16 +367,21 @@ func VerifiedInstallFunc() string {
 # Usage: %[6]s <binary-name> <regional-bucket-url> <fallback-bucket-url>
 # With %[7]s set, only that spawn release's spawn/versions/<v>/ objects
 # (#1412), never the unversioned latest: a launch runs the spored of the spawn
-# that launched it. Empty: a dev build of spawn, so the latest.
+# that launched it. Empty: a dev build, so %[8]s/, else the frozen spawn/
+# unless %[10]s=1 (#1419).
 %[6]s() {
     local v="${%[7]s:-}"
     if [ -n "$v" ]; then
         echo "Installing spored $v, the version of the spawn that rendered this script"
         %[1]s "$1" "$2/spawn/versions/$v" "$3/spawn/versions/$v"
-    else
-        %[1]s "$1" "$2/spawn" "$2" "$3/spawn" "$3"
+    elif ! %[1]s "$1" "$2/%[8]s" "$3/%[8]s"; then
+        if [ "${%[10]s:-}" = 1 ]; then
+            echo "no %[8]s/ spored; %[9]s ignores launch configs (#1419)" >&2
+            return 1
+        fi
+        %[1]s "$1" "$2/spawn" "$3/spawn"
     fi
 }
 # --- end spored verified install -------------------------------------------
-`, FuncName, SigningKeyPath, Dest, CurlRetryFuncName, RelabelFuncName, BucketInstallFuncName, PinVar)
+`, FuncName, SigningKeyPath, Dest, CurlRetryFuncName, RelabelFuncName, BucketInstallFuncName, PinVar, CurrentPrefix, FrozenLatestVersion, ReadsLaunchConfigVar)
 }

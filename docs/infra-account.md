@@ -198,7 +198,7 @@ belong to adjacent projects.
 
 | bucket | objects | purpose |
 |---|---|---|
-| `spawn-binaries-<region>` × 11 | 538–803 | **load-bearing.** Instance bootstrap pulls `spored` from the bucket for its own region, from `spawn/versions/<v>/` for the launching spawn's release (#1412; the unversioned latest only for a dev build), and `spawn upgrade-spored` fetches `spawn/versions/<v>/` too. Written by `.github/workflows/release.yaml`. Per-region by design: an instance should not pull its agent across the planet |
+| `spawn-binaries-<region>` × 11 | 538–803 | **load-bearing.** Instance bootstrap pulls `spored` from the bucket for its own region, from `spawn/versions/<v>/` for the launching spawn's release (#1412), or from `spawn/current/` for a dev build (#1419; the unversioned `spawn/spored-*` and bucket-root `spored-*` are frozen at v0.149.0 for spawn releases before it), and `spawn upgrade-spored` fetches `spawn/versions/<v>/` too. Written by `.github/workflows/release.yaml`. Per-region by design: an instance should not pull its agent across the planet |
 | `spawn-sweeps-us-east-1` | 7 | sweep parameter files the orchestrator reads |
 | `spawn-pipelines-us-east-1` | 16 | pipeline Lambda artifacts |
 | `spawn-cloudformation-artifacts-us-east-1` | 9 | SAM packaging target |

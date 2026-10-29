@@ -161,6 +161,12 @@ type BootstrapConfig struct {
 	// the object in the member's account. Every other launch stores it in the
 	// staging bucket, and spored fetches it there.
 	LaunchConfig []byte
+	// ReadsLaunchConfig says the launch has a launch config object, seeded
+	// (LaunchConfig) or in the staging bucket (#1359). A dev build of spawn
+	// then installs spored only from spawn/current/, never the spored frozen
+	// at spawn/, which would ignore it (#1419). A release build installs its
+	// own version either way.
+	ReadsLaunchConfig bool
 }
 
 // StagedFiles is a per-launch object holding a launch's command and task
@@ -343,7 +349,7 @@ LOCAL_SSH_KEY_BASE64=%s
 
 	// The spored the body installs (#1412): this release's, which is per
 	// launch and so here rather than in the published body.
-	script += sporedinstall.PinScript(spored)
+	script += sporedinstall.PinScriptFor(spored, cfg.ReadsLaunchConfig || len(cfg.LaunchConfig) > 0)
 
 	// Defined first, because every abort before spored is running calls it:
 	// the stub's (no verified body) and the body's own (no spored).

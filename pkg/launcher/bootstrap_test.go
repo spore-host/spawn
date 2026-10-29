@@ -323,8 +323,10 @@ func TestBuildLinuxBootstrap_SigAwareFallback(t *testing.T) {
 	}
 	for _, want := range []string{
 		// The unpinned (dev build) candidates, in preference order (#1412
-		// moved them into pkg/sporedinstall's bucket function).
-		sporedinstall.FuncName + ` "$1" "$2/spawn" "$2" "$3/spawn" "$3"`,
+		// moved them into pkg/sporedinstall's bucket function): spawn/current/,
+		// then the frozen spawn/ (#1419).
+		sporedinstall.FuncName + ` "$1" "$2/` + sporedinstall.CurrentPrefix + `" "$3/` + sporedinstall.CurrentPrefix + `"`,
+		sporedinstall.FuncName + ` "$1" "$2/spawn" "$3/spawn"`,
 		// HEAD-probes the .sig up front when verifying (the crux of the fix).
 		// Retried, to tolerate a transient S3 hiccup on the probe (#462) —
 		// through the portable wrapper, not --retry-all-errors, which EL8's

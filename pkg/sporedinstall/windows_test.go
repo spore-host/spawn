@@ -48,6 +48,9 @@ type winFixture struct {
 	key     *ecdsa.PrivateKey
 	pubPEM  string
 	objects map[string][]byte // s3:// URL -> bytes
+	// readsLaunchConfig renders the install for a launch with a launch
+	// config object (#1359).
+	readsLaunchConfig bool
 }
 
 func newWinFixture(t *testing.T) *winFixture {
@@ -87,6 +90,9 @@ const (
 	rootPath  = "s3://spawn-binaries-eu-west-1/spored-windows-amd64.exe"
 	fallback  = "s3://spawn-binaries-us-east-1/spawn/spored-windows-amd64.exe"
 	installed = "spored/spored.exe"
+	// The dev build's sources since #1419.
+	currentRegional = "s3://spawn-binaries-eu-west-1/" + CurrentPrefix + "/spored-windows-amd64.exe"
+	currentFallback = "s3://spawn-binaries-us-east-1/" + CurrentPrefix + "/spored-windows-amd64.exe"
 )
 
 // run executes the generated install script against the winFixture and returns the
@@ -102,7 +108,7 @@ func (f *winFixture) run(t *testing.T, keyPEM string) (string, []byte) {
 func (f *winFixture) runVersion(t *testing.T, keyPEM, version string) (string, []byte, []string) {
 	t.Helper()
 	pwsh := pwshOrSkip(t)
-	script, err := WindowsInstallScript(keyPEM, version)
+	script, err := WindowsInstallScriptFor(keyPEM, version, f.readsLaunchConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,13 +441,34 @@ func TestWindowsPinnedInstallFetchesOnlyItsOwnVersion(t *testing.T) {
 		wantRefused(t, out, got)
 		onlyVersioned(t, requested)
 	})
-	t.Run("a dev build installs the latest", func(t *testing.T) {
+	t.Run("a dev build installs the current spored", func(t *testing.T) {
+		f := newWinFixture(t)
+		f.readsLaunchConfig = true
+		f.publish(t, regional, []byte("MZ frozen spored"), f.key)
+		f.publish(t, currentRegional, bin, f.key)
+		out, got, requested := f.runVersion(t, f.pubPEM, "")
+		wantInstalled(t, out, got, bin)
+		if len(requested) == 0 || requested[0] != currentRegional {
+			t.Errorf("a dev build did not read the current regional spored first (#1419): %v", requested)
+		}
+	})
+	t.Run("a dev build falls back to the frozen spored only without an object", func(t *testing.T) {
 		f := newWinFixture(t)
 		f.publish(t, regional, bin, f.key)
 		out, got, requested := f.runVersion(t, f.pubPEM, "")
 		wantInstalled(t, out, got, bin)
-		if len(requested) == 0 || requested[0] != regional {
-			t.Errorf("a dev build did not read the latest regional spored first: %v", requested)
+		if len(requested) < 3 || requested[0] != currentRegional || requested[1] != currentFallback {
+			t.Errorf("a dev build did not try spawn/current/ first: %v", requested)
+		}
+		f = newWinFixture(t)
+		f.readsLaunchConfig = true
+		f.publish(t, regional, bin, f.key)
+		out, got, requested = f.runVersion(t, f.pubPEM, "")
+		wantRefused(t, out, got)
+		for _, r := range requested {
+			if !strings.Contains(r, "/"+CurrentPrefix+"/") {
+				t.Errorf("with a launch config object a dev build read %s (#1359)", r)
+			}
 		}
 	})
 	t.Run("a version that is not a release is refused", func(t *testing.T) {

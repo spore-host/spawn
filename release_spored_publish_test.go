@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ const (
 	sporedBuildStepName  = "Build spored for the release"
 	sporedVerifyStepName = "Verify the published versioned spored"
 	sporedMatchStepName  = "Check GoReleaser built the published spored"
-	sporedLatestStepName = "Update the latest spored"
+	sporedLatestStepName = "Update the current spored"
 )
 
 // The spored names the workflow publishes, and where GoReleaser puts each.
@@ -440,8 +441,9 @@ func TestReleaseFailsWhenGoReleasersSporedDiffers(t *testing.T) {
 	}
 }
 
-// Latest moves, with the verified bytes, only once the GitHub release is
-// published; a release that failed to publish leaves it alone.
+// The current spored (spawn/current/, #1419) moves, with the verified bytes,
+// only once the GitHub release is published; a release that failed to publish
+// leaves it alone.
 func TestReleaseUpdatesLatestOnlyOnceTheReleaseIsPublished(t *testing.T) {
 	for name, draft := range map[string]string{"published": "false", "draft": "true", "no release": ""} {
 		t.Run(name, func(t *testing.T) {
@@ -451,28 +453,82 @@ func TestReleaseUpdatesLatestOnlyOnceTheReleaseIsPublished(t *testing.T) {
 			out, err := sb.run(sporedLatestStepName, "", "FAKE_GH_DRAFT="+draft)
 			if draft != "false" {
 				if err == nil {
-					t.Errorf("latest was updated for an unpublished release\n%s", out)
+					t.Errorf("the current spored was updated for an unpublished release\n%s", out)
 				}
 				if got := len(sb.sporedKeys()); got != before {
-					t.Errorf("an unpublished release wrote %d latest spored objects", got-before)
+					t.Errorf("an unpublished release wrote %d current spored objects", got-before)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("the latest step failed: %v\n%s", err, out)
+				t.Fatalf("the current step failed: %v\n%s", err, out)
 			}
 			for _, bucket := range sb.buckets() {
 				for n := range sporedDist {
 					for _, f := range []string{n, n + ".sha256", n + ".sig"} {
 						v, _ := sb.object(bucket, "spawn/versions/9.9.9/"+f)
-						for _, key := range []string{"spawn/" + f, f} {
-							if got, ok := sb.object(bucket, key); !ok || got != v {
-								t.Errorf("%s/%s is %q (present %v), want the published versioned %s", bucket, key, got, ok, f)
-							}
+						if got, ok := sb.object(bucket, "spawn/current/"+f); !ok || got != v {
+							t.Errorf("%s/spawn/current/%s is %q (present %v), want the published versioned %s", bucket, f, got, ok, f)
 						}
 					}
 				}
 			}
 		})
+	}
+}
+
+// frozenLatestKeys are the unversioned spored keys frozen at v0.149.0 (#1419):
+// spawn/<name> and the bucket-root <name>, with their .sha256 and .sig.
+func frozenLatestKeys() []string {
+	var out []string
+	for n := range sporedDist {
+		for _, f := range []string{n, n + ".sha256", n + ".sig"} {
+			out = append(out, "spawn/"+f, f)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestReleaseNeverWritesTheFrozenLatest (#1419): from v0.150.0 on, no release
+// step writes the unversioned spawn/spored-* or bucket-root spored-* keys.
+// They stay at v0.149.0, the last spored that reads the launch-fixed settings
+// from tags (#1359), which spawn releases before v0.149.0 install. Every
+// spored step of a successful release is RUN, end to end, and the mirror is
+// then checked; and the workflow's text names no such destination.
+func TestReleaseNeverWritesTheFrozenLatest(t *testing.T) {
+	sb := newRelSandbox(t, 0, fakeBody)
+	keys := sb.signingKeys("release")
+	sb.publishVersioned(keys)
+	sb.copyBuiltToDist()
+	sb.mustRun(sporedMatchStepName, "")
+	sb.mustRun(sporedLatestStepName, "", "FAKE_GH_DRAFT=false")
+	wrote := 0
+	for _, bucket := range sb.buckets() {
+		for _, k := range frozenLatestKeys() {
+			if _, ok := sb.object(bucket, k); ok {
+				t.Errorf("a release wrote %s/%s, frozen at v0.149.0 (#1419)", bucket, k)
+			}
+		}
+		if _, ok := sb.object(bucket, "spawn/current/spored-linux-amd64"); ok {
+			wrote++
+		}
+	}
+	if wrote != len(sb.buckets()) {
+		t.Fatalf("the release wrote spawn/current/ in %d of %d buckets; the run proves nothing", wrote, len(sb.buckets()))
+	}
+
+	b, err := os.ReadFile(sporedPublisher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenDest := regexp.MustCompile(`s3://\$\{?bucket\}?/(spawn/)?(\$f|\$\{f\}|\$name|\$\{name\}|spored-)`)
+	for i, line := range logicalLines(string(b)) {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if m := frozenDest.FindString(line); m != "" {
+			t.Errorf("%s:%d writes %s, a frozen latest key (#1419)", sporedPublisher, i+1, m)
+		}
 	}
 }

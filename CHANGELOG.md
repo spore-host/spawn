@@ -81,6 +81,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config object over a day old expires, which only a persistent Spot
   replacement (fresh root volume) misses; the next launch by this spawn
   restores both rules.
+- **The unversioned latest spored is frozen at v0.149.0; dev builds install
+  from `spawn/current/`** (#1419). The release workflow no longer writes
+  `spawn/spored-*` or the bucket-root `spored-*` in the spawn-binaries buckets:
+  they stay at v0.149.0, the last spored that reads the launch-fixed settings
+  from tags, because spawn releases before v0.149.0 install them (#1412 pinned
+  only later releases), so those CLIs keep a spored that reads what they write.
+  Its "Update the current spored" step writes `spawn/current/spored-*` (with
+  `.sha256` and `.sig`) instead, under the same gates: GoReleaser's spored
+  matches the published one, and the GitHub release is published. A dev build
+  of spawn installs from `spawn/current/`, regional then us-east-1; before the
+  first release that writes it, it falls back to the frozen `spawn/`, unless
+  the launch has a launch config object, which that spored would ignore: then
+  the install is refused and the instance retires, saying why. A release
+  build's user data is unchanged. `scripts/install-spored.ps1` (no launching
+  spawn) installs `spawn/current/`, then the frozen copy. The release role
+  (`GitHubActions-spore-host-release`) needs `s3:PutObject` on
+  `arn:aws:s3:::spawn-binaries-*/spawn/current/spored-*` before v0.150.0 is
+  tagged.
 - **`spawn upgrade-spored` refuses to cross v0.150.0 where it would strand
   the launch settings** (#1359): a v0.150.0+ spored on an instance launched by
   an older spawn that carries them as tags (it does not read them there; pin

@@ -57,7 +57,18 @@ import (
 // The returned script expects $aws (path to aws.exe) and $region to be set, and
 // sets $sporedInstalled to $true or $false.
 func WindowsInstallScript(keyPEM, version string) (string, error) {
-	sources := windowsLatestSources
+	return WindowsInstallScriptFor(keyPEM, version, false)
+}
+
+// WindowsInstallScriptFor is WindowsInstallScript for a launch that has, or
+// has not, a launch config object (#1359). A dev build installs from
+// CurrentPrefix (#1419), and falls back to the spored frozen at spawn/ only
+// when the launch has no object, which that spored would ignore.
+func WindowsInstallScriptFor(keyPEM, version string, readsLaunchConfig bool) (string, error) {
+	sources := windowsCurrentSources
+	if !readsLaunchConfig {
+		sources += ",\n" + windowsFrozenSources
+	}
 	if version != "" {
 		if ReleaseVersion(version) != version {
 			return "", fmt.Errorf("spored version %q is not a spawn release", version)
@@ -81,9 +92,14 @@ func WindowsInstallScript(keyPEM, version string) (string, error) {
 	).Replace(windowsInstallTemplate), nil
 }
 
-// windowsLatestSources are the unversioned sources, for a dev build of spawn.
-const windowsLatestSources = `  @{ u = "s3://$bucket/spawn/spored-windows-amd64.exe"; r = $region },
-  @{ u = "s3://$bucket/spored-windows-amd64.exe"; r = $region },
+// windowsCurrentSources are a dev build's sources (#1419): the newest
+// release's spored, at CurrentPrefix, regional then us-east-1.
+const windowsCurrentSources = `  @{ u = "s3://$bucket/` + CurrentPrefix + `/spored-windows-amd64.exe"; r = $region },
+  @{ u = 's3://spawn-binaries-us-east-1/` + CurrentPrefix + `/spored-windows-amd64.exe'; r = 'us-east-1' }`
+
+// windowsFrozenSources are the unversioned spawn/ keys, frozen at
+// FrozenLatestVersion: a dev build's fallback before CurrentPrefix exists.
+const windowsFrozenSources = `  @{ u = "s3://$bucket/spawn/spored-windows-amd64.exe"; r = $region },
   @{ u = 's3://spawn-binaries-us-east-1/spawn/spored-windows-amd64.exe'; r = 'us-east-1' }`
 
 // windowsVersionedSources are a release's own spored (#1412), regional then
@@ -228,8 +244,9 @@ if (-not $sporedInstalled) {
 // against this output by TestInstallSporedPs1IsGenerated; regenerate it with
 // `UPDATE_GOLDEN=1 go test ./pkg/sporedinstall -run TestInstallSporedPs1IsGenerated`.
 //
-// It installs the latest spored: it runs on an instance with no launching spawn
-// to take a version from.
+// It installs the current spored (CurrentPrefix, falling back to the frozen
+// spawn/ keys): it runs on an instance with no launching spawn to take a
+// version from, and no launch config object.
 func WindowsStandaloneScript(keyPEM string) (string, error) {
 	core, err := WindowsInstallScript(keyPEM, "")
 	if err != nil {

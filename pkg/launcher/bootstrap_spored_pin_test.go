@@ -59,15 +59,61 @@ func TestAReleaseBootstrapInstallsItsOwnSpored(t *testing.T) {
 		}
 		noLatest(t, srv)
 	})
-	t.Run("a dev build installs the latest", func(t *testing.T) {
+	t.Run("a dev build installs the current spored", func(t *testing.T) {
+		sb, srv, out, err := fullBootPinned(t, BootstrapConfig{Username: "tester", ReadsLaunchConfig: true}, "", "", sporedinstall.CurrentPrefix)
+		if err != nil || !sporedStarted(sb) {
+			t.Fatalf("err=%v spored=%v\n%s", err, sporedStarted(sb), out)
+		}
+		if srv.hit("eu-west-1", sporedinstall.CurrentPrefix+"/spored-linux-amd64") == 0 {
+			t.Errorf("a dev build did not install %s/spored-linux-amd64 (#1419)", sporedinstall.CurrentPrefix)
+		}
+		for _, k := range latest {
+			if srv.hit("eu-west-1", k) > 0 || srv.hit("us-east-1", k) > 0 {
+				t.Errorf("a dev build read the frozen %s with %s/ published", k, sporedinstall.CurrentPrefix)
+			}
+		}
+	})
+	t.Run("before spawn/current/ exists a dev build falls back to the frozen spored", func(t *testing.T) {
 		sb, srv, out, err := fullBootPinned(t, BootstrapConfig{Username: "tester"}, "", "", "spawn")
 		if err != nil || !sporedStarted(sb) {
 			t.Fatalf("err=%v spored=%v\n%s", err, sporedStarted(sb), out)
 		}
 		if srv.hit("eu-west-1", "spawn/spored-linux-amd64") == 0 {
-			t.Error("a dev build did not install the latest spored")
+			t.Error("a dev build with no launch config object did not fall back to the frozen spored")
 		}
 	})
+	t.Run("but not when the launch has a launch config object: it retires", func(t *testing.T) {
+		sb, srv, out, err := fullBootPinned(t, BootstrapConfig{Username: "tester", ReadsLaunchConfig: true}, "", "", "spawn")
+		assertRetired(t, sb, out, err, "spored install failed", awsTerminates)
+		if sporedStarted(sb) || srv.hit("eu-west-1", "spawn/spored-linux-amd64") > 0 || srv.hit("us-east-1", "spawn/spored-linux-amd64") > 0 {
+			t.Errorf("installed the frozen spored, which ignores this launch's launch config object (#1359, #1419)\n%s", out)
+		}
+	})
+}
+
+// A release build installs its own version whatever its launch holds: whether
+// it has a launch config object changes nothing in its script (#1419).
+func TestAReleaseBuildsScriptIsUnchanged(t *testing.T) {
+	prev := CallerVersion
+	t.Cleanup(func() { CallerVersion = prev })
+	CallerVersion = pinRelease
+	plain, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user", ReadsLaunchConfig: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != reads {
+		t.Error("a release build's bootstrap differs with a launch config object; it must install its own version either way")
+	}
+	if strings.Contains(plain, sporedinstall.ReadsLaunchConfigVar+"=") {
+		t.Errorf("a release build sets %s", sporedinstall.ReadsLaunchConfigVar)
+	}
+	if !strings.Contains(plain, sporedinstall.PinVar+"='"+pinRelease+"'") {
+		t.Errorf("a release build is not pinned to %s", pinRelease)
+	}
 }
 
 // pinLine is the assignment the user data makes; the body reads it.

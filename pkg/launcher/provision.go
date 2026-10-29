@@ -346,14 +346,20 @@ func BuildUserData(config aws.LaunchConfig, opts Options) (string, error) {
 	// spored bootstrap user-data (lagotto#19 issues #2/#3 root cause). This is
 	// the script that installs spored and makes the spawn:command / on-complete /
 	// pre-stop / idle tags actually do something.
+	object, _, err := aws.LaunchConfigObject(config)
+	if err != nil {
+		return "", err
+	}
 	bootstrap, err := BuildLinuxBootstrap(BootstrapConfig{
-		Username:        effectiveUsername(opts),
-		PublicKey:       opts.PublicKey,
-		Plugins:         opts.Plugins,
-		StorageScript:   opts.StorageScript,
-		ContainerScript: opts.ContainerScript,
-		CustomUserData:  opts.CustomUserData,
-		TaskFlushScript: opts.TaskFlushScript,
+		// A dev build must install a spored that reads it (#1419).
+		ReadsLaunchConfig: object != nil,
+		Username:          effectiveUsername(opts),
+		PublicKey:         opts.PublicKey,
+		Plugins:           opts.Plugins,
+		StorageScript:     opts.StorageScript,
+		ContainerScript:   opts.ContainerScript,
+		CustomUserData:    opts.CustomUserData,
+		TaskFlushScript:   opts.TaskFlushScript,
 		// Embed the workload command in user-data, not the 256-char-capped
 		// spawn:command tag (#214/#246). The headless path is never a sweep.
 		Command: config.JobArrayCommand,

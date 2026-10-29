@@ -304,14 +304,20 @@ jobs:
         with:
           subject-path: 'dist/checksums.txt'
 
-      # The unversioned latest spored (spawn/spored-* and the bucket-root copies),
-      # which spawn releases before #1412 and dev builds install. Moved only once
-      # this release is published: after the GitHub release exists and its
-      # spored is the one in spawn/versions/, so latest never names a release
-      # that failed to publish. Not gated on GoReleaser's own success, so an
-      # expired tap token (spawn#280), which fails GoReleaser after the GitHub
-      # release is up, still moves latest. Copies the files signed and verified
-      # before GoReleaser; nothing is rebuilt or re-signed here.
+      # The current spored, spawn/current/spored-*, which dev builds of spawn
+      # install (#1419). Moved only once this release is published: after the
+      # GitHub release exists and its spored is the one in spawn/versions/, so
+      # current never names a release that failed to publish. Not gated on
+      # GoReleaser's own success, so an expired tap token (spawn#280), which
+      # fails GoReleaser after the GitHub release is up, still moves it. Copies
+      # the files signed and verified before GoReleaser; nothing is rebuilt or
+      # re-signed here.
+      #
+      # The unversioned spawn/spored-* and bucket-root spored-* keys are NOT
+      # written, from v0.150.0 on: they stay at v0.149.0, the last spored that
+      # reads the launch-fixed settings from tags (#1359), because spawn
+      # releases before v0.149.0 install them and must keep a spored that reads
+      # what they write. TestReleaseNeverWritesTheFrozenLatest holds it.
       - name: Configure AWS credentials
         if: ${{ !cancelled() && steps.spored-dist-match.outcome == 'success' }}
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -320,7 +326,7 @@ jobs:
           role-session-name: spored-s3-upload
           aws-region: us-east-1
 
-      - name: Update the latest spored
+      - name: Update the current spored
         if: ${{ !cancelled() && steps.spored-dist-match.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -330,19 +336,18 @@ jobs:
           read -ra BUCKETS <<< "$SPAWN_BINARY_BUCKETS"
           draft="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" || draft=""
           if [ "$draft" != "false" ]; then
-            echo "::error::the GitHub release ${GITHUB_REF_NAME} is not published (isDraft=${draft:-<no release>}); leaving the latest spored on the previous release"
+            echo "::error::the GitHub release ${GITHUB_REF_NAME} is not published (isDraft=${draft:-<no release>}); leaving the current spored on the previous release"
             exit 1
           fi
           # shellcheck disable=SC2016 # $1/$2 expand in xargs' bash, not here
           for bucket in "${BUCKETS[@]}"; do
             for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
               for f in "$name" "$name.sha256" "$name.sig"; do
-                printf '%s\0%s\0' "$out/$f" "s3://${bucket}/spawn/$f"
-                printf '%s\0%s\0' "$out/$f" "s3://${bucket}/$f"
+                printf '%s\0%s\0' "$out/$f" "s3://${bucket}/spawn/current/$f"
               done
             done
           done | xargs -0 -P 16 -n 2 bash -c 'b="${2#s3://}"; b="${b%%/*}"; aws s3 cp "$1" "$2" --region "${b#spawn-binaries-}" --only-show-errors' _
-          echo "✅ Latest spored is now ${GITHUB_REF_NAME} in ${#BUCKETS[@]} regions"
+          echo "✅ The current spored (spawn/current/) is now ${GITHUB_REF_NAME} in ${#BUCKETS[@]} regions"
 
       # Nudge the umbrella docs repo to vendor this release's generated reference
       # (docs/gen/spawn/). Fires repository_dispatch → sync-cli-docs.yaml, which
