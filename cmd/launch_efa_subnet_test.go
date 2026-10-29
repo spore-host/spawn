@@ -57,6 +57,7 @@ func (f *efaSubnetAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "GetCallerIdentity":
 		b.WriteString(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>AIDATEST</UserId><Account>123456789012</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>t</RequestId></ResponseMetadata></GetCallerIdentityResponse>`)
 	case "DescribeInstanceTypes":
+		// nosemgrep
 		b.WriteString(`<DescribeInstanceTypesResponse ` + ns + `><requestId>r</requestId><instanceTypeSet><item><instanceType>` + form.Get("InstanceType.1") +
 			`</instanceType><networkInfo><efaSupported>true</efaSupported><efaInfo><maximumEfaInterfaces>2</maximumEfaInterfaces></efaInfo></networkInfo>` +
 			`<placementGroupInfo><supportedStrategies><item>cluster</item></supportedStrategies></placementGroupInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>`)
