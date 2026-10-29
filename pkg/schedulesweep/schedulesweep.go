@@ -104,15 +104,15 @@ var scheduleIDRe = regexp.MustCompile(scheduleIDPattern)
 // Reasons an object is kept. Exported so callers and tests can match them
 // without parsing prose.
 const (
-	KeepNotParams    = "not a schedules/<id>/params.yaml object"
-	KeepLive         = "a schedule record names it"
-	KeepNoModified   = "last-modified time unknown"
-	KeepYoung        = "younger than the record TTL margin (30 days)"
-	KeepQueueConfig  = "a batch queue config (it has its own 7-day lifecycle rule)"
-	KeepUntagged     = "not tagged as a schedule's params (no Component=scheduler tag)"
-	KeepTagMismatch  = "its ScheduleID tag does not match its key"
-	KeepNotSchedID   = "its id is not one spawn gives a schedule (sched-YYYYMMDD-HHMMSS)"
-	KeepTagsUnread   = "its tags could not be read"
+	KeepNotParams   = "not a schedules/<id>/params.yaml object"
+	KeepLive        = "a schedule record names it"
+	KeepNoModified  = "last-modified time unknown"
+	KeepYoung       = "younger than the record TTL margin (30 days)"
+	KeepQueueConfig = "a batch queue config (it has its own 7-day lifecycle rule)"
+	KeepUntagged    = "not tagged as a schedule's params (no Component=scheduler tag)"
+	KeepTagMismatch = "its ScheduleID tag does not match its key"
+	KeepNotSchedID  = "its id is not one spawn gives a schedule (sched-YYYYMMDD-HHMMSS)"
+	KeepTagsUnread  = "its tags could not be read"
 )
 
 // Facts is everything Decide needs about one object.

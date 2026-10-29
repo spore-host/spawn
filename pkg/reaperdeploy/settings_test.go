@@ -236,15 +236,16 @@ func TestEveryReaperSettingSurvivesARedeploy(t *testing.T) {
 		settable[k] = true
 	}
 	valid := map[string]string{
-		reaperconfig.EnvSpotRequests:  "reap",
-		reaperconfig.EnvNetResources:  "off",
-		reaperconfig.EnvElasticIPs:    "reap",
-		reaperconfig.EnvMaxAge:        "14d",
-		reaperconfig.EnvTTLGrace:      "5m",
-		reaperconfig.EnvEmptyBuckets:  "reap",
-		reaperconfig.EnvInstanceRoles: "reap",
-		reaperconfig.EnvPoolQueues:    "reap",
-		reaperconfig.EnvNotifyURL:     secretURL,
+		reaperconfig.EnvSpotRequests:   "reap",
+		reaperconfig.EnvNetResources:   "off",
+		reaperconfig.EnvElasticIPs:     "reap",
+		reaperconfig.EnvMaxAge:         "14d",
+		reaperconfig.EnvTTLGrace:       "5m",
+		reaperconfig.EnvEmptyBuckets:   "reap",
+		reaperconfig.EnvInstanceRoles:  "reap",
+		reaperconfig.EnvPoolQueues:     "reap",
+		reaperconfig.EnvScheduleParams: "reap",
+		reaperconfig.EnvNotifyURL:      secretURL,
 	}
 	for k := range settable {
 		v, ok := valid[k]

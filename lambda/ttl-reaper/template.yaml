@@ -262,6 +262,31 @@ Parameters:
       and spec grants; until then the run summary counts the account in
       pool_queues_accounts_denied.
 
+  ScheduleParams:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      The orphaned schedule params sweep (#1398). A schedule's params object
+      (spawn-schedules-<region>/schedules/<id>/params.yaml) has no expiry; a
+      one-time schedule whose firing failed, or an end-after schedule that
+      never fires past its end, leaves it behind once its record's TTL deletes
+      the record. Once per run, in THIS account, on the function's own
+      credentials, the sweep deletes such an object only when all hold: no
+      record in the spawn-schedules table (us-east-1, read in full with a
+      consistent read) has its schedule id or names it; it is at least 30
+      days old (the record TTL margin, so a schedule being created now is
+      safe); it is tagged Component=scheduler with a matching ScheduleID and
+      no QueueID, and its id has the form spawn gives a schedule (so a batch
+      queue config, current or pre-v0.148.0, is never deleted); and its bucket
+      is spawn-schedules-<region> or spawn-schedules-<this account>-<region>.
+      If the table cannot be read completely nothing is deleted
+      (schedule_params_unreadable). 'report' (default) logs 'WOULD delete
+      schedule params ...' for exactly what 'reap' would delete and changes
+      nothing: this is new deletion behaviour, so it starts report-only.
+      'reap' deletes. 'off' skips it. An unrecognised value resolves to
+      'report'. DryRun always wins. The member accounts' role is unchanged.
+
   SpotRequests:
     Type: String
     Default: 'report'
@@ -431,6 +456,7 @@ Resources:
           REAPER_ELASTIC_IPS: !Ref ElasticIps
           REAPER_INSTANCE_ROLES: !Ref InstanceRoles
           REAPER_POOL_QUEUES: !Ref PoolQueues
+          REAPER_SCHEDULE_PARAMS: !Ref ScheduleParams
           REAPER_EMPTY_BUCKETS: !Ref EmptyBuckets
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
@@ -468,6 +494,29 @@ Resources:
             - Effect: Allow
               Action:
                 - s3:GetObject
+              Resource: 'arn:aws:s3:::spawn-schedules-*/schedules/*'
+            # The orphaned schedule params sweep (#1398, ScheduleParams): find
+            # the spawn-schedules-* buckets (ListBuckets has no resource ARN;
+            # names only), list them under schedules/ only, read an object's
+            # tags (a schedule's params vs a batch queue config) and delete an
+            # orphan. Object grants on schedules/* only. Unconditional like
+            # the read: ScheduleParams=off/report/reap is the switch.
+            # pkg/reaperiam.ScheduleParamsSweepStatements is the source.
+            - Effect: Allow
+              Action:
+                - s3:ListAllMyBuckets
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource: 'arn:aws:s3:::spawn-schedules-*'
+              Condition:
+                StringLike:
+                  's3:prefix': 'schedules/*'
+            - Effect: Allow
+              Action:
+                - s3:GetObjectTagging
+                - s3:DeleteObject
               Resource: 'arn:aws:s3:::spawn-schedules-*/schedules/*'
         # When scanning the Lambda's own account directly (ScanSelf=true), it
         # needs describe/terminate locally too. Terminate is tag-scoped to

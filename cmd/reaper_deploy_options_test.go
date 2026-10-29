@@ -18,11 +18,12 @@ import (
 func parseReaperDeploy(t *testing.T, args ...string) *pflag.FlagSet {
 	t.Helper()
 	saved := []string{reaperVersion, reaperArtifact, reaperBucket, reaperSchedule, reaperRegions,
-		reaperSpotRequests, reaperNetResources, reaperMaxAge, reaperNotifyURL, reaperElasticIPs, reaperTTLGrace, reaperEmptyBuckets, reaperInstRoles, reaperPoolQueues}
+		reaperSpotRequests, reaperNetResources, reaperMaxAge, reaperNotifyURL, reaperElasticIPs, reaperTTLGrace, reaperEmptyBuckets, reaperInstRoles, reaperPoolQueues, reaperSchedParams}
 	t.Cleanup(func() {
 		reaperVersion, reaperArtifact, reaperBucket, reaperSchedule, reaperRegions = saved[0], saved[1], saved[2], saved[3], saved[4]
 		reaperSpotRequests, reaperNetResources, reaperMaxAge, reaperNotifyURL = saved[5], saved[6], saved[7], saved[8]
 		reaperElasticIPs, reaperTTLGrace, reaperEmptyBuckets, reaperInstRoles, reaperPoolQueues = saved[9], saved[10], saved[11], saved[12], saved[13]
+		reaperSchedParams = saved[14]
 	})
 	fs := pflag.NewFlagSet("deploy", pflag.ContinueOnError)
 	registerReaperDeployFlags(fs)
@@ -54,7 +55,8 @@ func TestReaperDeployWithoutFlagsKeepsRegionsAndSettings(t *testing.T) {
 func TestReaperDeployFlagsBecomeSettings(t *testing.T) {
 	fs := parseReaperDeploy(t, "--regions", "us-west-2,eu-west-1", "--spot-requests", "REAP",
 		"--net-resources", "off", "--elastic-ips", "reap", "--max-age", "14d", "--notify-url", "",
-		"--ttl-grace", "5m", "--empty-buckets", "reap", "--instance-roles", "report", "--pool-queues", "reap")
+		"--ttl-grace", "5m", "--empty-buckets", "reap", "--instance-roles", "report", "--pool-queues", "reap",
+		"--schedule-params", "reap")
 	opts, err := reaperDeployOptions(fs, "1", "us-east-1", "0.136.0", strings.NewReader(""))
 	if err != nil {
 		t.Fatal(err)
@@ -63,15 +65,16 @@ func TestReaperDeployFlagsBecomeSettings(t *testing.T) {
 		t.Errorf("Regions = %q", opts.Regions)
 	}
 	want := map[string]string{
-		reaperconfig.EnvSpotRequests:  "REAP",
-		reaperconfig.EnvNetResources:  "off",
-		reaperconfig.EnvElasticIPs:    "reap",
-		reaperconfig.EnvMaxAge:        "14d",
-		reaperconfig.EnvTTLGrace:      "5m",
-		reaperconfig.EnvEmptyBuckets:  "reap",
-		reaperconfig.EnvInstanceRoles: "report",
-		reaperconfig.EnvPoolQueues:    "reap",
-		reaperconfig.EnvNotifyURL:     "", // explicit empty: remove
+		reaperconfig.EnvSpotRequests:   "REAP",
+		reaperconfig.EnvNetResources:   "off",
+		reaperconfig.EnvElasticIPs:     "reap",
+		reaperconfig.EnvMaxAge:         "14d",
+		reaperconfig.EnvTTLGrace:       "5m",
+		reaperconfig.EnvEmptyBuckets:   "reap",
+		reaperconfig.EnvInstanceRoles:  "report",
+		reaperconfig.EnvPoolQueues:     "reap",
+		reaperconfig.EnvScheduleParams: "reap",
+		reaperconfig.EnvNotifyURL:      "", // explicit empty: remove
 	}
 	for k, v := range want {
 		got, ok := opts.Settings[k]
@@ -102,6 +105,7 @@ func TestReaperDeployRejectsBadValuesWithoutEchoingTheURL(t *testing.T) {
 		{"--elastic-ips", "release"},
 		{"--instance-roles", "delete"},
 		{"--pool-queues", "delete"},
+		{"--schedule-params", "delete"},
 		{"--ttl-grace", "2h"},
 		{"--empty-buckets", "delete"},
 		{"--max-age", "forever"},
