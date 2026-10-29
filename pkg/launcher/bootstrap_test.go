@@ -47,16 +47,22 @@ func TestBuildLinuxBootstrap_CoreContent(t *testing.T) {
 		sporedinstall.BucketInstallFuncName + " \"$BINARY\"", // installs spored, via the verified installer
 		"mv -f \"$tmp\" " + sporedinstall.Dest,               // ...which installs by atomic rename
 		"useradd -m -s /bin/bash \"$LOCAL_USERNAME\"",        // creates user
-		"authorized_keys",                           // trusts the key
-		"Name=key,Values=spawn:command",             // reads + runs the command tag (#2)
-		"Name=key,Values=spawn:on-complete",         // surfaces on-complete (#3)
-		"systemctl start spored",                    // starts the daemon
-		"PrivateTmp=true: spored must see the host", // the #66 guardrail comment
+		"authorized_keys",                   // trusts the key
+		"Name=key,Values=spawn:command",     // reads + runs the command tag (#2)
+		"Name=key,Values=spawn:on-complete", // surfaces on-complete (#3)
+		"systemctl start spored",            // starts the daemon
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(script, want) {
 			t.Errorf("bootstrap missing expected content: %q", want)
 		}
+	}
+	// The #66 guardrail comment stays in the source, beside the unit, but as a
+	// shell comment above the heredoc, which shellmin strips, rather than as
+	// unit data shipped in every launch's user data (#1422). The guard on the
+	// unit itself is cmd's TestSporedUnit_NoPrivateTmp.
+	if !strings.Contains(linuxBootstrapBody, "Do NOT set PrivateTmp=true: spored must see the host") {
+		t.Error("the bootstrap source lost the #66 PrivateTmp guardrail comment beside the spored unit")
 	}
 }
 
