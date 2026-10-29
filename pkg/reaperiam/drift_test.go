@@ -108,6 +108,13 @@ var grantedElsewhere = map[string]string{
 	// are in. ScheduleReferenceStatements is the source; the SAM template
 	// grants it to the function (TestSAMTemplateGrantsTheScheduleRead).
 	"s3:GetObject": "granted by template.yaml on the base credentials, scoped to ScheduleParamsARN",
+	// The orphaned schedule params sweep (#1398, pkg/schedulesweep), on the
+	// base credentials like the read above. ScheduleParamsSweepStatements is
+	// the source (TestScheduleParamsSweepIsScopedToTheParams). Its
+	// s3:ListBucket and s3:DeleteObject are also granted to the member role
+	// for other buckets, so they are not listed here.
+	"s3:ListAllMyBuckets": "granted by template.yaml on the base credentials (ListBuckets has no resource-level ARN)",
+	"s3:GetObjectTagging": "granted by template.yaml on the base credentials, scoped to ScheduleParamsARN",
 }
 
 // TestPolicyCoversEveryReaperAPICall is the structural end of the drift class.

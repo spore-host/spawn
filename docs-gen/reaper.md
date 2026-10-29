@@ -97,6 +97,7 @@ spawn reaper deploy [flags]
 | `--notify-url` |  | string |  | URL the reaper POSTs notifications to, REAPER_NOTIFY_URL; never printed. "-" reads it from stdin (default: keep) |
 | `--pool-queues` |  | string |  | Abandoned pool SQS queue and staged-spec sweep, REAPER_POOL_QUEUES: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--regions` |  | string |  | Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one) |
+| `--schedule-params` |  | string |  | Orphaned schedule params sweep (spawn-schedules-*/schedules/&lt;id&gt;/params.yaml with no schedule record, 30 days old), REAPER_SCHEDULE_PARAMS: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--schedule` |  | string |  | EventBridge schedule expression (default: keep the existing reaper's; rate(10 minutes) for a new one) |
 | `--spot-requests` |  | string |  | Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--ttl-grace` |  | string |  | How long past its TTL deadline a running instance whose spored still checks in is left for spored to end itself, REAPER_TTL_GRACE, 0 to 1h (default: keep; the reaper's default is 10m) |

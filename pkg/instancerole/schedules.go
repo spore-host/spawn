@@ -111,26 +111,10 @@ func (s *ScheduleSource) ProfileReferences(ctx context.Context) (map[string][]st
 		tmpl = scheduler.ParamsBucketTemplate
 	}
 
-	var records []scheduler.ScheduleRecord
-	p := dynamodb.NewScanPaginator(s.DB, &dynamodb.ScanInput{
-		TableName: aws.String(s.Table),
-		// A schedule written just before the sweep must be seen.
-		ConsistentRead: aws.Bool(true),
-	})
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("scan %s: %w", s.Table, err)
-		}
-		for _, item := range page.Items {
-			var rec scheduler.ScheduleRecord
-			if err := attributevalue.UnmarshalMap(item, &rec); err != nil {
-				return nil, fmt.Errorf("decode a schedule record in %s: %w", s.Table, err)
-			}
-			records = append(records, rec)
-		}
+	records, err := ScanSchedules(ctx, s.DB, s.Table)
+	if err != nil {
+		return nil, err
 	}
-	sort.Slice(records, func(i, j int) bool { return records[i].ScheduleID < records[j].ScheduleID })
 
 	refs := map[string][]string{}
 	for i := range records {
@@ -148,6 +132,42 @@ func (s *ScheduleSource) ProfileReferences(ctx context.Context) (map[string][]st
 		}
 	}
 	return refs, nil
+}
+
+// ScanSchedules reads every record in table, sorted by schedule ID, with a
+// consistent read (a schedule written just before the call must be seen). It
+// fails on anything it cannot read completely: a Scan error on any page
+// (AccessDenied, a missing table, throttling), or a record it cannot decode
+// or that names no schedule ID. Callers that delete on the strength of what
+// is absent from the answer (pkg/schedulesweep) or present in it (the role
+// sweep) must treat an error as "nothing may be deleted".
+func ScanSchedules(ctx context.Context, db ScheduleScanner, table string) ([]scheduler.ScheduleRecord, error) {
+	if db == nil || table == "" {
+		return nil, errors.New("schedule table is not configured")
+	}
+	var records []scheduler.ScheduleRecord
+	p := dynamodb.NewScanPaginator(db, &dynamodb.ScanInput{
+		TableName:      aws.String(table),
+		ConsistentRead: aws.Bool(true),
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("scan %s: %w", table, err)
+		}
+		for _, item := range page.Items {
+			var rec scheduler.ScheduleRecord
+			if err := attributevalue.UnmarshalMap(item, &rec); err != nil {
+				return nil, fmt.Errorf("decode a schedule record in %s: %w", table, err)
+			}
+			if rec.ScheduleID == "" {
+				return nil, fmt.Errorf("a schedule record in %s has no schedule_id", table)
+			}
+			records = append(records, rec)
+		}
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].ScheduleID < records[j].ScheduleID })
+	return records, nil
 }
 
 // paramsProfiles reads one schedule's params and returns every iam_role in it.

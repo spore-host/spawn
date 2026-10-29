@@ -35,6 +35,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aws.EFANetworkInterfacesWithSecondaryType`, `aws.EFASecondaryTypeEFA`,
   `aws.EFASecondaryTypeEFAOnly`. No new IAM: the interfaces ride the same
   RunInstances call.
+- **A deleter for orphaned schedule params: `spawn cleanup
+  --schedule-params` and the TTL reaper's `REAPER_SCHEDULE_PARAMS`**
+  (#1398). Since #1382 a schedule's params
+  (`spawn-schedules-<region>/schedules/<id>/params.yaml`) have no expiry, and
+  three paths left them behind once the record's TTL deleted the record: a
+  one-time schedule whose only firing failed, and an `--end-after` schedule
+  paused past its end or firing less often than every 30 days. Both callers
+  share `pkg/schedulesweep`, which deletes such an object only when no record
+  in the `spawn-schedules` table has its id or names its key (the whole table
+  is read with a consistent read, after the listing; if any of it cannot be
+  read, nothing is deleted), it is at least 30 days old (`RecordTTLMargin`:
+  the CLI uploads params before it writes the record), and it is tagged as a
+  schedule's params: `Component=scheduler`, `ScheduleID=<id>`, no `QueueID`,
+  and an id of the form `sched-YYYYMMDD-HHMMSS`. A batch queue config, which
+  shares the bucket and key layout, is kept, whether tagged `Component=queue`
+  (v0.148.0 on) or, before that, like params but named `queue-...`; so is an
+  object whose tags cannot be read, and anything in a `spawn-schedules-*`
+  bucket not named for the account. The reaper runs it once per run on its own
+  credentials (the schedules are in its account; the member role is
+  unchanged), under `REAPER_SCHEDULE_PARAMS=off|report|reap`, default
+  `report`: template parameter `ScheduleParams`, make variable
+  `SCHEDULE_PARAMS`, `spawn reaper deploy --schedule-params`, kept across a
+  deploy that does not name it. Counted as `schedule_params_scanned`,
+  `_deleted`, `_would_delete`, `_skipped`, `_failed` and `_unreadable`. IAM
+  (pkg/reaperiam `ScheduleParamsSweepStatements`, the SAM template, and the
+  role `spawn reaper deploy` creates): `s3:ListAllMyBuckets` on `*`,
+  `s3:ListBucket` on `spawn-schedules-*` conditioned on `s3:prefix`
+  `schedules/*`, and `s3:GetObjectTagging` and `s3:DeleteObject` on
+  `spawn-schedules-*/schedules/*` only. `spawn cleanup` now also calls
+  `s3:ListAllMyBuckets` and `s3:GetObjectTagging` (in spawn's infra account,
+  for `--schedule-params` only).
 
 ### Fixed
 

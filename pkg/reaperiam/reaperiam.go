@@ -427,6 +427,56 @@ func ScheduleReferenceStatements() []Statement {
 	}
 }
 
+// SchedulesBucketARN is the schedules buckets themselves (#1398), for the one
+// bucket-level action the params sweep needs: listing, and only under
+// pkg/scheduler.ParamsKeyPrefix (ScheduleParamsListCondition).
+const SchedulesBucketARN = "arn:aws:s3:::spawn-schedules-*"
+
+// ScheduleParamsListCondition limits the params sweep's s3:ListBucket to keys
+// under schedules/ (the s3:prefix the sweep sends): it can enumerate the
+// params and queue configs there and nothing else in the bucket.
+var ScheduleParamsListCondition = map[string]map[string]string{
+	"StringLike": {"s3:prefix": "schedules/*"},
+}
+
+// ScheduleParamsSweepStatements are what the orphaned schedule params sweep
+// needs (#1398, pkg/schedulesweep): find the account's spawn-schedules-*
+// buckets (ListBuckets has no resource-level ARN; it returns names only),
+// list them under schedules/, read an object's tags to tell a schedule's
+// params from a queue config, and delete the orphans. Every object grant is on
+// ScheduleParamsARN, so no other key in a schedules bucket and no other bucket
+// can be read for tags or deleted. Like ScheduleReferenceStatements they run
+// on the reaper's OWN credentials, in the account the schedules are in, so
+// they are not in ScanSelfStatements (the member accounts' role).
+func ScheduleParamsSweepStatements() []Statement {
+	return []Statement{
+		{
+			Effect:   "Allow",
+			Action:   []string{"s3:ListAllMyBuckets"},
+			Resource: "*",
+		},
+		{
+			Effect:    "Allow",
+			Action:    []string{"s3:ListBucket"},
+			Resource:  SchedulesBucketARN,
+			Condition: ScheduleParamsListCondition,
+		},
+		{
+			Effect:   "Allow",
+			Action:   []string{"s3:GetObjectTagging", "s3:DeleteObject"},
+			Resource: ScheduleParamsARN,
+		},
+	}
+}
+
+// OwnAccountStatements are every grant the reaper needs on its own
+// credentials for the schedules: ScheduleReferenceStatements and
+// ScheduleParamsSweepStatements. The SAM template grants exactly these to the
+// function, outside the ScanSelf branch.
+func OwnAccountStatements() []Statement {
+	return append(ScheduleReferenceStatements(), ScheduleParamsSweepStatements()...)
+}
+
 // StagingBucketSweepActions are what the empty-bucket sweep (#1301) needs on
 // spawn-staging-*: read and write the bucket's tags, and delete it. Nothing
 // that lists it or reads an object in it.
@@ -453,13 +503,13 @@ func ResultsBucketSweepActions() []string {
 }
 
 // ScanSelfPolicyDocument renders [ScanSelfStatements] and
-// [ScheduleReferenceStatements] as one IAM policy document: the policy of the
+// [OwnAccountStatements] as one IAM policy document: the policy of the
 // single role a scan-self reaper runs as (`spawn reaper deploy`), which is
 // both its own credentials and the scanned account's.
 func ScanSelfPolicyDocument() (string, error) {
 	doc := map[string]interface{}{
 		"Version":   "2012-10-17",
-		"Statement": append(ScanSelfStatements(), ScheduleReferenceStatements()...),
+		"Statement": append(ScanSelfStatements(), OwnAccountStatements()...),
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {

@@ -10,10 +10,17 @@ import (
 	"github.com/spore-host/spawn/pkg/scheduler"
 )
 
+// scheduleGrants are every grant the reaper holds on its own credentials for
+// the schedules: the #1378 read and the #1398 params sweep.
 func scheduleGrants(t *testing.T) map[grant]bool {
 	t.Helper()
+	return grantsOf(t, OwnAccountStatements())
+}
+
+func grantsOf(t *testing.T, stmts []Statement) map[grant]bool {
+	t.Helper()
 	out := map[grant]bool{}
-	for _, st := range ScheduleReferenceStatements() {
+	for _, st := range stmts {
 		cond := ""
 		if st.Condition != nil {
 			cond = canonicalJSON(t, st.Condition)
@@ -65,11 +72,12 @@ func looseGrants(t *testing.T, stmts []interface{}) map[grant]bool {
 	return out
 }
 
-// isScheduleGrant says whether a grant reads schedule data: any s3:GetObject,
-// or anything on a spawn-schedules resource. Discovered by what it touches,
-// not by statement position, so a second, broader copy cannot hide.
+// isScheduleGrant says whether a grant touches schedule data: any
+// s3:GetObject, the params sweep's s3:ListAllMyBuckets (#1398), or anything
+// on a spawn-schedules resource. Discovered by what it touches, not by
+// statement position, so a second, broader copy cannot hide.
 func isScheduleGrant(g grant) bool {
-	return g.Action == "s3:GetObject" || strings.Contains(g.Resources, "spawn-schedules")
+	return g.Action == "s3:GetObject" || g.Action == "s3:ListAllMyBuckets" || strings.Contains(g.Resources, "spawn-schedules")
 }
 
 func sortedGrants(m map[grant]bool) []string {
@@ -97,7 +105,7 @@ func TestScheduleReadIsScopedToTheSchedules(t *testing.T) {
 		{Effect: "Allow", Action: "dynamodb:Scan", Resources: wantTable}: true,
 		{Effect: "Allow", Action: "s3:GetObject", Resources: wantParams}: true,
 	}
-	if got := scheduleGrants(t); strings.Join(sortedGrants(got), "|") != strings.Join(sortedGrants(want), "|") {
+	if got := grantsOf(t, ScheduleReferenceStatements()); strings.Join(sortedGrants(got), "|") != strings.Join(sortedGrants(want), "|") {
 		t.Errorf("ScheduleReferenceStatements grants\n  %s\nwant exactly\n  %s",
 			strings.Join(sortedGrants(got), "\n  "), strings.Join(sortedGrants(want), "\n  "))
 	}
@@ -150,7 +158,7 @@ func TestSAMTemplateGrantsTheScheduleRead(t *testing.T) {
 	}
 	want := scheduleGrants(t)
 	if strings.Join(sortedGrants(got), "|") != strings.Join(sortedGrants(want), "|") {
-		t.Errorf("%s's schedule grants are\n  %s\nwant exactly ScheduleReferenceStatements:\n  %s",
+		t.Errorf("%s's schedule grants are\n  %s\nwant exactly OwnAccountStatements:\n  %s",
 			samTemplatePath, strings.Join(sortedGrants(got), "\n  "), strings.Join(sortedGrants(want), "\n  "))
 	}
 }
@@ -198,6 +206,6 @@ func TestScheduleReadIsOnTheReapersOwnRoleOnly(t *testing.T) {
 		}
 	}
 	if strings.Join(sortedGrants(got), "|") != strings.Join(sortedGrants(scheduleGrants(t)), "|") {
-		t.Errorf("ScanSelfPolicyDocument (spawn reaper deploy) schedule grants %v, want ScheduleReferenceStatements", sortedGrants(got))
+		t.Errorf("ScanSelfPolicyDocument (spawn reaper deploy) schedule grants %v, want OwnAccountStatements", sortedGrants(got))
 	}
 }

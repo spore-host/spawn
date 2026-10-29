@@ -69,6 +69,7 @@ import (
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
+	"github.com/spore-host/spawn/pkg/schedulesweep"
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
@@ -219,6 +220,14 @@ type reaper struct {
 	// poolQueuesOff / poolQueuesReport / poolQueuesReap, from
 	// REAPER_POOL_QUEUES. Unset is report. dryRun wins.
 	poolQueues string
+
+	// Orphaned schedule params (#1398): one of scheduleParamsOff /
+	// scheduleParamsReport / scheduleParamsReap, from REAPER_SCHEDULE_PARAMS.
+	// Unset is report. dryRun wins. schedParams and schedParamsAccount are
+	// the reaper's own (infra account) credentials, where the schedules are.
+	scheduleParams     string
+	schedParams        *schedulesweep.Clients
+	schedParamsAccount func(context.Context) (string, error)
 
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
@@ -443,6 +452,7 @@ func configure() {
 		log.Fatalf("load AWS config: %v", err)
 	}
 
+	schedParamsClients := schedulesweep.NewClients(cfg)
 	r = &reaper{
 		accounts:     resolveAccounts(ctx, cfg),
 		regions:      parseRegions(os.Getenv("REAPER_REGIONS")),
@@ -465,6 +475,10 @@ func configure() {
 		// #1351: abandoned pool queues and their staged specs.
 		poolQueues:   parsePoolQueues(os.Getenv("REAPER_POOL_QUEUES")),
 		emptyBuckets: parseEmptyBuckets(os.Getenv("REAPER_EMPTY_BUCKETS")),
+		// #1398: orphaned schedule params, in this (the infra) account.
+		scheduleParams:     parseScheduleParams(os.Getenv("REAPER_SCHEDULE_PARAMS")),
+		schedParams:        &schedParamsClients,
+		schedParamsAccount: selfAccount(cfg),
 	}
 	r.netResources, r.elasticIPs = netSweepModesFromEnv()
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
@@ -500,8 +514,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s, schedule-params=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues, r.scheduleParams)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -878,6 +892,21 @@ type Summary struct {
 	// listing: a member role not yet redeployed with the #1351 grant.
 	PoolQueuesAccountsDenied int `json:"pool_queues_accounts_denied"`
 
+	// Orphaned schedule params (#1398), under REAPER_SCHEDULE_PARAMS, in the
+	// reaper's own account. Skipped is a params object kept for any reason (a
+	// record names it, within the 30-day margin, a queue config, not tagged
+	// as a schedule's); Failed is one whose tags could not be read or whose
+	// delete failed, or a bucket that could not be listed.
+	ScheduleParamsScanned     int `json:"schedule_params_scanned"`
+	ScheduleParamsDeleted     int `json:"schedule_params_deleted"`
+	ScheduleParamsWouldDelete int `json:"schedule_params_would_delete"` // qualified, but report mode or a dry run held it back
+	ScheduleParamsSkipped     int `json:"schedule_params_skipped"`
+	ScheduleParamsFailed      int `json:"schedule_params_failed"`
+	// ScheduleParamsUnreadable counts runs whose sweep deleted nothing
+	// because the schedules table (or the bucket list, or the account) could
+	// not be read completely. Also in Errors, unless the cause was AccessDenied.
+	ScheduleParamsUnreadable int `json:"schedule_params_unreadable"`
+
 	// Orphaned persistent Spot requests (#950).
 	SpotRequestsScanned        int `json:"spot_requests_scanned"`
 	SpotRequestsCancelled      int `json:"spot_requests_cancelled"`
@@ -1098,6 +1127,11 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 	// even when every cross-account role is broken, so letting it participate would
 	// mask exactly the failure this is here to catch.
 	reportOutcomes(outcomes, &sum, r.registryStatusFunc(ctx, &sum))
+
+	// Orphaned schedule params (#1398). Once per run, on the base
+	// credentials: the schedules are in this account, not a member's. After
+	// reportOutcomes, so it cannot mask an account scan that reached nothing.
+	r.reapScheduleParams(ctx, start, &sum)
 
 	// Unmanaged-subdomain report (#457): the sweep above is per-account and only
 	// ever looks at accounts in REAPER_ROLE_ARNS, so records belonging to an

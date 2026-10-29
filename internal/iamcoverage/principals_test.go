@@ -46,10 +46,15 @@ type variant struct {
 // denial. services are the IAM prefixes this context's clients call; nil means
 // every service no other context claims. An entry with a colon is one action
 // (s3:GetObject), for a service whose calls are split between contexts; an
-// action claimed that way beats any prefix.
+// action claimed that way beats any prefix. pkgs claims call sites instead:
+// an action called from a function in one of these packages runs on this
+// context, whatever its name, for a service whose calls (s3:ListBucket, say)
+// are made on different credentials by different code. A site claim beats
+// both.
 type credContext struct {
 	name     string
 	services []string
+	pkgs     []string
 	variants []variant
 }
 
@@ -255,9 +260,18 @@ var principals = []principal{
 			// s3:GetObject is the schedules' params (#1378, pkg/instancerole
 			// ScheduleSource), read in the reaper's own account; nothing the
 			// reaper does in a member account reads an object.
-			{name: "function role", services: []string{"sts", "route53", "dynamodb", "kms", "s3:GetObject"}, variants: []variant{
-				{"SAM TTLReaperFunction", cfnPolicy("lambda/ttl-reaper/template.yaml", "TTLReaperFunction")},
-			}},
+			// pkg/schedulesweep is the orphaned schedule params sweep (#1398),
+			// on the same own-account credentials; its s3:ListBucket and
+			// s3:DeleteObject are also called in member accounts by other
+			// sweeps, so it is claimed by call site, not by action. This gate
+			// checks action names only, and the SAM variant also holds the
+			// ScanSelf branch's ListBucket/DeleteObject on other buckets, so
+			// the resource scope of those two is held by pkg/reaperiam's
+			// TestSAMTemplateGrantsTheScheduleRead, not here.
+			{name: "function role", services: []string{"sts", "route53", "dynamodb", "kms", "s3:GetObject"},
+				pkgs: []string{"github.com/spore-host/spawn/pkg/schedulesweep"}, variants: []variant{
+					{"SAM TTLReaperFunction", cfnPolicy("lambda/ttl-reaper/template.yaml", "TTLReaperFunction")},
+				}},
 			{name: "target account", variants: []variant{
 				{"cross-account TTLReaperCrossAccountRole", cfnPolicy("deployment/cloudformation/ttl-reaper-cross-account-role.yaml", "TTLReaperCrossAccountRole")},
 				{"scan-self (pkg/reaperiam, written by `spawn reaper deploy`)", scanSelfPolicy},
@@ -448,6 +462,49 @@ func appendSite(sites []Site, s Site) []Site {
 	return append(sites, s)
 }
 
+// contextsFor are the contexts an action's call sites run on: a site in a
+// package a context claims (pkgs) runs on it, and every other site on
+// contextFor(action).
+func (p principal) contextsFor(action string, sites []Site) ([]credContext, bool) {
+	var out []credContext
+	seen := map[string]bool{}
+	add := func(c credContext) {
+		if !seen[c.name] {
+			seen[c.name] = true
+			out = append(out, c)
+		}
+	}
+	unclaimed := len(sites) == 0
+	for _, s := range sites {
+		if c, ok := p.siteContext(s); ok {
+			add(c)
+			continue
+		}
+		unclaimed = true
+	}
+	if unclaimed {
+		c, ok := p.contextFor(action)
+		if !ok {
+			return out, false
+		}
+		add(c)
+	}
+	return out, true
+}
+
+// siteContext is the context that claims a call site's package, if any.
+func (p principal) siteContext(s Site) (credContext, bool) {
+	fn := strings.TrimLeft(s.Func, "(*")
+	for _, c := range p.contexts {
+		for _, pkg := range c.pkgs {
+			if strings.HasPrefix(fn, pkg+".") {
+				return c, true
+			}
+		}
+	}
+	return credContext{}, false
+}
+
 func (p principal) contextFor(action string) (credContext, bool) {
 	for _, c := range p.contexts {
 		for _, s := range c.services {
@@ -527,27 +584,29 @@ func coverageErrors(ps []principal, invs map[string]*principalInventory, policyF
 		}
 		sort.Strings(actions)
 		for _, action := range actions {
-			ctx, ok := p.contextFor(action)
+			ctxs, ok := p.contextsFor(action, inv.actions[action])
 			if !ok {
 				errs = append(errs, fmt.Sprintf("%s calls %s, but no credential context of this principal claims the %q service", p.name, action, strings.SplitN(action, ":", 2)[0]))
 				continue
 			}
-			for _, v := range ctx.variants {
-				pol := policyFor(v)
-				grant, src := pol.Grants(action)
-				if grant == Exact && strings.EqualFold(action, "iam:PassRole") {
-					errs = append(errs, passRoleErrors(p, v, pol)...)
-					continue
+			for _, ctx := range ctxs {
+				for _, v := range ctx.variants {
+					pol := policyFor(v)
+					grant, src := pol.Grants(action)
+					if grant == Exact && strings.EqualFold(action, "iam:PassRole") {
+						errs = append(errs, passRoleErrors(p, v, pol)...)
+						continue
+					}
+					if grant == Exact {
+						continue
+					}
+					k := gapKey(p.name, v.name, action)
+					if _, ok := gaps[k]; ok {
+						used[k] = true
+						continue
+					}
+					errs = append(errs, gapMessage(p, ctx, v, pol, action, grant, src, inv))
 				}
-				if grant == Exact {
-					continue
-				}
-				k := gapKey(p.name, v.name, action)
-				if _, ok := gaps[k]; ok {
-					used[k] = true
-					continue
-				}
-				errs = append(errs, gapMessage(p, ctx, v, pol, action, grant, src, inv))
 			}
 		}
 	}

@@ -60,6 +60,20 @@ kept; 'spawn pool drain --run-id &lt;id&gt;' deletes one. Queues are regional, s
 covers every enabled region. The TTL reaper applies the same rule
 (REAPER_POOL_QUEUES).
 
+--schedule-params deletes only schedule params objects
+(spawn-schedules-&lt;region&gt;/schedules/&lt;id&gt;/params.yaml) that no schedule record
+names any more: a one-time schedule whose firing failed, or an --end-after
+schedule that never fired past its end, leaves its params behind once its
+record expires. An object goes only when no record in the spawn-schedules
+table has its id or names it (the whole table is read; if it cannot be, nothing
+is deleted), it is at least 30 days old (the record's TTL margin, so a schedule
+being created now is safe), and it is tagged as a schedule's params
+(Component=scheduler, a matching ScheduleID, an id of the form spawn gives a
+schedule). A batch queue config, which shares the bucket and key layout, is
+never deleted. The schedules are read from spawn's infra account (as 'spawn
+schedule' does), in every region's bucket, whatever --region says. The TTL
+reaper applies the same rule (REAPER_SCHEDULE_PARAMS).
+
 A log of everything removed is written to ~/.spawn/cleanup-&lt;timestamp&gt;.log.
 
 ```
@@ -78,5 +92,6 @@ spawn cleanup [flags]
 | `--instance-roles` |  | bool |  | Delete only unused per-task and per-pool spawn-instance-* (and pre-v0.147 spawn-pool-worker-*) IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched |
 | `--pool-queues` |  | bool |  | Delete only the SQS queues (and staged task specs) of pools nobody drained: spawn-tagged, empty, 24h old, no instance is the pool's; nothing else is touched |
 | `--region` |  | string |  | AWS region (default: current region from AWS config) |
+| `--schedule-params` |  | bool |  | Delete only schedule params objects no schedule record names (30 days old, tagged as a schedule's params, never a queue config); nothing else is touched |
 | `--yes` | `-y` | bool |  | Skip the confirmation prompt |
 

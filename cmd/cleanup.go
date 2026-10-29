@@ -17,6 +17,7 @@ import (
 	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/poolqueue"
 	"github.com/spore-host/spawn/pkg/scheduler"
+	"github.com/spore-host/spawn/pkg/schedulesweep"
 )
 
 var (
@@ -30,6 +31,7 @@ var (
 	cleanupInstRoles  bool
 	cleanupBuckets    bool
 	cleanupPoolQueues bool
+	cleanupSchedules  bool
 )
 
 var cleanupCmd = &cobra.Command{
@@ -95,6 +97,20 @@ kept; 'spawn pool drain --run-id <id>' deletes one. Queues are regional, so
 covers every enabled region. The TTL reaper applies the same rule
 (REAPER_POOL_QUEUES).
 
+--schedule-params deletes only schedule params objects
+(spawn-schedules-<region>/schedules/<id>/params.yaml) that no schedule record
+names any more: a one-time schedule whose firing failed, or an --end-after
+schedule that never fired past its end, leaves its params behind once its
+record expires. An object goes only when no record in the spawn-schedules
+table has its id or names it (the whole table is read; if it cannot be, nothing
+is deleted), it is at least 30 days old (the record's TTL margin, so a schedule
+being created now is safe), and it is tagged as a schedule's params
+(Component=scheduler, a matching ScheduleID, an id of the form spawn gives a
+schedule). A batch queue config, which shares the bucket and key layout, is
+never deleted. The schedules are read from spawn's infra account (as 'spawn
+schedule' does), in every region's bucket, whatever --region says. The TTL
+reaper applies the same rule (REAPER_SCHEDULE_PARAMS).
+
 A log of everything removed is written to ~/.spawn/cleanup-<timestamp>.log.`,
 	RunE: runCleanup,
 }
@@ -113,6 +129,7 @@ func init() {
 	cleanupCmd.Flags().BoolVar(&cleanupElasticIPs, "elastic-ips", false, "Release only orphaned spawn launch Elastic IPs (unassociated, instance gone); nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupInstRoles, "instance-roles", false, "Delete only unused per-task and per-pool spawn-instance-* (and pre-v0.147 spawn-pool-worker-*) IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupPoolQueues, "pool-queues", false, "Delete only the SQS queues (and staged task specs) of pools nobody drained: spawn-tagged, empty, 24h old, no instance is the pool's; nothing else is touched")
+	cleanupCmd.Flags().BoolVar(&cleanupSchedules, "schedule-params", false, "Delete only schedule params objects no schedule record names (30 days old, tagged as a schedule's params, never a queue config); nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupBuckets, "buckets", false, "Delete only spawn's own staging and results buckets that have been empty for "+bucketGraceDays()+"; no object is ever deleted and nothing else is touched")
 }
 
@@ -142,6 +159,21 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}
 		sources := []instancerole.ReferenceSource{instancerole.NewScheduleSource(infraCfg)}
 		return runCleanupInstanceRoles(ctx, cmd, iamc, ec2s, sources, time.Now())
+	}
+
+	if cleanupSchedules {
+		// The params and the records naming them are in spawn's infra
+		// account, where `spawn schedule create` writes them (#1398).
+		infraCfg, err := spawnconfig.LoadInfraAWSConfig(ctx, scheduler.TableRegion)
+		if err != nil {
+			return fmt.Errorf("no schedule params were deleted: spawn's infra account could not be reached "+
+				"(set SPAWN_INFRA_PROFILE to its profile, or to \"\" if it is this account): %w", err)
+		}
+		account, err := aws.NewClientFromConfig(infraCfg).GetAccountID(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve spawn's infra account (the expected owner of the schedules buckets): %w", err)
+		}
+		return runCleanupScheduleParams(ctx, cmd, account, schedulesweep.NewClients(infraCfg), time.Now())
 	}
 
 	regions, err := resolveCleanupRegions(ctx, client, cleanupRegion, cleanupAllRegions)
@@ -836,6 +868,99 @@ func runCleanupPoolQueues(ctx context.Context, cmd *cobra.Command, account strin
 	fmt.Fprintln(out, ".")
 	if failed > 0 {
 		return fmt.Errorf("%d pool queue(s) or spec set(s) could not be checked or deleted", failed)
+	}
+	return nil
+}
+
+// runCleanupScheduleParams is `spawn cleanup --schedule-params` (#1398):
+// pkg/schedulesweep's rule, the one the TTL reaper applies, previewed first
+// and confirmed before anything is deleted.
+func runCleanupScheduleParams(ctx context.Context, cmd *cobra.Command, account string, c schedulesweep.Clients, now time.Time) error {
+	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	sweep := func(del bool) (schedulesweep.Result, error) {
+		res, err := schedulesweep.Sweep(ctx, c, schedulesweep.Options{Account: account, Now: now, Delete: del})
+		if err != nil {
+			return res, fmt.Errorf("no schedule params were deleted: %w", err)
+		}
+		return res, nil
+	}
+	report := func(res schedulesweep.Result) {
+		for _, b := range res.Foreign {
+			fmt.Fprintf(out, "  bucket %s: keep (not a name spawn gives a schedules bucket)\n", b)
+		}
+		for _, e := range res.Errors {
+			fmt.Fprintf(errOut, "%s  bucket %s not checked: %v\n", i18n.Symbol("warning"), e.Bucket, e.Err)
+		}
+	}
+
+	preview, err := sweep(false)
+	if err != nil {
+		return err
+	}
+	report(preview)
+	would := 0
+	for _, d := range preview.Objects {
+		if d.Reason == schedulesweep.KeepNotParams {
+			continue
+		}
+		loc := "s3://" + d.Bucket + "/" + d.Key
+		switch {
+		case d.Err != nil:
+			fmt.Fprintf(errOut, "  %s: keep, %s: %v\n", loc, d.Reason, d.Err)
+		case d.Delete:
+			would++
+			fmt.Fprintf(out, "  %s: delete\n", loc)
+		default:
+			fmt.Fprintf(out, "  %s: keep, %s\n", loc, d.Reason)
+		}
+	}
+	_, _, _, _, failed := preview.Count()
+
+	if would == 0 || cleanupDryRun {
+		if cleanupDryRun {
+			fmt.Fprintf(out, "\nDry run: %d orphaned schedule params object(s) would be deleted; nothing was changed.\n", would)
+		} else {
+			fmt.Fprintln(out, "\nNo orphaned schedule params; nothing was deleted.")
+		}
+		if failed > 0 {
+			return fmt.Errorf("%d schedule params object(s) or bucket(s) could not be checked", failed)
+		}
+		return nil
+	}
+	if !confirmYes(cleanupYes, fmt.Sprintf("Delete %d orphaned schedule params object(s)?", would)) {
+		return newAborted("aborted: no schedule params were deleted (re-run with --yes)")
+	}
+
+	logPath, logFile := openCleanupLog()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+	res, err := sweep(true)
+	if err != nil {
+		return err
+	}
+	report(res)
+	deleted := 0
+	for _, d := range res.Objects {
+		loc := "s3://" + d.Bucket + "/" + d.Key
+		switch {
+		case d.Deleted:
+			deleted++
+			fmt.Fprintf(out, "  ✓ deleted %s\n", loc)
+			writeCleanupLog(logFile, fmt.Sprintf("REMOVED %s\t%s\tschedule-params", loc, d.Region))
+		case d.Delete && d.Err != nil:
+			fmt.Fprintf(errOut, "  ✗ %s: %v\n", loc, d.Err)
+			writeCleanupLog(logFile, fmt.Sprintf("FAILED %s\t%s\tschedule-params\t%v", loc, d.Region, d.Err))
+		}
+	}
+	_, _, _, _, failed = res.Count()
+	fmt.Fprintf(out, "\nDeleted %d orphaned schedule params object(s)", deleted)
+	if logPath != "" {
+		fmt.Fprintf(out, " — log: %s", logPath)
+	}
+	fmt.Fprintln(out, ".")
+	if failed > 0 {
+		return fmt.Errorf("%d schedule params object(s) or bucket(s) could not be checked or deleted", failed)
 	}
 	return nil
 }

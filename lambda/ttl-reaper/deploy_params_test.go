@@ -585,7 +585,7 @@ func TestPlainDeployEmitsNoModeSettingParameter(t *testing.T) {
 	// DryRun first because it is the one that silently stops the reaper
 	// terminating anything.
 	keys := []string{
-		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "InstanceRoles", "PoolQueues", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
+		"DryRun", "NetResources", "SpotRequests", "ElasticIps", "EmptyBuckets", "InstanceEvents", "InstanceRoles", "PoolQueues", "ScheduleParams", "TtlGrace", "ScanSelf", "DnsSweep", "DnsExpire", "DnsLeaseExpire",
 		"NotifyUrl", "AlarmsEnabled", "AlarmTopicArn", "DnsZoneId", "DnsDomain",
 		"MaxAge", "Regions", "Schedule", "RoleArns", "AccountsTable", "Environment",
 	}
@@ -1030,6 +1030,47 @@ func TestPoolQueuesSurvivesAMakeDeploy(t *testing.T) {
 	got, _ = runMerge(t, summary, setReap, toExplicit(set))
 	if got["PoolQueues"] != "off" {
 		t.Errorf("make deploy POOL_QUEUES=off sent %q", got["PoolQueues"])
+	}
+}
+
+// TestScheduleParamsSurvivesAMakeDeploy is #1398's preservation property, the
+// same shape as TestPoolQueuesSurvivesAMakeDeploy: a stack set to
+// ScheduleParams=reap keeps it across a `make deploy` that does not mention
+// it, a stack that predates the parameter gets the template default 'report'
+// (an upgrade deletes nothing by itself), and `make deploy
+// SCHEDULE_PARAMS=off` sets it.
+func TestScheduleParamsSurvivesAMakeDeploy(t *testing.T) {
+	summary := templateSummaryFromTemplate(t)
+	setReap := strings.Replace(liveParams, "\n]",
+		",\n  {\"ParameterKey\":\"ScheduleParams\",\"ParameterValue\":\"reap\"}\n]", 1)
+	if setReap == liveParams {
+		t.Fatal("could not add ScheduleParams to the live fixture")
+	}
+	toExplicit := func(m map[string]string) string {
+		var b strings.Builder
+		for k, v := range m {
+			b.WriteString(k + "=" + v + "\n")
+		}
+		return b.String()
+	}
+
+	plain, _ := explicitFromMakefile(t)
+	got, _ := runMerge(t, summary, setReap, toExplicit(plain))
+	if got["ScheduleParams"] != "reap" {
+		t.Errorf("plain make deploy over a stack with ScheduleParams=reap sent %q: a deploy that did "+
+			"not mention it changed it", got["ScheduleParams"])
+	}
+
+	got, _ = runMerge(t, summary, liveParams, toExplicit(plain))
+	if got["ScheduleParams"] != "report" {
+		t.Errorf("a stack predating ScheduleParams got %q, want the template default 'report': "+
+			"new deletion behaviour must start report-only", got["ScheduleParams"])
+	}
+
+	set, _ := explicitFromMakefile(t, "SCHEDULE_PARAMS=off")
+	got, _ = runMerge(t, summary, setReap, toExplicit(set))
+	if got["ScheduleParams"] != "off" {
+		t.Errorf("make deploy SCHEDULE_PARAMS=off sent %q", got["ScheduleParams"])
 	}
 }
 
