@@ -140,7 +140,6 @@ var writtenOutOfTheScansSight = map[string]string{
 // readOutsideThisRepo are keys buildTags writes that no reader in this repo
 // parses. Add one only with the reader named, or the issue deciding its fate.
 var readOutsideThisRepo = map[string]string{
-	"spawn:created-by":      "descriptive, no spawn reader (#1245)",
 	"spawn:root":            "descriptive, no spawn reader (#1245)",
 	"spawn:efs-mount-point": "descriptive, no spawn reader (#1245)",
 	"spawn:fsx-mount-name":  "descriptive, no spawn reader (#1245)",

@@ -101,9 +101,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tagged.
 - **`spawn upgrade-spored` refuses to cross v0.150.0 where it would strand
   the launch settings** (#1359): a v0.150.0+ spored on an instance launched by
-  an older spawn that carries them as tags (it does not read them there; pin
-  `--version` to the instance's `spawn:version`), and an older spored on an
-  instance whose settings are in a launch config object.
+  an older spawn that carries them as tags (it does not read them there), and
+  an older spored on an instance whose settings are in a launch config object.
+  The first refusal names a spored that reads them (#1423): the instance's
+  `spawn:version` when `spawn:created-by` is `spawn` (spored is versioned in
+  lockstep with it), else the spored it reports (`spawn:spored-version`), else
+  0.149.0, the last that reads them from tags (#1419). Another launcher's
+  `spawn:version` is its own (spawn-ts writes its library version, e.g.
+  0.7.0) and names no spored.
 
 ## [0.149.0] - 2026-10-29
 

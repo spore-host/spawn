@@ -184,23 +184,50 @@ func launchConfigUpgradeGuard(tags map[string]string, target string) error {
 		}
 	}
 	sort.Strings(asTags)
-	launchedBy := tags["spawn:version"]
-	if launchedBy == "" {
-		launchedBy = "its launching spawn's version"
-	}
 	switch {
 	case readsObject && !hasObject && len(asTags) > 0:
+		pin, why := tagsReadingSpored(tags)
 		return fmt.Errorf("refusing to install spored v%s: this instance was launched by a spawn older than v%s and "+
 			"carries its spored settings as tags (%s); spored v%s and later read them only from a launch config object, "+
 			"which this instance does not have, so they would stop applying. Pin a spored that reads tags: "+
-			"--version %s (#1359)", target, launchconfig.FirstSporedVersion, strings.Join(asTags, ", "),
-			launchconfig.FirstSporedVersion, launchedBy)
+			"--version %s (%s; #1359)", target, launchconfig.FirstSporedVersion, strings.Join(asTags, ", "),
+			launchconfig.FirstSporedVersion, pin, why)
 	case !readsObject && hasObject:
 		return fmt.Errorf("refusing to install spored v%s: this instance's spored settings are in a launch config object "+
 			"(%s), which spored before v%s does not read, so they would stop applying (#1359)",
 			target, launchconfig.Tag, launchconfig.FirstSporedVersion)
 	}
 	return nil
+}
+
+// tagsReadingSpored names the spored launchConfigUpgradeGuard tells a
+// tags-only instance to pin, and why (#1423). spawn:version is the launching
+// spawn's version only when spawn itself launched the instance
+// (spawn:created-by=spawn): spored is versioned in lockstep with spawn, so that
+// is the spored it installed. Another launcher writes its own version there
+// (spawn-ts writes created-by=spawn-ts and its library version, e.g. 0.7.0,
+// for which no spored exists), so it is not read for them. Otherwise the
+// spored the instance reports running (spawn:spored-version), and failing
+// that the frozen latest, the last spored that reads the settings from tags
+// (#1419). A version that is not a release, or that reads only the launch
+// config object, is skipped.
+func tagsReadingSpored(tags map[string]string) (version, why string) {
+	readsTags := func(v string) string {
+		v = sporedinstall.ReleaseVersion(v)
+		if v == "" || compareVersions(v, launchconfig.FirstSporedVersion) >= 0 {
+			return ""
+		}
+		return v
+	}
+	if tags["spawn:created-by"] == "spawn" {
+		if v := readsTags(tags["spawn:version"]); v != "" {
+			return v, "the spored of the spawn that launched it"
+		}
+	}
+	if v := readsTags(tags["spawn:spored-version"]); v != "" {
+		return v, "the spored it reports running"
+	}
+	return sporedinstall.FrozenLatestVersion, "the last spored that reads them from tags"
 }
 
 // upgradeSporedTarget resolves the version to upgrade to: --version when given,
