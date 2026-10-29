@@ -79,8 +79,10 @@ const Schema = 1
 // spawn:config=<sha256>.
 const TagSuffix = "config"
 
-// Tag is the tag a launch writes: spawn:config.
-const Tag = "spawn:" + TagSuffix
+// Tag is the tag a launch writes: spawn:config. A literal, not "spawn:" +
+// TagSuffix, so the tag-contract scan sees the key (TestTagIsTheSuffix holds
+// the two together).
+const Tag = "spawn:config"
 
 // KeyPrefix is where every config object lives in the staging bucket. The
 // bucket's backstop lifecycle rule, the instance role's s3:GetObject grant and

@@ -91,3 +91,9 @@ func TestNoKeyIsBothObjectAndTag(t *testing.T) {
 		t.Fatalf("classification has %d settings and %d tags; it has been emptied", len(Settings), len(TagKeys))
 	}
 }
+
+func TestTagIsTheSuffix(t *testing.T) {
+	if Tag != "spawn:"+TagSuffix {
+		t.Fatalf("Tag %q is not spawn:%s", Tag, TagSuffix)
+	}
+}

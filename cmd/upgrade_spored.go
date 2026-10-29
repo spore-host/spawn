@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/spore-host/libs/update"
 	"github.com/spore-host/spawn/internal/shellmin"
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
@@ -29,8 +31,14 @@ var upgradeSporedCmd = &cobra.Command{
 	Long: `Replace the spored lifecycle agent on a running instance with a newer
 release WITHOUT terminating/relaunching the instance and without losing spored's
 lifecycle state (the TTL deadline, accumulated compute-seconds, and the
-completion / pre-stop / idle / FSx config all live in EC2 tags that the new
-spored re-reads on boot).
+completion / pre-stop / idle / FSx config live in EC2 tags that the new spored
+re-reads on boot, and the settings fixed at launch in the launch config object
+cached on the instance).
+
+An upgrade across v0.150.0, the first spored that reads those settings only from
+the launch config object, is refused when the instance keeps them in the other
+place: tags on an instance launched by an older spawn, or an object an older
+spored would not read.
 
 The default target is this spawn's own version, the spored a launch by this
 spawn installs (for a development build of spawn, which has no published spored,
@@ -91,6 +99,12 @@ func runUpgradeSpored(cmd *cobra.Command, args []string) error {
 		target = res.LatestVersion
 	}
 
+	// Where this instance's launch-fixed settings are, and whether the target
+	// spored reads them there (#1359).
+	if err := launchConfigUpgradeGuard(instance.Tags, target); err != nil {
+		return err
+	}
+
 	// What's running now? Prefer the tag (no exec); it's written by spored on boot
 	// (#234). Empty when an older spored that predates the tag is running — then we
 	// can't compare, so we proceed (and --allow-downgrade is not required).
@@ -140,6 +154,52 @@ func runUpgradeSpored(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(out, "%s spored upgraded to v%s on %s (lifecycle state preserved).\n", i18n.Symbol("success"), target, instance.InstanceID)
+	return nil
+}
+
+// launchConfigUpgradeGuard refuses an upgrade that would leave an instance's
+// launch-fixed spored settings (#1359: notifications, webhooks, active ports
+// and processes, the web app, idle CPU, metrics and tracing details) where the
+// target spored does not read them:
+//
+//   - a spored from launchconfig.FirstSporedVersion reads them only from the
+//     launch config object spawn:config names, never from tags, so it is
+//     refused on an instance that has them as tags and no spawn:config (one
+//     launched by an older spawn). Reading the tags after all would be the
+//     tag fallback the same-version contract rules out, and running without
+//     them would drop its notifications and webhooks and, without its
+//     --active-ports/--active-processes, could stop an instance in use as
+//     idle;
+//   - an older spored reads them only from tags, so it is refused on an
+//     instance that names an object.
+//
+// An instance with none of these settings has nothing to lose either way.
+func launchConfigUpgradeGuard(tags map[string]string, target string) error {
+	readsObject := compareVersions(target, launchconfig.FirstSporedVersion) >= 0
+	_, hasObject := tags[launchconfig.Tag]
+	var asTags []string
+	for k := range tags {
+		if launchconfig.IsSetting(k) {
+			asTags = append(asTags, k)
+		}
+	}
+	sort.Strings(asTags)
+	launchedBy := tags["spawn:version"]
+	if launchedBy == "" {
+		launchedBy = "its launching spawn's version"
+	}
+	switch {
+	case readsObject && !hasObject && len(asTags) > 0:
+		return fmt.Errorf("refusing to install spored v%s: this instance was launched by a spawn older than v%s and "+
+			"carries its spored settings as tags (%s); spored v%s and later read them only from a launch config object, "+
+			"which this instance does not have, so they would stop applying. Pin a spored that reads tags: "+
+			"--version %s (#1359)", target, launchconfig.FirstSporedVersion, strings.Join(asTags, ", "),
+			launchconfig.FirstSporedVersion, launchedBy)
+	case !readsObject && hasObject:
+		return fmt.Errorf("refusing to install spored v%s: this instance's spored settings are in a launch config object "+
+			"(%s), which spored before v%s does not read, so they would stop applying (#1359)",
+			target, launchconfig.Tag, launchconfig.FirstSporedVersion)
+	}
 	return nil
 }
 
