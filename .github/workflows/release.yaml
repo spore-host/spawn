@@ -123,6 +123,121 @@ jobs:
           done
           echo "✅ Published the bootstrap body ($(cat "$out/bootstrap.sh.sha256")) to ${#BUCKETS[@]} regions"
 
+      # spored, built, signed and published to spawn/versions/<v>/ BEFORE
+      # GoReleaser makes the CLI installable (#1415). A release spawn installs
+      # spored only from its own version's directory and retires the instance
+      # when it is missing or its .sig does not verify (#1412), so, as with the
+      # body above, no installable spawn may exist before its spored does.
+      #
+      # GoReleaser OSS cannot build in one step and publish in a later one
+      # (`release --skip=publish` has no OSS counterpart that publishes the
+      # prepared dist/; split/continue/publish and the prebuilt builder are Pro),
+      # so this builds spored itself with EXACTLY the spored build in
+      # .goreleaser.yaml: same env, ldflags, package and targets, no extra flags
+      # (TestReleaseBuildsSporedLikeGoReleaser parses both). Go builds are
+      # reproducible here: same toolchain, same checkout path, and the same
+      # clean tree, so the same vcs.* stamps. Hence the output goes OUTSIDE the
+      # checkout: an untracked file in the tree flips vcs.modified and changes
+      # every byte-hash. After GoReleaser, "Check GoReleaser built the published
+      # spored" fails the job if dist/'s spored differs from what was published.
+      - name: Build spored for the release
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          out="${RUNNER_TEMP}/spored-release"
+          mkdir -p "$out"
+          # GOOS GOARCH name: .goreleaser.yaml's spored goos x goarch, minus its ignore.
+          while read -r goos goarch name; do
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -ldflags "-s -w -X main.Version=${VERSION}" -o "$out/$name" ./cmd/spored
+            sha256sum "$out/$name" | awk '{print $1}' > "$out/$name.sha256"
+          done <<'TARGETS'
+          linux amd64 spored-linux-amd64
+          linux arm64 spored-linux-arm64
+          windows amd64 spored-windows-amd64.exe
+          TARGETS
+          echo "✅ Built spored ${VERSION}: $(cd "$out" && cat ./*.sha256 | tr '\n' ' ')"
+
+      - name: Publish the versioned spored to S3
+        env:
+          SPORED_SIGNING_KEY_ID: ${{ vars.SPORED_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          out="${RUNNER_TEMP}/spored-release"
+          read -ra BUCKETS <<< "$SPAWN_BINARY_BUCKETS"
+          if [ -z "${SPORED_SIGNING_KEY_ID:-}" ]; then
+            echo "::error::SPORED_SIGNING_KEY_ID unset: a release spawn installs only a signed spored, so every launch by this release would retire itself at boot (#1412)"
+            exit 1
+          fi
+          # The key the released spawn verifies against, from the tagged source.
+          SPORE_NO_UPDATE_CHECK=1 CGO_ENABLED=0 go run . spored-signing-key > "$out/signing-key.pem"
+          for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
+            # KMS Sign takes at most ~4 KiB, so sign the 32-byte digest
+            # (--message-type DIGEST); `openssl dgst -sha256 -verify` over the file
+            # accepts it, as the installer does (#440).
+            openssl dgst -sha256 -binary "$out/$name" > "$out/$name.digest"
+            aws kms sign \
+              --key-id "$SPORED_SIGNING_KEY_ID" \
+              --message-type DIGEST \
+              --signing-algorithm ECDSA_SHA_256 \
+              --message "fileb://$out/$name.digest" \
+              --query Signature --output text \
+              > "$out/$name.sig"
+            # Refuse to publish a signature the released spawn would reject.
+            openssl base64 -d -A -in "$out/$name.sig" > "$out/$name.sig.der"
+            if ! openssl dgst -sha256 -verify "$out/signing-key.pem" -signature "$out/$name.sig.der" "$out/$name" >/dev/null; then
+              echo "::error::the KMS signature of $name does not verify against the key compiled into spawn; every launch by this release would retire itself at boot (#1415)"
+              exit 1
+            fi
+          done
+          # Every bucket in SPAWN_BINARY_BUCKETS, us-east-1 (the fallback) included:
+          # a regional copy left stale and unsigned once beat the fallback and
+          # broke spored installs region-wide (#440). One "src<NUL>dest" pair per
+          # object, through a bounded parallel pool; any failed copy fails xargs
+          # and so the step.
+          # shellcheck disable=SC2016 # $1/$2 expand in xargs' bash, not here
+          for bucket in "${BUCKETS[@]}"; do
+            for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
+              for f in "$name" "$name.sha256" "$name.sig"; do
+                printf '%s\0%s\0' "$out/$f" "s3://${bucket}/spawn/versions/${VERSION}/$f"
+              done
+            done
+          done | xargs -0 -P 16 -n 2 bash -c 'b="${2#s3://}"; b="${b%%/*}"; aws s3 cp "$1" "$2" --region "${b#spawn-binaries-}" --only-show-errors' _
+          echo "✅ Published the signed spored ${VERSION} to spawn/versions/${VERSION}/ in ${#BUCKETS[@]} regions"
+
+      # Read every versioned object back and require the bytes just published.
+      # A copy that "succeeded" into the wrong key or region, or a bucket whose
+      # policy drops the write, would otherwise surface only as launches retiring.
+      - name: Verify the published versioned spored
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          out="${RUNNER_TEMP}/spored-release"
+          back="${RUNNER_TEMP}/spored-readback"
+          read -ra BUCKETS <<< "$SPAWN_BINARY_BUCKETS"
+          # shellcheck disable=SC2016 # $1/$2 expand in xargs' bash, not here
+          for bucket in "${BUCKETS[@]}"; do
+            mkdir -p "$back/$bucket"
+            for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
+              for f in "$name" "$name.sha256" "$name.sig"; do
+                printf '%s\0%s\0' "s3://${bucket}/spawn/versions/${VERSION}/$f" "$back/$bucket/$f"
+              done
+            done
+          done | xargs -0 -P 16 -n 2 bash -c 'b="${1#s3://}"; b="${b%%/*}"; aws s3 cp "$1" "$2" --region "${b#spawn-binaries-}" --only-show-errors' _
+          bad=0
+          for bucket in "${BUCKETS[@]}"; do
+            for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
+              for f in "$name" "$name.sha256" "$name.sig"; do
+                if ! cmp -s "$out/$f" "$back/$bucket/$f"; then
+                  echo "::error::s3://${bucket}/spawn/versions/${VERSION}/$f is not the object just published (#1415)"
+                  bad=1
+                fi
+              done
+            done
+          done
+          [ "$bad" = 0 ] || exit 1
+          echo "✅ Verified the versioned spored ${VERSION} in ${#BUCKETS[@]} regions"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
@@ -151,6 +266,34 @@ jobs:
           fi
           echo "✅ The released spawn's bootstrap body matches the published one ($got)"
 
+      # GoReleaser's spored (the GitHub release archives, the .deb/.rpm) must be
+      # the bytes published to spawn/versions/ before it ran. They are, as long
+      # as both builds stay identical (see "Build spored for the release"); a
+      # change to one and not the other lands here, loudly, rather than as two
+      # different spored for one version. Runs even when GoReleaser failed late
+      # (the tap push), because the binaries are published by then.
+      - name: Check GoReleaser built the published spored
+        id: spored-dist-match
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/spored-release"
+          bad=0
+          for pair in \
+            "spored-linux-amd64:dist/spored_linux_amd64_v1/spored" \
+            "spored-linux-arm64:dist/spored_linux_arm64_v8.0/spored" \
+            "spored-windows-amd64.exe:dist/spored_windows_amd64_v1/spored.exe"; do
+            name="${pair%%:*}"; built="${pair#*:}"
+            want="$(cat "$out/$name.sha256")"
+            got="$(sha256sum "$built" 2>/dev/null | awk '{print $1}')" || got=""
+            if [ -z "$want" ] || [ "$got" != "$want" ]; then
+              echo "::error::GoReleaser built $built with sha256 ${got:-<missing>}, but spawn/versions/ holds $name ${want:-<nothing>}: the release ships two different spored, and the pre-GoReleaser build no longer matches .goreleaser.yaml (#1415)"
+              bad=1
+            fi
+          done
+          [ "$bad" = 0 ] || exit 1
+          echo "✅ GoReleaser's spored is byte-identical to the published versioned spored"
+
       # SLSA build provenance for the CLI release archives (complements the cosign
       # signature — signature authenticates the publisher, attestation records how/
       # where it was built). Attests checksums.txt, which covers every artifact by
@@ -160,153 +303,45 @@ jobs:
         with:
           subject-path: 'dist/checksums.txt'
 
-      # Run the spored S3 upload even if GoReleaser exited non-zero. GoReleaser's
-      # LAST phase pushes the Homebrew/Scoop taps; an expired tap token fails that
-      # step AFTER the binaries are already built into dist/ (spawn#280). The S3
-      # upload depends only on those dist/ artifacts, so a tap-push failure must
-      # NOT skip spored delivery to instances. `!cancelled()` runs on GoReleaser
-      # success or failure (a genuinely early GoReleaser failure leaves dist/
-      # empty, so this step then fails loudly with the missing-file error — the
-      # correct signal, not a silent skip).
+      # The unversioned latest spored (spawn/spored-* and the bucket-root copies),
+      # which spawn releases before #1412 and dev builds install. Moved only once
+      # this release is published: after the GitHub release exists and its
+      # spored is the one in spawn/versions/, so latest never names a release
+      # that failed to publish. Not gated on GoReleaser's own success, so an
+      # expired tap token (spawn#280), which fails GoReleaser after the GitHub
+      # release is up, still moves latest. Copies the files signed and verified
+      # before GoReleaser; nothing is rebuilt or re-signed here.
       - name: Configure AWS credentials
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.spored-dist-match.outcome == 'success' }}
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::966362334030:role/GitHubActions-spore-host-release
           role-session-name: spored-s3-upload
           aws-region: us-east-1
 
-      - name: Upload spored binaries to S3
-        if: ${{ !cancelled() }}
+      - name: Update the latest spored
+        if: ${{ !cancelled() && steps.spored-dist-match.outcome == 'success' }}
         env:
-          # KMS asymmetric signing key (ECDSA_SHA_256) ARN/alias in the infra
-          # account. Set as a repo variable once the key is provisioned; when
-          # empty, signing is skipped and only sha256 is published (#440).
-          SPORED_SIGNING_KEY_ID: ${{ vars.SPORED_SIGNING_KEY_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Extract version from tag (v0.36.0 → 0.36.0)
-          VERSION=${GITHUB_REF_NAME#v}
-          PROJECT=spawn
-
-          # Publish to EVERY region spawn operates in — matching defaultRegions in
-          # lambda/ttl-reaper. Previously US-only, relying on a bootstrap fallback
-          # to us-east-1; but a non-US bucket that still held a STALE, UNSIGNED
-          # binary made the regional fetch succeed (so the fallback never fired) and
-          # then the .sig lookup failed, hard-failing spored install region-wide
-          # (#440). Keeping every regional bucket current with the signed binary
-          # removes that failure mode. us-east-1 must stay (it IS the fallback).
-          # The list is the job's SPAWN_BINARY_BUCKETS, shared with the bootstrap
-          # body upload so the two can never disagree about where to publish.
+          out="${RUNNER_TEMP}/spored-release"
           read -ra BUCKETS <<< "$SPAWN_BINARY_BUCKETS"
-
-          # Checksums (computed once).
-          amd_src="dist/spored_linux_amd64_v1/spored"
-          arm_src="dist/spored_linux_arm64_v8.0/spored"
-          win_src="dist/spored_windows_amd64_v1/spored.exe"
-          sha256sum "$amd_src" | awk '{print $1}' > spored-linux-amd64.sha256
-          sha256sum "$arm_src" | awk '{print $1}' > spored-linux-arm64.sha256
-          sha256sum "$win_src" | awk '{print $1}' > spored-windows-amd64.exe.sha256
-
-          # Publisher signatures (spore-host#440). Sign each spored binary with the
-          # spore.host KMS asymmetric key (ECDSA_SHA_256) in the infra account; the
-          # private key never leaves KMS. spawn's bootstrap verifies the .sig with
-          # openssl against the public key COMPILED INTO spawn — so the trust root
-          # is the spawn binary, not this bucket. Emits base64 DER .sig files.
-          #
-          # SPORED_SIGNING_KEY_ID is the KMS key ARN/alias; when unset (key not yet
-          # provisioned), signing is skipped and only .sha256 is published — the
-          # bootstrap then stays in sha256-only mode, matching a spawn build with no
-          # key compiled in. This keeps releases working during rollout.
-          sign_blob() {  # $1=src file  $2=output .sig
-            # KMS Sign caps the request at ~200KB, so we CANNOT send the ~80MB
-            # spored binary as a RAW message. Instead compute its SHA-256 digest
-            # (32 bytes) and sign with --message-type DIGEST. ECDSA signs the
-            # digest either way, so the resulting signature still verifies with
-            # `openssl dgst -sha256 -verify` (which hashes the file then checks) —
-            # the bootstrap needs no change. (#440)
-            digest="/tmp/$(basename "$1").sha256.raw"
-            openssl dgst -sha256 -binary "$1" > "$digest"
-            aws kms sign \
-              --key-id "$SPORED_SIGNING_KEY_ID" \
-              --message-type DIGEST \
-              --signing-algorithm ECDSA_SHA_256 \
-              --message "fileb://$digest" \
-              --query Signature --output text \
-              > "$2"  # already base64 (KMS returns base64 text)
-          }
-          SIGN=0
-          if [ -n "${SPORED_SIGNING_KEY_ID:-}" ]; then
-            SIGN=1
-            sign_blob "$amd_src" spored-linux-amd64.sig
-            sign_blob "$arm_src" spored-linux-arm64.sig
-            sign_blob "$win_src" spored-windows-amd64.exe.sig
-            echo "🔏 Signed spored binaries with KMS key ${SPORED_SIGNING_KEY_ID}"
-          else
-            echo "⚠️  SPORED_SIGNING_KEY_ID unset — publishing sha256 only (no publisher signature)"
+          draft="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" || draft=""
+          if [ "$draft" != "false" ]; then
+            echo "::error::the GitHub release ${GITHUB_REF_NAME} is not published (isDraft=${draft:-<no release>}); leaving the latest spored on the previous release"
+            exit 1
           fi
-
-          # Emit every copy as a NUL-separated "src<NUL>dest" pair stream, then run
-          # them all through a bounded parallel pool. The copies are independent;
-          # serially they cost full latency each, in parallel ~seconds. xargs -0 -n2
-          # hands each pair to do_copy; any non-zero `aws cp` makes xargs exit
-          # non-zero, and `set -e` then fails the step (no silent partial upload).
-          # NUL separation is portable (GNU xargs) and safe regardless of paths.
-          emit_copies() {
-            for entry in \
-              "amd64:$amd_src:spored-linux-amd64.sha256:spored-linux-amd64.sig" \
-              "arm64:$arm_src:spored-linux-arm64.sha256:spored-linux-arm64.sig"; do
-              arch="${entry%%:*}"; rest="${entry#*:}"; src="${rest%%:*}"; rest="${rest#*:}"; sha="${rest%%:*}"; sig="${rest#*:}"
-              for bucket in "${BUCKETS[@]}"; do
-                printf '%s\0%s\0' "$src" "s3://${bucket}/${PROJECT}/spored-linux-${arch}"
-                printf '%s\0%s\0' "$sha" "s3://${bucket}/${PROJECT}/spored-linux-${arch}.sha256"
-                printf '%s\0%s\0' "$src" "s3://${bucket}/spored-linux-${arch}"
-                printf '%s\0%s\0' "$sha" "s3://${bucket}/spored-linux-${arch}.sha256"
-                printf '%s\0%s\0' "$src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}"
-                # Versioned checksum too, so `spawn upgrade-spored --version X` can
-                # verify a pinned download (the un-versioned latest path already
-                # has one; the versioned path was missing it). (#234)
-                printf '%s\0%s\0' "$sha" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}.sha256"
-                # Publisher signature (#440) alongside the binary at every path the
-                # bootstrap might read (${...}.sig), when signing is enabled.
-                if [ "$SIGN" = "1" ]; then
-                  printf '%s\0%s\0' "$sig" "s3://${bucket}/${PROJECT}/spored-linux-${arch}.sig"
-                  printf '%s\0%s\0' "$sig" "s3://${bucket}/spored-linux-${arch}.sig"
-                  printf '%s\0%s\0' "$sig" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-linux-${arch}.sig"
-                fi
+          # shellcheck disable=SC2016 # $1/$2 expand in xargs' bash, not here
+          for bucket in "${BUCKETS[@]}"; do
+            for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
+              for f in "$name" "$name.sha256" "$name.sig"; do
+                printf '%s\0%s\0' "$out/$f" "s3://${bucket}/spawn/$f"
+                printf '%s\0%s\0' "$out/$f" "s3://${bucket}/$f"
               done
             done
-            # Windows spored (amd64 only) — the same paths, .sha256 and .sig the Linux
-            # binaries get, which the Windows launch bootstrap and the generated
-            # scripts/install-spored.ps1 both verify (#77, #879).
-            for bucket in "${BUCKETS[@]}"; do
-              printf '%s\0%s\0' "$win_src" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe"
-              printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe.sha256"
-              printf '%s\0%s\0' "$win_src" "s3://${bucket}/spored-windows-amd64.exe"
-              printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/spored-windows-amd64.exe.sha256"
-              printf '%s\0%s\0' "$win_src" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe"
-              printf '%s\0%s\0' "spored-windows-amd64.exe.sha256" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe.sha256"
-              if [ "$SIGN" = "1" ]; then
-                printf '%s\0%s\0' "spored-windows-amd64.exe.sig" "s3://${bucket}/${PROJECT}/spored-windows-amd64.exe.sig"
-                printf '%s\0%s\0' "spored-windows-amd64.exe.sig" "s3://${bucket}/spored-windows-amd64.exe.sig"
-                printf '%s\0%s\0' "spored-windows-amd64.exe.sig" "s3://${bucket}/${PROJECT}/versions/${VERSION}/spored-windows-amd64.exe.sig"
-              fi
-            done
-          }
-
-          # One copy: dest's region is the segment after "spawn-binaries-" in the
-          # bucket name. Exported so xargs' subshells can call it.
-          do_copy() {
-            src="$1"; dest="$2"
-            bucket="${dest#s3://}"; bucket="${bucket%%/*}"
-            region="${bucket#spawn-binaries-}"
-            aws s3 cp "$src" "$dest" --region "$region" --only-show-errors
-          }
-          export -f do_copy
-
-          emit_copies | xargs -0 -P 16 -n 2 bash -c 'do_copy "$1" "$2"' _
-
-          echo "✅ Uploaded spored ${VERSION} (linux+windows) to ${#BUCKETS[@]} regions (parallel)"
+          done | xargs -0 -P 16 -n 2 bash -c 'b="${2#s3://}"; b="${b%%/*}"; aws s3 cp "$1" "$2" --region "${b#spawn-binaries-}" --only-show-errors' _
+          echo "✅ Latest spored is now ${GITHUB_REF_NAME} in ${#BUCKETS[@]} regions"
 
       # Nudge the umbrella docs repo to vendor this release's generated reference
       # (docs/gen/spawn/). Fires repository_dispatch → sync-cli-docs.yaml, which
