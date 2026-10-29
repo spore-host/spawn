@@ -365,6 +365,9 @@ var foregroundDispositions = map[string]foregroundDisposition{
 	"CustomUserData":     {userData: true},
 	"ClientToken":        {direct: whyDirect + " (RunInstances ClientToken); no sweep sets one"},
 	"EFAInterfaces":      {direct: whyDirect + " (the multi-card interfaces and their Elastic IP, #661)", prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
+	"EFASecondaryType": {direct: whyDirect + " (the type of the interfaces on cards after card 0, #1404)", prereq: func(c *aws.LaunchConfig) {
+		c.EFAEnabled, c.EFAInterfaces = true, 2
+	}},
 
 	"AvailabilityZone":     {settings: true},
 	"SecurityGroupIDs":     {settings: true},

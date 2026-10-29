@@ -1,6 +1,8 @@
 package tasklaunch
 
 import (
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -145,5 +147,56 @@ func TestTaskLaunchConfig_CostLimitOmitted(t *testing.T) {
 	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "m7i.large"}, "us-east-1", "p", "w")
 	if cfg.CostLimit != 0 {
 		t.Errorf("CostLimit = %v, want 0 (unset → disabled, unchanged behavior)", cfg.CostLimit)
+	}
+}
+
+// A task cannot ask for multi-card EFA, so it has nothing to carry
+// --efa-secondary-type to (#1404): no TaskSpec field names EFA, a spec that
+// tries is refused by the strict parser rather than launched without it, and
+// the config a task launches with never enables EFA. If TaskSpec gains EFA,
+// this fails until taskLaunchConfig threads EFAInterfaces and EFASecondaryType.
+var (
+	efaName = regexp.MustCompile(`EFA|Efa([A-Z]|$)`)
+	efaTag  = regexp.MustCompile(`(^|_)efa(_|,|$)`)
+)
+
+func TestTaskSpecCarriesNoEFA(t *testing.T) {
+	var walk func(reflect.Type, string)
+	found := 0
+	walk = func(typ reflect.Type, path string) {
+		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map {
+			typ = typ.Elem()
+		}
+		if typ.Kind() != reflect.Struct {
+			return
+		}
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			found++
+			// A word, not a substring: "default" contains "efa".
+			if efaName.MatchString(f.Name) || efaTag.MatchString(f.Tag.Get("json")) {
+				t.Errorf("TaskSpec%s.%s names EFA: thread it (and EFASecondaryType) through taskLaunchConfig, then update this gate", path, f.Name)
+			}
+			walk(f.Type, path+"."+f.Name)
+		}
+	}
+	walk(reflect.TypeOf(taskproto.TaskSpec{}), "")
+	if found == 0 {
+		t.Fatal("discovered no TaskSpec fields")
+	}
+
+	for _, spec := range []string{
+		`{"task_id":"t","command":["x"],"lifecycle":{"ttl":"1h"},"placement":{"efa_secondary_type":"efa"}}`,
+		`{"task_id":"t","command":["x"],"lifecycle":{"ttl":"1h"},"resources":{"efa":true}}`,
+	} {
+		if _, err := taskproto.ParseSpec([]byte(spec)); err == nil {
+			t.Errorf("ParseSpec accepted %s: the task would launch without EFA", spec)
+		}
+	}
+
+	spec := &taskproto.TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: taskproto.Lifecycle{TTL: "1h"}}
+	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "c8gn.48xlarge"}, "us-east-1", "p", "w")
+	if cfg.EFAEnabled || cfg.EFAInterfaces != 0 || cfg.EFASecondaryType != "" {
+		t.Errorf("task config enables EFA: %+v", cfg)
 	}
 }

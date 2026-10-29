@@ -201,6 +201,13 @@ type LaunchConfig struct {
 	// spawn-tagged Elastic IP to the primary interface; Terminate releases it.
 	// The CLI resolves `--efa` to the type's MaximumEfaInterfaces.
 	EFAInterfaces int
+	// EFASecondaryType is the interface type on each network card after card 0
+	// of a multi-card EFA launch (EFAInterfaces > 1, #1404): "" or "efa-only"
+	// (the default, EFA device only, no IP) or "efa" (EFA with ENA, a private
+	// IP per card, so IP traffic can use every card's bandwidth). Only the
+	// primary interface gets the Elastic IP either way. "efa" without a
+	// multi-card EFA launch is refused (ValidateEFASecondaryType).
+	EFASecondaryType string
 
 	// spawn-specific tags
 	TTL             string
@@ -524,6 +531,11 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// Likewise user data over EC2's size limit: RunInstances would refuse it
 	// with a 400 after the identity, pricing and AMI calls below (#1063).
 	if err := launchConfig.ValidateUserDataSize(); err != nil {
+		return nil, err
+	}
+	// And --efa-secondary-type efa with no secondary card to apply it to
+	// (#1404), which would otherwise be dropped without a word.
+	if err := launchConfig.ValidateEFASecondaryType(); err != nil {
 		return nil, err
 	}
 

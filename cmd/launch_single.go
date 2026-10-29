@@ -1395,7 +1395,25 @@ func resolveEFAInterfaces(ctx context.Context, awsClient *aws.Client, config *aw
 		return aws.EFACapacity{}, err
 	}
 	config.EFAInterfaces = n
+	// --efa-secondary-type efa on a type with one EFA card: nothing to apply
+	// it to (#1404).
+	if err := config.ValidateEFASecondaryType(); err != nil {
+		return aws.EFACapacity{}, err
+	}
 	return capacity, nil
+}
+
+// validateEFASecondaryTypeFlag is the check --efa-secondary-type needs no AWS
+// call for (#1404): a known value, and for efa, --efa and an
+// --efa-interfaces other than 1. --efa alone (--efa-interfaces 0, every card)
+// counts as multi-card here; resolveEFAInterfaces refuses it if the type turns
+// out to have one EFA card.
+func validateEFASecondaryTypeFlag(value string, efa bool, interfaces int) error {
+	cfg := aws.LaunchConfig{EFASecondaryType: value, EFAEnabled: efa, EFAInterfaces: interfaces}
+	if interfaces == 0 {
+		cfg.EFAInterfaces = 2 // "every card": settled by resolveEFAInterfaces
+	}
+	return cfg.ValidateEFASecondaryType()
 }
 
 // sweepBaseConfig is the config every member of a parameter sweep starts from,

@@ -101,6 +101,7 @@ var sweepLaunchFlags = map[string]sweepFlagRule{
 	"subnet-id":             viaConfig(whySweepEC2),
 	"efa":                   viaConfig(whySweepEC2),
 	"efa-interfaces":        viaConfig(whySweepEC2 + " (a detached sweep refuses more than one, #1353)"),
+	"efa-secondary-type":    viaConfig(whySweepEC2 + " (needs an explicit --efa-interfaces of 2 or more: a sweep does not resolve 0 to the type's count; a detached sweep refuses it with multi-card EFA, #1404)"),
 	"placement-group":       viaConfig(whySweepEC2),
 	"spot":                  viaConfig(whySweepEC2 + "; a row's spot: wins"),
 	"spot-max-price":        viaConfig(whySweepEC2 + "; a row's spot_max_price: wins (#1366)"),
@@ -323,6 +324,13 @@ func sweepMemberGuard(cfg aws.LaunchConfig) error {
 		return refuse("--fsx-recall", sweepFSxRecallWhy)
 	case cfg.VPCID != "" && cfg.SubnetID == "":
 		return refuse("--vpc without --subnet", sweepVPCWhy)
+	case cfg.EFASecondaryType == aws.EFASecondaryTypeEFA && cfg.EFAInterfaces <= 1:
+		// A single launch resolves --efa-interfaces 0 to every card the type
+		// has; a sweep member launches with the count as given, and 0 there is
+		// one interface, which has no secondary card to apply this to (#1404).
+		return refuse("--efa-secondary-type efa without --efa-interfaces 2 or more",
+			"a sweep member launches with --efa-interfaces as given, and 0 or 1 is a single EFA interface with no "+
+				"network card after card 0. Pass --efa-interfaces N (N > 1, at most the type's EFA cards)")
 	}
 	return nil
 }

@@ -68,11 +68,14 @@ var detachedDispositions = map[string]detachedDisposition{
 	"IMDSv2HopLimit":       {settings: true},
 	"HibernateOnIdle":      {settings: true, tags: true},
 
-	"VPCID":           {refused: true},
-	"EFAInterfaces":   {refused: true, prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
-	"EBSKMSKeyID":     {refused: true, settings: true},
-	"FSxLustreCreate": {refused: true},
-	"FSxLustreRecall": {refused: true},
+	"VPCID":         {refused: true},
+	"EFAInterfaces": {refused: true, prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
+	// Refused on its own (#1404): with EFAInterfaces 0 there is no secondary
+	// card, and with more the multi-card launch itself is refused.
+	"EFASecondaryType": {refused: true, prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
+	"EBSKMSKeyID":      {refused: true, settings: true},
+	"FSxLustreCreate":  {refused: true},
+	"FSxLustreRecall":  {refused: true},
 
 	"PlacementGroupPrefix": {why: whyNotSweep + " (an MPI job array's per-AZ groups)"},
 	"DNSFunctionARN":       {why: whyNotSweep + " (the custom-DNS preflight, which a sweep does not run on either path)"},
@@ -121,7 +124,7 @@ var sampleValues = map[string]interface{}{
 	"DNSDomain": "example.org", "DNSEndpoint": "https://abc.lambda-url.us-east-1.on.aws/",
 	"SpotInterruptionWebhookURL": "https://hooks.example.org/spot", "CompletionWebhookURL": "https://hooks.example.org/done",
 	"NotifyURL": "https://notify.example.org/", "NotifyPlatform": "teams", "AppMode": "web", "WebAuth": "none",
-	"TargetOS": "windows", "IdleCPUPercent": 12.5,
+	"TargetOS": "windows", "IdleCPUPercent": 12.5, "EFASecondaryType": "efa",
 }
 
 func sampleField(f reflect.Value, name string) bool {
@@ -325,6 +328,7 @@ func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 		"fsx-create":          {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
 		"fsx-recall":          {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
 		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, want: "--efa-interfaces 4", alt: "--no-detach"},
+		"efa secondary type":  {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 2, EFASecondaryType: "efa"}, want: "--efa-secondary-type efa", alt: "--no-detach"},
 		"customer KMS key":    {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key", alt: "--no-detach"},
 		"vpc without subnet":  {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet", alt: "Pass --subnet"},
 		"hibernation pattern": {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern", alt: "--no-detach"},

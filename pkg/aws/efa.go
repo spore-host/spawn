@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -146,6 +147,50 @@ func (capacity EFACapacity) ResolveInterfaces(requested int) (int, error) {
 // network interface ... after launch"), so none is requested; [Client.Launch]
 // associates an Elastic IP instead. [NeedsLaunchElasticIP] reports that case.
 func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int) ([]types.InstanceNetworkInterfaceSpecification, error) {
+	return EFANetworkInterfacesWithSecondaryType(subnetID, securityGroupIDs, capacity, n, "")
+}
+
+// EFANetworkInterfacesWithSecondaryType is [EFANetworkInterfaces] with the
+// interface type of the cards after card 0 chosen (#1404): "" or
+// [EFASecondaryTypeEFAOnly] is the layout above; [EFASecondaryTypeEFA] makes
+// the interface on every card with NetworkCardIndex >= 1 type "efa" (EFA with
+// ENA) at device index 0, so each card also carries IP traffic on a private IP
+// of its own. Card 0 is unchanged either way, and so is the absence of any
+// public IP request: the Elastic IP still goes to the primary only.
+//
+// What this relies on, from the EC2 documentation (read 2026-10-28):
+//
+//   - "You can assign only one EFA or EFA-only network interface per network
+//     card" (User Guide, Elastic network interfaces > Network cards,
+//     https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-eni.html#network-cards),
+//     so an "efa" interface replaces the card's "efa-only" one rather than
+//     joining it; device index 0 is the slot the multi-card guide gives the
+//     card's EFA.
+//   - InterfaceType is "interface | efa | efa-only", and only efa-only "do[es]
+//     not support IP addresses" (API Reference,
+//     InstanceNetworkInterfaceSpecification); "EFA (EFA with ENA) interfaces
+//     provide both the ENA device for IP networking and the EFA device"
+//     (User Guide, Elastic Fabric Adapter > EFA basics).
+//   - Whether a card accepts "efa" is per card: DescribeInstanceTypes
+//     NetworkInfo.NetworkCards[].InterfaceTypes, read into
+//     [EFANetworkCard.EFA]. A card that does not is refused here, before
+//     RunInstances.
+//   - Every interface keeps the primary's subnet and security groups. Nothing
+//     in RunInstances requires a different subnet for a secondary interface;
+//     the User Guide warns that several interfaces in one subnet "might
+//     encounter networking issues such as asymmetric routing"
+//     (network-interface-attachments.html), which is what the OS's policy
+//     routing for secondary interfaces addresses (see the --efa-secondary-type
+//     help). Each such interface takes one more private IP from the subnet.
+//
+// Not verified offline: that RunInstances accepts "efa" at device index 0 on
+// card >= 1 for every multi-card type (the guide's examples use efa-only there,
+// with ENA at device index 1); that is the owner's c8gn.48xlarge test (#1404).
+func EFANetworkInterfacesWithSecondaryType(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int, secondaryType string) ([]types.InstanceNetworkInterfaceSpecification, error) {
+	if err := validEFASecondaryTypeValue(secondaryType); err != nil {
+		return nil, err
+	}
+	secondaryEFA := secondaryType == EFASecondaryTypeEFA
 	if n < 1 {
 		n = 1
 	}
@@ -154,6 +199,9 @@ func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity E
 	}
 	card0EFA := len(capacity.Cards) > 0 && capacity.Cards[0].Index == 0 && capacity.Cards[0].EFA
 	if n == 1 && card0EFA {
+		if secondaryEFA {
+			return nil, fmt.Errorf("--efa-secondary-type %s needs more than one EFA interface (a network card after card 0), but this launch has 1", secondaryType)
+		}
 		return []types.InstanceNetworkInterfaceSpecification{EFANetworkInterface(subnetID, securityGroupIDs)}, nil
 	}
 
@@ -190,6 +238,12 @@ func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity E
 			// Card 0 with efa-only but no "efa": the guide's "EFA-only network
 			// interface for network card index 0, device index 1".
 			out = append(out, spec(0, 1, "efa-only"))
+		case secondaryEFA:
+			if !card.EFA {
+				return nil, fmt.Errorf("--efa-secondary-type efa: network card %d of %s does not accept an efa (EFA with ENA) interface "+
+					"(DescribeInstanceTypes lists only %s for it); use --efa-secondary-type efa-only", card.Index, capacity.InstanceType, cardTypes(card))
+			}
+			out = append(out, spec(card.Index, 0, EFASecondaryTypeEFA))
 		case card.EFAOnly:
 			out = append(out, spec(card.Index, 0, "efa-only"))
 		default:
@@ -204,8 +258,11 @@ func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity E
 // [EFANetworkInterface] it always sent. Shared with `spawn launch --dry-run`,
 // so the preview is the launch's own layout rather than a copy of it.
 func EFALaunchInterfaces(cfg LaunchConfig, capacity EFACapacity) ([]types.InstanceNetworkInterfaceSpecification, error) {
+	if err := cfg.ValidateEFASecondaryType(); err != nil {
+		return nil, err
+	}
 	if cfg.EFAInterfaces > 1 {
-		return EFANetworkInterfaces(cfg.SubnetID, cfg.SecurityGroupIDs, capacity, cfg.EFAInterfaces)
+		return EFANetworkInterfacesWithSecondaryType(cfg.SubnetID, cfg.SecurityGroupIDs, capacity, cfg.EFAInterfaces, cfg.EFASecondaryType)
 	}
 	return []types.InstanceNetworkInterfaceSpecification{EFANetworkInterface(cfg.SubnetID, cfg.SecurityGroupIDs)}, nil
 }
@@ -226,8 +283,77 @@ func DescribeEFAInterface(ni types.InstanceNetworkInterfaceSpecification) string
 		t = "interface (ENA)"
 	}
 	s := fmt.Sprintf("card %d / device %d: %s", aws.ToInt32(ni.NetworkCardIndex), aws.ToInt32(ni.DeviceIndex), t)
-	if aws.ToInt32(ni.NetworkCardIndex) == 0 && aws.ToInt32(ni.DeviceIndex) == 0 {
+	switch {
+	case aws.ToInt32(ni.NetworkCardIndex) == 0 && aws.ToInt32(ni.DeviceIndex) == 0:
 		s += " (primary)"
+	case t == EFASecondaryTypeEFAOnly:
+		s += " (no IP)"
+	default:
+		s += " (private IP)"
 	}
 	return s
+}
+
+// The interface types --efa-secondary-type takes (#1404): what the interface
+// on each network card after card 0 of a multi-card EFA launch is.
+const (
+	// EFASecondaryTypeEFAOnly is the default: an efa-only interface, EFA
+	// device only, no IP address. All IP traffic uses card 0's interface.
+	EFASecondaryTypeEFAOnly = "efa-only"
+	// EFASecondaryTypeEFA is an efa (EFA with ENA) interface: the EFA device
+	// plus an ENA device with a private IP, so the card carries IP traffic too.
+	EFASecondaryTypeEFA = "efa"
+)
+
+func validEFASecondaryTypeValue(v string) error {
+	switch v {
+	case "", EFASecondaryTypeEFAOnly, EFASecondaryTypeEFA:
+		return nil
+	}
+	return fmt.Errorf("--efa-secondary-type must be %s or %s, got %q", EFASecondaryTypeEFAOnly, EFASecondaryTypeEFA, v)
+}
+
+// ValidateEFASecondaryType refuses an EFASecondaryType that is not "",
+// "efa-only" or "efa", and an "efa" without a multi-card EFA launch to apply
+// it to: EFAEnabled with EFAInterfaces above 1 (at this layer 0 means one
+// interface, as it always has). [Client.Launch] calls it before any AWS call;
+// the CLI resolves --efa-interfaces 0 to the type's count first.
+func (cfg LaunchConfig) ValidateEFASecondaryType() error {
+	if err := validEFASecondaryTypeValue(cfg.EFASecondaryType); err != nil {
+		return err
+	}
+	if cfg.EFASecondaryType != EFASecondaryTypeEFA {
+		return nil
+	}
+	if !cfg.EFAEnabled {
+		return fmt.Errorf("--efa-secondary-type %s requires --efa", cfg.EFASecondaryType)
+	}
+	if cfg.EFAInterfaces <= 1 {
+		return fmt.Errorf("--efa-secondary-type %s applies to the network cards after card 0 of a multi-card EFA launch, "+
+			"but this launch has one EFA interface (--efa-interfaces %d on %s). Use a type with more than one EFA "+
+			"network card and --efa-interfaces 0 (all) or 2 or more", cfg.EFASecondaryType, cfg.EFAInterfaces, orUnknownType(cfg.InstanceType))
+	}
+	return nil
+}
+
+func orUnknownType(t string) string {
+	if t == "" {
+		return "this instance type"
+	}
+	return t
+}
+
+// cardTypes lists what a card accepts, for an error message.
+func cardTypes(card EFANetworkCard) string {
+	var ts []string
+	if card.EFA {
+		ts = append(ts, "efa")
+	}
+	if card.EFAOnly {
+		ts = append(ts, "efa-only")
+	}
+	if len(ts) == 0 {
+		return "no EFA type"
+	}
+	return strings.Join(ts, ", ")
 }

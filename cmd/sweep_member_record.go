@@ -346,7 +346,7 @@ var oldCheckpointLostCategory = map[string]string{
 	"hibernate": catShape, "nested-virtualization": catShape, "key-name": catShape, "key-pair": catShape,
 	"spot": catPurchase, "spot-max-price": catPurchase, "reservation-id": catPurchase, "capacity-block": catPurchase,
 	"security-group": catNetwork, "security-group-ids": catNetwork, "subnet": catNetwork, "subnet-id": catNetwork,
-	"efa": catNetwork, "efa-interfaces": catNetwork, "placement-group": catNetwork,
+	"efa": catNetwork, "efa-interfaces": catNetwork, "efa-secondary-type": catNetwork, "placement-group": catNetwork,
 	"efs-id": catStorage, "efs-mount-point": catStorage, "efs-mount-options": catStorage, "efs-profile": catStorage,
 	"fsx-id": catStorage, "fsx-mount-point": catStorage, "fsx-skip-validate": catStorage, "attach-volume": catStorage,
 	"tag": catTags, "team": catTags, "name": catTags, "dns": catTags, "no-dns": catTags,
