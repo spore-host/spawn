@@ -100,6 +100,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Releases publish the versioned spored before the CLI is installable**
+  (#1415). A release spawn installs spored only from
+  `spawn/versions/<version>/` and retires the instance without it (#1412),
+  but the release workflow uploaded those objects after GoReleaser had
+  published the CLI, the Homebrew tap and the Scoop bucket: every launch by a
+  freshly installed CLI retired at boot until the upload finished, and for
+  good if it failed. The workflow now builds spored before GoReleaser, with
+  exactly the spored build in `.goreleaser.yaml` (same env, ldflags, package
+  and targets, checked by a test that parses both), signs it, refuses a
+  signature the key compiled into spawn would reject, uploads the binaries,
+  `.sha256` and `.sig` to `spawn/versions/<version>/` in all 11 regional
+  buckets, and reads every object back. After GoReleaser it fails the job if
+  `dist/`'s spored is not byte-identical to what was published. The
+  unversioned latest copies (`spawn/spored-*`, used by older releases and dev
+  builds) move last, only once the GitHub release is published and that
+  check passed, so latest never names a release that failed to publish.
+  Releases now also require `SPORED_SIGNING_KEY_ID` for spored, as they
+  already did for the bootstrap body; the sha256-only fallback is gone.
+
 - **A multi-card EFA launch with no subnet is settled in the pre-flight,
   not at RunInstances** (#1410). A launch or foreground sweep member with more
   than one EFA interface needs one subnet for all of them. With neither

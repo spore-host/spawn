@@ -236,6 +236,7 @@ jobs:
             done
           done
           [ "$bad" = 0 ] || exit 1
+          rm -rf "$back"  # ~2 GiB; GoReleaser needs the runner's disk next
           echo "✅ Verified the versioned spored ${VERSION} in ${#BUCKETS[@]} regions"
 
       - name: Run GoReleaser
