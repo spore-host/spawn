@@ -201,8 +201,13 @@ How to read it:
   needs ` + "`ec2:CreateTags`" + `, ` + "`sqs:CreateQueue`" + ` with tags needs ` + "`sqs:TagQueue`" + `, an
   S3 upload with tags needs ` + "`s3:PutObjectTagging`" + `. The generator lists the tag
   action wherever the command's code may set the tags.
-- **` + "`iam:PassRole`" + ` is not listed.** ` + "`ec2:RunInstances`" + ` with an instance
-  profile also needs ` + "`iam:PassRole`" + ` on that profile's role.
+- **` + "`iam:PassRole`" + ` is listed where a call passes a role.** ` + "`ec2:RunInstances`" + `
+  with an instance profile, ` + "`lambda:CreateFunction`" + ` (its execution role),
+  ` + "`scheduler:CreateSchedule`" + ` (the schedule's role), ` + "`iam:AddRoleToInstanceProfile`" + `
+  and the Image Builder import each also need ` + "`iam:PassRole`" + ` on the role they
+  pass. ` + "`iam:PassRole`" + ` is resource-scoped: grant it on the roles spawn creates
+  (` + "`spored-instance-role`" + `, ` + "`spawn-instance-*`" + `, and the role the command names),
+  not on ` + "`*`" + `.
 - **Calls made through the AWS CLI** (` + "`aws ssm start-session`" + `, ` + "`aws s3 cp`" + ` in
   generated scripts) are not Go SDK calls and are not listed.
 - ` + "`sts:GetCallerIdentity`" + ` needs no permission and is omitted.

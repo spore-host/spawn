@@ -17,8 +17,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/imagebuilder"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"golang.org/x/tools/go/ssa"
 )
@@ -46,6 +48,11 @@ func TestImpliedActionsFollowTheCallSite(t *testing.T) {
 		"bucketUntagged":          {"s3:CreateBucket"},
 		"uploadTagged":            {"s3:AbortMultipartUpload", "s3:PutObject", "s3:PutObjectTagging"},
 		"runTagged":               {"ec2:CreateTags", "ec2:RunInstances"},
+		// #1397: an instance profile passes its role; none, or nil, passes none.
+		"runWithProfile":     {"ec2:RunInstances", "iam:PassRole"},
+		"runWithoutProfile":  {"ec2:RunInstances"},
+		"targetsWithRole":    {"events:PutTargets", "iam:PassRole"},
+		"targetsWithoutRole": {"events:PutTargets"},
 	} {
 		f, err := p.Func(fixturePkg + "." + fn)
 		if err != nil {
@@ -121,6 +128,13 @@ var impliedInputTypes = map[string]any{
 	"ebs:StartSnapshot":                                 ebs.StartSnapshotInput{},
 	"dynamodb:CreateTable":                              dynamodb.CreateTableInput{},
 	"lambda:CreateFunction":                             lambda.CreateFunctionInput{},
+	"lambda:UpdateFunctionConfiguration":                lambda.UpdateFunctionConfigurationInput{},
+	"scheduler:CreateSchedule":                          scheduler.CreateScheduleInput{},
+	"scheduler:UpdateSchedule":                          scheduler.UpdateScheduleInput{},
+	"events:PutTargets":                                 eventbridge.PutTargetsInput{},
+	"ssm:SendCommand":                                   ssm.SendCommandInput{},
+	"sns:Subscribe":                                     sns.SubscribeInput{},
+	"iam:AddRoleToInstanceProfile":                      iam.AddRoleToInstanceProfileInput{},
 	"events:PutRule":                                    eventbridge.PutRuleInput{},
 	"sns:CreateTopic":                                   sns.CreateTopicInput{},
 	"fsx:CreateFileSystem":                              fsx.CreateFileSystemInput{},
@@ -162,6 +176,26 @@ func TestEveryImpliedRuleCitesItsSource(t *testing.T) {
 				t.Errorf("%s: %q is not an IAM action", r.Op, a)
 			}
 		}
+		// A PassRole rule (#1397) names the service the role is passed to and
+		// cites the operation's Service Authorization Reference entry, the
+		// table that lists iam:PassRole with that iam:PassedToService context.
+		passes := containsString(r.Actions, "iam:PassRole")
+		if passes != (r.PassedTo != "") {
+			t.Errorf("%s +%s: iam:PassRole rule and PassedTo %q disagree", r.Op, r.Field, r.PassedTo)
+		}
+		if passes {
+			if !strings.HasSuffix(r.PassedTo, ".amazonaws.com") {
+				t.Errorf("%s +%s: PassedTo %q is not a service principal", r.Op, r.Field, r.PassedTo)
+			}
+			_, op, _ := strings.Cut(r.Op, ":")
+			sar := false
+			for _, d := range r.Docs {
+				sar = sar || (strings.Contains(d, "/service-authorization/latest/reference/list_") && strings.HasSuffix(d, "-"+op))
+			}
+			if !sar {
+				t.Errorf("%s +%s: an iam:PassRole rule must cite its SAR operation entry (…#list_<svc>-operation-%s)", r.Op, r.Field, op)
+			}
+		}
 		in, ok := impliedInputTypes[r.Op]
 		if !ok {
 			t.Errorf("%s: add its SDK input type to impliedInputTypes", r.Op)
@@ -171,6 +205,9 @@ func TestEveryImpliedRuleCitesItsSource(t *testing.T) {
 		for _, name := range strings.Split(r.Field, ".") {
 			if typ.Kind() == reflect.Pointer {
 				typ = typ.Elem()
+			}
+			if typ.Kind() == reflect.Slice {
+				typ = typ.Elem() // a list's elements, as hasFieldPath follows it
 			}
 			// The names come from impliedRules, a constant table in this package.
 			// nosemgrep
@@ -206,4 +243,58 @@ func TestARuleForAMissingFieldIsReportedNotSkipped(t *testing.T) {
 	if got := applyImplied(op, nil, nil, nil); got.err != "" || !reflect.DeepEqual(got.actions, []string{"sqs:CreateQueue", "sqs:TagQueue"}) {
 		t.Errorf("an unknown input with a real field: %+v, want both actions", got)
 	}
+}
+
+// TestAPrincipalPassingARoleWithoutAGrantFailsTheCoverageGate is #1397's
+// principal gate: code that launches with an instance profile passes its role,
+// so a principal holding ec2:RunInstances and no iam:PassRole is a gap. Holding
+// it by name is not enough either: the grant must let the declared role be
+// passed to EC2, and must not be cancelled by an unconditional Deny.
+func TestAPrincipalPassingARoleWithoutAGrantFailsTheCoverageGate(t *testing.T) {
+	p := fixture(t)
+	invFor := func(fn string) map[string]*principalInventory {
+		f, err := p.Func(fixturePkg + "." + fn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pi := &principalInventory{actions: map[string][]Site{}, paths: map[string][]string{}}
+		pi.add(p.Calls([]*ssa.Function{f}, nil))
+		return map[string]*principalInventory{"fixture": pi}
+	}
+	const (
+		run      = `{"Effect":"Allow","Action":"ec2:RunInstances","Resource":"*"}`
+		passEC2  = `{"Effect":"Allow","Action":"iam:PassRole","Resource":"arn:aws:iam::*:role/spored-instance-role","Condition":{"StringEquals":{"iam:PassedToService":"ec2.amazonaws.com"}}}`
+		passElse = `{"Effect":"Allow","Action":"iam:PassRole","Resource":"arn:aws:iam::*:role/someone-else-*"}`
+		passToFn = `{"Effect":"Allow","Action":"iam:PassRole","Resource":"*","Condition":{"StringEquals":{"iam:PassedToService":"lambda.amazonaws.com"}}}`
+		denyAll  = `{"Effect":"Deny","Action":"iam:PassRole","Resource":"*"}`
+		denyRole = `{"Effect":"Deny","Action":"iam:*","Resource":"arn:aws:iam::*:role/spored-*"}`
+	)
+	sporedRole := []passedRole{{role: "spored-instance-role", service: "ec2.amazonaws.com"}}
+	gate := func(fn string, passes []passedRole, stmts ...string) []string {
+		doc := `{"Statement":[` + strings.Join(stmts, ",") + `]}`
+		pr := principal{name: "fixture", passes: passes, contexts: []credContext{{name: "function role", variants: []variant{
+			{name: "test", policy: goPolicy("test", doc)},
+		}}}}
+		return coverageErrors([]principal{pr}, invFor(fn), func(v variant) *Policy { return v.policy(t) }, nil)
+	}
+	wantOne := func(what string, errs []string, substr string) {
+		t.Helper()
+		if len(errs) != 1 || !strings.Contains(errs[0], substr) {
+			t.Errorf("%s: errors %q, want exactly one containing %q", what, errs, substr)
+		}
+	}
+
+	wantOne("instance profile, no PassRole grant", gate("runWithProfile", sporedRole, run), "calls iam:PassRole")
+	if errs := gate("runWithProfile", sporedRole, run, passEC2); len(errs) != 0 {
+		t.Errorf("PassRole on the passed role, to EC2: %q, want none", errs)
+	}
+	wantOne("PassRole on another role", gate("runWithProfile", sporedRole, run, passElse), "does not allow")
+	wantOne("PassRole only to Lambda", gate("runWithProfile", sporedRole, run, passToFn), "does not allow")
+	wantOne("PassRole and an unconditional Deny", gate("runWithProfile", sporedRole, run, passEC2, denyAll), "unconditional Deny")
+	wantOne("PassRole and a Deny on the role", gate("runWithProfile", sporedRole, run, passEC2, denyRole), "does not allow")
+	wantOne("PassRole granted, passes undeclared", gate("runWithProfile", nil, run, passEC2), "declares no passes")
+	if errs := gate("runWithoutProfile", nil, run); len(errs) != 0 {
+		t.Errorf("no instance profile, no PassRole grant: %q, want none", errs)
+	}
+	wantOne("passes declared, none made", gate("runWithoutProfile", sporedRole, run), "delete the declaration")
 }

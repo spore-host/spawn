@@ -27,6 +27,10 @@ type impliedRule struct {
 	// Docs are the AWS documentation pages the rule was taken from. Required:
 	// a rule nobody can check is a guess (TestEveryImpliedRuleCitesItsSource).
 	Docs []string
+	// PassedTo is, for an iam:PassRole rule, the iam:PassedToService value the
+	// Service Authorization Reference gives the pass (ec2.amazonaws.com for
+	// RunInstances): the service a principal's PassRole grant must admit.
+	PassedTo string
 }
 
 // The Service Authorization Reference's "API operations defined by <service>"
@@ -36,18 +40,20 @@ type impliedRule struct {
 // operation and, where the service documents the condition in prose, that page.
 const (
 	sarSQS          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_sqs.html#list_sqs-operation-"
-	sarIAM          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam.html#list_iam-operation-"
+	sarIAM          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam.html#list_iam-operation-iam-"
 	sarEC2          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html#list_ec2-operation-"
 	sarEBS          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_ebs.html#list_ebs-operation-"
-	sarS3           = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_s3.html#list_s3-operation-"
-	sarDynamoDB     = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_dynamodb.html#list_dynamodb-operation-"
-	sarLambda       = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_lambda.html#list_lambda-operation-"
-	sarEvents       = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_eventbridge.html#list_eventbridge-operation-"
+	sarS3           = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_s3.html#list_s3-operation-s3-"
+	sarDynamoDB     = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_dynamodb.html#list_dynamodb-operation-dynamodb-"
+	sarLambda       = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_lambda.html#list_lambda-operation-lambda-"
+	sarEvents       = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_eventbridge.html#list_eventbridge-operation-events-"
 	sarSNS          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_sns.html#list_sns-operation-"
 	sarFSx          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_fsx.html#list_fsx-operation-"
 	sarEFS          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_efs.html#list_efs-operation-"
 	sarImageBuilder = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_imagebuilder.html#list_imagebuilder-operation-"
 	sarSTS          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_sts.html#list_sts-operation-"
+	sarScheduler    = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_scheduler.html#list_scheduler-operation-"
+	sarSSM          = "https://docs.aws.amazon.com/service-authorization/latest/reference/list_ssm.html#list_ssm-operation-"
 
 	// "If tags are specified in the resource-creating action, Amazon performs
 	// additional authorization on the ec2:CreateTags action".
@@ -68,14 +74,94 @@ func tagOnCreate(sar, prefix, field, action, prose string, ops ...string) []impl
 	return out
 }
 
-// impliedRules is every implied-action rule (#1377). Only rules verified
-// against AWS's documentation are here. Checked and left out:
-// scheduler:CreateSchedule (a schedule takes no tags; the SAR lists no tag
-// action for it); fsx:DeleteFileSystem's final-backup tags (nested per file
-// system type, and spawn sets none); and iam:PassRole, which RunInstances,
-// CreateFunction, CreateSchedule, PutRule and others also authorize when they
-// name a role — a rule of the same shape, not modelled yet.
+// passRole builds an iam:PassRole rule (#1397): op, when field names a role,
+// also needs iam:PassRole on that role, passed to the service passedTo. Every
+// rule cites the SAR operation entry, which lists iam:PassRole among the
+// operation's authorized actions with that iam:PassedToService context, and a
+// service page that ties the pass to the field.
+func passRole(op, field, passedTo string, docs ...string) impliedRule {
+	return impliedRule{Op: op, Field: field, Actions: []string{"iam:PassRole"}, PassedTo: passedTo, Docs: docs}
+}
+
+// passRoleRules are the operations spawn calls whose SAR entry authorizes
+// iam:PassRole, each verified against the operations table
+// (servicereference.us-east-1.amazonaws.com/v1/<svc>/<svc>.json,
+// Operations[].AuthorizedActions, read 2026-10-28) and a service page. A field
+// the API requires (Lambda's Role, a schedule's Target.RoleArn) makes the rule
+// unconditional in practice; it is still keyed on the field so the rule fails
+// loudly if the SDK renames it.
+//
+// Not modelled, because spawn calls none of them (checked by grepping every
+// *Input of the 99 SAR operations that authorize iam:PassRole):
+// ec2:RequestSpotInstances, CreateFleet, CreateLaunchTemplate,
+// AssociateIamInstanceProfile, ReplaceIamInstanceProfileAssociation;
+// cloudformation:CreateStack/UpdateStack/CreateChangeSet (RoleARN);
+// imagebuilder:CreateImage and the pipeline/workflow operations.
+//
+// sns:Subscribe and sns:CreateTopic pass a role only through an attribute
+// (SubscriptionRoleArn; the <protocol>{Success,Failure}FeedbackRoleArn delivery
+// status attributes), a map key this mechanism cannot see, so the rule keys on
+// Attributes as a whole: an over-approximation in the safe direction.
+var passRoleRules = []impliedRule{
+	// "You must grant permission to use the following API actions as
+	// required: iam:PassRole" (launching an instance with an IAM role).
+	passRole("ec2:RunInstances", "IamInstanceProfile", "ec2.amazonaws.com", sarEC2+"RunInstances",
+		"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/permission-to-pass-iam-roles.html"),
+	// "PassRole is used when you assign an execution role to a function."
+	passRole("lambda:CreateFunction", "Role", "lambda.amazonaws.com", sarLambda+"CreateFunction",
+		"https://docs.aws.amazon.com/lambda/latest/dg/permissions-user-function.html"),
+	passRole("lambda:UpdateFunctionConfiguration", "Role", "lambda.amazonaws.com", sarLambda+"UpdateFunctionConfiguration",
+		"https://docs.aws.amazon.com/lambda/latest/dg/permissions-user-function.html"),
+	// The CreateSchedule and UpdateSchedule policy examples each pair the
+	// action with iam:PassRole, PassedToService scheduler.amazonaws.com; the
+	// role is Target.RoleArn (required).
+	passRole("scheduler:CreateSchedule", "Target.RoleArn", "scheduler.amazonaws.com", sarScheduler+"CreateSchedule",
+		"https://docs.aws.amazon.com/scheduler/latest/UserGuide/security_iam_id-based-policy-examples.html",
+		"https://docs.aws.amazon.com/scheduler/latest/APIReference/API_Target.html"),
+	passRole("scheduler:UpdateSchedule", "Target.RoleArn", "scheduler.amazonaws.com", sarScheduler+"UpdateSchedule",
+		"https://docs.aws.amazon.com/scheduler/latest/UserGuide/security_iam_id-based-policy-examples.html",
+		"https://docs.aws.amazon.com/scheduler/latest/APIReference/API_Target.html"),
+	// "iam:PassRole – EventBridge requires this permission to pass an
+	// invocation role to EventBridge to invoke the target of a rule." The role
+	// is the rule's RoleArn, or a target's (Targets is a list; the rule
+	// follows its elements).
+	passRole("events:PutRule", "RoleArn", "events.amazonaws.com", sarEvents+"PutRule",
+		"https://docs.aws.amazon.com/eventbridge/latest/APIReference/API_PutRule.html",
+		"https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-use-identity-based.html"),
+	passRole("events:PutTargets", "Targets.RoleArn", "events.amazonaws.com", sarEvents+"PutTargets",
+		"https://docs.aws.amazon.com/eventbridge/latest/APIReference/API_PutTargets.html",
+		"https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-use-identity-based.html"),
+	// ServiceRoleArn is the role Run Command publishes SNS notifications
+	// with; "iam:PassRole permissions for the role created in Task 3".
+	passRole("ssm:SendCommand", "ServiceRoleArn", "ssm.amazonaws.com", sarSSM+"SendCommand",
+		"https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_SendCommand.html",
+		"https://docs.aws.amazon.com/systems-manager/latest/userguide/monitoring-sns-notifications.html"),
+	passRole("sns:Subscribe", "Attributes", "sns.amazonaws.com", sarSNS+"Subscribe",
+		"https://docs.aws.amazon.com/sns/latest/api/API_Subscribe.html"),
+	passRole("sns:CreateTopic", "Attributes", "sns.amazonaws.com", sarSNS+"CreateTopic",
+		"https://docs.aws.amazon.com/sns/latest/api/API_CreateTopic.html"),
+	// "The caller of this operation must be granted the PassRole permission
+	// on the IAM role by a permissions policy."
+	passRole("iam:AddRoleToInstanceProfile", "RoleName", "ec2.amazonaws.com", sarIAM+"AddRoleToInstanceProfile",
+		"https://docs.aws.amazon.com/IAM/latest/APIReference/API_AddRoleToInstanceProfile.html"),
+	// The build instance's instance profile (instanceProfileName, required),
+	// passed to EC2 per the SAR context.
+	passRole("imagebuilder:CreateInfrastructureConfiguration", "InstanceProfileName", "ec2.amazonaws.com",
+		sarImageBuilder+"CreateInfrastructureConfiguration",
+		"https://docs.aws.amazon.com/imagebuilder/latest/APIReference/API_CreateInfrastructureConfiguration.html"),
+	// executionRole: "the IAM role you create that grants Image Builder
+	// access to perform workflow actions", passed to imagebuilder.amazonaws.com.
+	passRole("imagebuilder:ImportDiskImage", "ExecutionRole", "imagebuilder.amazonaws.com", sarImageBuilder+"ImportDiskImage",
+		"https://docs.aws.amazon.com/imagebuilder/latest/APIReference/API_ImportDiskImage.html"),
+}
+
+// impliedRules is every implied-action rule (#1377, #1397). Only rules
+// verified against AWS's documentation are here. Checked and left out:
+// scheduler:CreateSchedule's tags (a schedule takes no tags; the SAR lists no
+// tag action for it); fsx:DeleteFileSystem's final-backup tags (nested per file
+// system type, and spawn sets none).
 var impliedRules = concatRules(
+	passRoleRules,
 	// "To be able to tag a queue on creation, you must have the
 	// sqs:CreateQueue and sqs:TagQueue permissions."
 	tagOnCreate(sarSQS, "sqs", "Tags", "sqs:TagQueue",
@@ -203,10 +289,15 @@ func containsString(xs []string, s string) bool {
 }
 
 // hasFieldPath reports whether t (a pointer to a struct) has the dotted field.
+// A list along the path is followed to its element type: Targets.RoleArn is
+// the RoleArn of any element of Targets.
 func hasFieldPath(t types.Type, path []string) bool {
 	for _, name := range path {
 		if p, ok := t.Underlying().(*types.Pointer); ok {
 			t = p.Elem()
+		}
+		if sl, ok := t.Underlying().(*types.Slice); ok {
+			t = sl.Elem()
 		}
 		st, ok := t.Underlying().(*types.Struct)
 		if !ok {
@@ -258,6 +349,11 @@ func pointerMaybeSet(v ssa.Value, path []string, w *walk) bool {
 		return !v.IsNil() // a nil input sets nothing
 	case *ssa.Parameter:
 		return parameterMaybeSet(v, path, w)
+	case *ssa.Slice:
+		// A list literal, []T{{...}}: its backing array is built here, and
+		// slicing it is how the traversal reached the array.
+		w.expected[v] = true
+		return pointerMaybeSet(v.X, path, w)
 	default:
 		// A parameter, a call's result, a load from somewhere: built where
 		// this analysis does not look, so assume the field is set.
@@ -322,6 +418,16 @@ func referrersMaybeSet(p ssa.Value, path []string, w *walk) bool {
 		case *ssa.FieldAddr:
 			if r.X == p && fieldName(r) == path[0] && fieldAddrMaybeSet(r, path, w) {
 				return true
+			}
+		case *ssa.IndexAddr:
+			// &list[i]: an element of a list literal, whose fields are the
+			// path's (hasFieldPath follows a list to its element).
+			if r.X != p || referrersMaybeSet(r, path, w) {
+				return true
+			}
+		case *ssa.Slice:
+			if !w.expected[r] {
+				return true // the array is sliced somewhere else too
 			}
 		case *ssa.DebugRef, *ssa.UnOp:
 			// A load (*p): reading the struct does not set a field.

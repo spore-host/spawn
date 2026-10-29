@@ -20,6 +20,13 @@ type Policy struct {
 	Sources []string
 	exact   map[string]string // lower-cased action -> source
 	globs   map[string]string // lower-cased pattern -> source
+	// denied are the actions or patterns an unconditional Deny on every
+	// resource names: no Allow can grant them.
+	denied map[string]string
+	// passStmts are the identity statements, Allow and Deny, whose Action
+	// covers iam:PassRole, kept whole: PassRole is resource-scoped, so whether
+	// a role may be passed depends on Resource and Condition (#1397).
+	passStmts []map[string]any
 	// Opaque are AWS-managed policies attached by ARN. Their content is not in
 	// this repository, so they grant nothing here; a call they would cover is
 	// reported, with the policy named, rather than assumed.
@@ -39,11 +46,14 @@ const (
 	WildcardOnly
 	// Exact: an Allow statement names the action.
 	Exact
+	// Denied: an Allow names it, but an unconditional Deny on every resource
+	// names it too, and a Deny beats an Allow.
+	Denied
 )
 
 // NewPolicy returns an empty policy.
 func NewPolicy() *Policy {
-	return &Policy{exact: map[string]string{}, globs: map[string]string{}}
+	return &Policy{exact: map[string]string{}, globs: map[string]string{}, denied: map[string]string{}}
 }
 
 // Merge adds other's grants to p.
@@ -55,6 +65,10 @@ func (p *Policy) Merge(other *Policy) *Policy {
 	for k, v := range other.globs {
 		p.globs[k] = v
 	}
+	for k, v := range other.denied {
+		p.denied[k] = v
+	}
+	p.passStmts = append(p.passStmts, other.passStmts...)
 	p.Opaque = append(p.Opaque, other.Opaque...)
 	return p
 }
@@ -62,6 +76,11 @@ func (p *Policy) Merge(other *Policy) *Policy {
 // Grants reports how p covers action, and the source that does.
 func (p *Policy) Grants(action string) (Grant, string) {
 	a := strings.ToLower(action)
+	for d, src := range p.denied {
+		if ok, _ := path.Match(d, a); ok {
+			return Denied, src
+		}
+	}
 	if src, ok := p.exact[a]; ok {
 		return Exact, src
 	}
@@ -130,8 +149,18 @@ func (p *Policy) addStatements(source string, stmts []map[string]any) error {
 		return fmt.Errorf("%s: policy has no statements", source)
 	}
 	for _, st := range stmts {
+		if _, ok := st["Principal"]; !ok && coversPassRole(st) {
+			p.passStmts = append(p.passStmts, st)
+		}
+		if st["Effect"] == "Deny" && unconditionalOnEverything(st) {
+			for _, a := range stringList(st["Action"]) {
+				if a = strings.ToLower(strings.TrimSpace(a)); a != "" {
+					p.denied[a] = source + " (Deny)"
+				}
+			}
+		}
 		if st["Effect"] != "Allow" {
-			continue // a Deny grants nothing; a conditional Deny is not modelled
+			continue // a Deny grants nothing; one scoped by resource or condition is not modelled here
 		}
 		if _, ok := st["NotAction"]; ok {
 			// "everything except" is a wildcard by another name.
@@ -147,6 +176,37 @@ func (p *Policy) addStatements(source string, stmts []map[string]any) error {
 	}
 	return nil
 }
+
+// coversPassRole reports whether a statement's Action names iam:PassRole,
+// exactly or by a wildcard.
+func coversPassRole(st map[string]any) bool {
+	for _, a := range stringList(st["Action"]) {
+		if ok, _ := path.Match(strings.ToLower(a), "iam:passrole"); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// unconditionalOnEverything reports whether a statement applies to every
+// resource with no condition: Resource "*", no Condition, no NotResource, no
+// NotAction.
+func unconditionalOnEverything(st map[string]any) bool {
+	for _, k := range []string{"Condition", "NotResource", "NotAction"} {
+		if _, ok := st[k]; ok {
+			return false
+		}
+	}
+	for _, r := range stringList(st["Resource"]) {
+		if r == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// PassStatements are p's identity statements whose Action covers iam:PassRole.
+func (p *Policy) PassStatements() []map[string]any { return p.passStmts }
 
 func stringList(v any) []string {
 	switch t := v.(type) {

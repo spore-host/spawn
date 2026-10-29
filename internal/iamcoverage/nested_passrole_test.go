@@ -288,7 +288,12 @@ func allowsPass(stmts []map[string]any, role string) (string, bool) {
 }
 
 // toEC2 reports whether a statement's condition admits passing to EC2.
-func toEC2(st map[string]any) bool {
+func toEC2(st map[string]any) bool { return toService(st, "ec2.amazonaws.com") }
+
+// toService reports whether a statement's condition admits passing a role to
+// service. A condition on any key but iam:PassedToService is not modelled and
+// counts as not admitting.
+func toService(st map[string]any, service string) bool {
 	cond, ok := st["Condition"].(map[string]any)
 	if !ok {
 		return true
@@ -301,7 +306,7 @@ func toEC2(st map[string]any) bool {
 			}
 			ok := false
 			for _, s := range stringList(v) {
-				if (op == "StringEquals" && s == "ec2.amazonaws.com") || (op == "StringLike" && globMatch(s, "ec2.amazonaws.com")) {
+				if (op == "StringEquals" && s == service) || (op == "StringLike" && globMatch(s, service)) {
 					ok = true
 				}
 			}

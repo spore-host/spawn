@@ -15,6 +15,8 @@ import (
 	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
+	ebtypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -77,6 +79,11 @@ func implied(ctx context.Context, cfg aws.Config, c *ec2.Client, s3c *s3.Client)
 	bucketUntagged(ctx, s3c)
 	uploadTagged(ctx, s3c)
 	runTagged(ctx, c)
+	runWithProfile(ctx, c)
+	runWithoutProfile(ctx, c)
+	eb := eventbridge.NewFromConfig(cfg)
+	targetsWithRole(ctx, eb)
+	targetsWithoutRole(ctx, eb)
 }
 
 func queueTagged(ctx context.Context, q *sqs.Client) {
@@ -143,6 +150,30 @@ func uploadTagged(ctx context.Context, s3c *s3.Client) {
 
 func runTagged(ctx context.Context, c *ec2.Client) {
 	_, _ = c.RunInstances(ctx, &ec2.RunInstancesInput{TagSpecifications: []ec2types.TagSpecification{{}}})
+}
+
+// runWithProfile launches with an instance profile, which passes its role
+// (#1397).
+func runWithProfile(ctx context.Context, c *ec2.Client) {
+	_, _ = c.RunInstances(ctx, &ec2.RunInstancesInput{
+		IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{Name: aws.String("spored-instance-profile")}})
+}
+
+func runWithoutProfile(ctx context.Context, c *ec2.Client) {
+	_, _ = c.RunInstances(ctx, &ec2.RunInstancesInput{ImageId: aws.String("ami-1")})
+	_, _ = c.RunInstances(ctx, &ec2.RunInstancesInput{ImageId: aws.String("ami-1"), IamInstanceProfile: nil})
+}
+
+// targetsWithRole sets a RoleArn on one element of the Targets list.
+func targetsWithRole(ctx context.Context, eb *eventbridge.Client) {
+	_, _ = eb.PutTargets(ctx, &eventbridge.PutTargetsInput{Rule: aws.String("r"),
+		Targets: []ebtypes.Target{{Id: aws.String("a"), Arn: aws.String("x")}, {Id: aws.String("b"), RoleArn: aws.String("arn:aws:iam::1:role/r")}}})
+}
+
+// targetsWithoutRole targets a function, which needs no role.
+func targetsWithoutRole(ctx context.Context, eb *eventbridge.Client) {
+	_, _ = eb.PutTargets(ctx, &eventbridge.PutTargetsInput{Rule: aws.String("r"),
+		Targets: []ebtypes.Target{{Id: aws.String("a"), Arn: aws.String("x")}}})
 }
 
 func direct(ctx context.Context, c *ec2.Client) {
