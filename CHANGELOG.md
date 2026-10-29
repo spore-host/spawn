@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.149.0] - 2026-10-29
+
 ### Added
 
 - **`spawn launch --efa-secondary-type efa|efa-only`: IP on every network
@@ -68,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for `--schedule-params` only).
 
 ### Changed
+
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)).
+  - **Newly required:**
+    - `spawn cleanup --schedule-params` lists your buckets and reads object tags
+      (`s3:ListAllMyBuckets`, `s3:GetObjectTagging`) (#1398).
+    - `spawn resume` / `sweep resume` check the Elastic IP quota for multi-card EFA
+      members (`servicequotas:GetAWSDefaultServiceQuota`; without it they warn) (#1407).
+  - **Already required, now listed:** `iam:PassRole` on every command that launches
+    with an instance profile or creates a schedule (#1397).
 
 - **A launch installs the spored of the spawn that launched it** (#1412).
   Every bootstrap installed the unversioned latest `spawn/spored-linux-*`
@@ -12788,7 +12800,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.148.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.149.0...HEAD
+[0.149.0]: https://github.com/spore-host/spawn/compare/v0.148.0...v0.149.0
 [0.148.0]: https://github.com/spore-host/spawn/compare/v0.147.0...v0.148.0
 [0.147.0]: https://github.com/spore-host/spawn/compare/v0.146.0...v0.147.0
 [0.146.0]: https://github.com/spore-host/spawn/compare/v0.145.0...v0.146.0
