@@ -159,20 +159,11 @@ func TestLaunchConfigObjectIsContentAddressed(t *testing.T) {
 	}
 }
 
-// maximalLaunchTagCount is the most tags a launch can carry, counting the ones
-// spawn writes after RunInstances (#1359): every lifecycle, storage, DNS and
-// spored setting, a sweep member's and a job-array member's tags at once, and
-// the Spot price. The same launch was 66 tags before the launch config object
-// (and refused, #1336); the narrower maximalConfig plus every #1308 setting,
-// 55 then, is 41 now. A key added to a launch that pushes this up has been
-// classified as staying a tag (pkg/launchconfig.TagKeys); raise this with that
-// reason, or move the key into the object.
-const maximalLaunchTagCount = 46
-
-// The tag count (#1359): a maximal launch, with every spored setting and
-// every launch-fixed setting set, comes in well under AWS's 50, and leaves
-// room for the tags spored writes at runtime (#1355).
-func TestMaximalLaunchTagCount(t *testing.T) {
+// maximalLaunch is the most tags a launch can carry (#1359): every lifecycle,
+// storage, DNS and spored setting, a web app, a sweep member's and a
+// job-array member's tags at once, and Spot, with the version, OS and price
+// source a real launch tags.
+func maximalLaunch() LaunchConfig {
 	cfg := maximalConfig()
 	allSporedSettings(&cfg)
 	every := everyLaunchConfigSetting()
@@ -180,19 +171,61 @@ func TestMaximalLaunchTagCount(t *testing.T) {
 	cfg.AppMode, cfg.ReadyPort, cfg.ReadyHealthPath, cfg.WebAuth = every.AppMode, every.ReadyPort, every.ReadyHealthPath, every.WebAuth
 	cfg.DNSDomain, cfg.DNSEndpoint = "example.org", "https://dns.example.org/update"
 	cfg.PriceSource, cfg.SpawnVersion, cfg.TargetOS = "live", "0.150.0", "linux"
+	return cfg
+}
 
+// The maximal launch's counts. It was 66 tags before the launch config object
+// (and refused, #1336) and 46 after it (#1359). With the slots kept for the
+// tags written after launch (#1355) it needs 58: 45 at launch, and 13 kept, 12
+// for spored (its 7 on every instance, 3 for the web app's readiness, 2 for
+// DNS status) and 1 for the Spot price. A key added to a launch that pushes
+// maximalLaunchTags up has been classified as staying a tag
+// (pkg/launchconfig.TagKeys); raise this with that reason, or move the key
+// into the object.
+const (
+	maximalLaunchTags    = 45
+	maximalLaunchReserve = 13
+)
+
+// withoutOverTheLimit drops the settings of maximalLaunch that, with the
+// reserve kept, take it past AWS's 50: a job array's five tags on a sweep member, and a web
+// app's three readiness tags. Without them it fits exactly.
+func withoutOverTheLimit(c *LaunchConfig) {
+	c.JobArrayID, c.JobArrayName, c.JobArraySize, c.JobArrayIndex = "", "", 0, 0
+	c.AppMode, c.ReadyPort, c.ReadyHealthPath, c.WebAuth = "", 0, "", ""
+}
+
+// The tag count, with the reserve (#1355): the maximal launch less the
+// settings named in withoutOverTheLimit fits in AWS's 50 with every slot
+// spored needs kept free, through buildTags and the pre-flight; the whole
+// maximal launch is refused, by exactly what those settings add.
+func TestMaximalLaunchTagCount(t *testing.T) {
+	full := maximalLaunch()
+	launch, reserve, refused := tagCounts(t, full)
+	t.Logf("maximal launch: %d tags at launch + %d kept for after = %d of %d", launch, reserve, launch+reserve, awsMaxTagsPerResource)
+	if launch != maximalLaunchTags || reserve != maximalLaunchReserve {
+		t.Errorf("a maximal launch carries %d tags and keeps %d, want %d and %d", launch, reserve, maximalLaunchTags, maximalLaunchReserve)
+	}
+	if refused == nil {
+		t.Errorf("a maximal launch needing %d tags with its reserve was not refused", launch+reserve)
+	}
+
+	cfg := maximalLaunch()
+	withoutOverTheLimit(&cfg)
 	tags, err := buildTags(cfg, "123456789012", "arn:aws:iam::1:user/u", "acct")
 	if err != nil {
-		t.Fatalf("a maximal launch is refused: %v", err)
+		t.Fatalf("the maximal launch without a job array and a web app is refused: %v", err)
 	}
-	n := len(tags) + len(postLaunchTags(cfg))
-	t.Logf("maximal launch: %d tags at launch + %d after = %d of %d", len(tags), len(postLaunchTags(cfg)), n, awsMaxTagsPerResource)
-	if n > maximalLaunchTagCount {
-		var keys []string
-		for _, tg := range tags {
-			keys = append(keys, *tg.Key)
-		}
-		t.Errorf("a maximal launch carries %d tags, more than %d:\n%s", n, maximalLaunchTagCount, strings.Join(keys, "\n"))
+	if err := cfg.ValidateTagCount(); err != nil {
+		t.Fatalf("the pre-flight refuses the maximal launch without a job array and a web app: %v", err)
+	}
+	fit := len(tags) + tagReserveSize(cfg, tags)
+	t.Logf("without a job array and a web app: %d tags at launch + %d kept = %d", len(tags), tagReserveSize(cfg, tags), fit)
+	if fit > awsMaxTagsPerResource {
+		t.Errorf("it carries %d tags with its reserve, over AWS's %d", fit, awsMaxTagsPerResource)
+	}
+	if over := launch + reserve - awsMaxTagsPerResource; launch+reserve-fit < over {
+		t.Errorf("withoutOverTheLimit drops %d tags but the maximal launch is %d over", launch+reserve-fit, over)
 	}
 	if objectSettings(t, cfg)[launchconfig.NotifyURL] == "" {
 		t.Error("the maximal launch's object lost its notify URL")

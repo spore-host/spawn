@@ -189,6 +189,10 @@ type tagScan struct {
 	writes   map[string]string            // key → first write site
 	reads    map[string]string            // key → first read site
 	writesIn map[string]map[string]string // decl id → key → site
+	// mentionsIn is every key spelled in a decl in a shape that is neither a
+	// read nor a write (assigned to a variable, returned, an unkeyed struct
+	// field), decl id → key → site (#1355).
+	mentionsIn map[string]map[string]string
 }
 
 var (
@@ -203,7 +207,8 @@ var (
 // scanTagUses walks every non-test .go file under root.
 func scanTagUses(t *testing.T, root string) *tagScan {
 	t.Helper()
-	sc := &tagScan{writes: map[string]string{}, reads: map[string]string{}, writesIn: map[string]map[string]string{}}
+	sc := &tagScan{writes: map[string]string{}, reads: map[string]string{},
+		writesIn: map[string]map[string]string{}, mentionsIn: map[string]map[string]string{}}
 
 	type file struct {
 		dir string
@@ -458,7 +463,18 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 					return true
 				}
 				// tagprefix.Tag("x") was matched as a whole; don't revisit its arg.
-				classifyTagUse(stack, e, key, write, read)
+				classified := false
+				classifyTagUse(stack, e, key,
+					func(k string, p token.Pos) { classified = true; write(k, p) },
+					func(k string, p token.Pos) { classified = true; read(k, p) })
+				if !classified {
+					if sc.mentionsIn[declID] == nil {
+						sc.mentionsIn[declID] = map[string]string{}
+					}
+					if _, ok := sc.mentionsIn[declID][key]; !ok {
+						sc.mentionsIn[declID][key] = fset.Position(e.Pos()).String()
+					}
+				}
 				if _, isCall := e.(*ast.CallExpr); isCall {
 					return false
 				}

@@ -71,6 +71,10 @@ const (
 	TagComputeSeconds = "compute-seconds"
 )
 
+// FootprintTags are the suffixes of the footprint tags spored writes on every
+// instance, which a launch keeps a slot free for (#1355).
+var FootprintTags = []string{TagEBSHourlyCost, TagPublicIPv4, TagElasticIPv4}
+
 // Footprint is what an instance pays for by the hour, split by how each part
 // is timed.
 type Footprint struct {

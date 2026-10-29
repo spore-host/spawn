@@ -419,6 +419,7 @@ field TagLimitError.Count int
 field TagLimitError.CustomTags int
 field TagLimitError.Limit int
 field TagLimitError.PostLaunch []string
+field TagLimitError.Spored []string
 field TagLimitError.SporedSettings []string
 field UserDataTooLargeError.DecodedBytes int
 field UserDataTooLargeError.EncodedBytes int
@@ -616,6 +617,7 @@ func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
 func NewLaunchSettings(lc LaunchConfig, rootDeviceName string, amiMinGiB int32) LaunchSettings
+func PostLaunchTagKeys() []string
 func PredictedInstanceRoleName(config IAMRoleConfig) string
 func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) string
 func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, region string) (DisplayPrice, error)

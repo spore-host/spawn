@@ -22,7 +22,7 @@ import (
 // dropped to make room: an instance without them bills open-endedly.
 type TagLimitError struct {
 	// Count is the number of tags the instance would carry, counting the
-	// ones spawn adds itself after RunInstances (PostLaunch).
+	// ones spored and spawn add after RunInstances (Spored, PostLaunch).
 	Count int
 	// Limit is AWS's per-resource tag limit.
 	Limit int
@@ -32,6 +32,12 @@ type TagLimitError struct {
 	// SporedSettings are the optional spored settings that each added tags,
 	// as "--flag (spawn:key)", in the order they were added.
 	SporedSettings []string
+	// Spored are the tags spored writes on the instance by itself once it runs
+	// (its heartbeat, the compute-seconds the cost limit survives a stop/start
+	// with, the cost footprint, ...), counted in Count because the launch keeps
+	// a slot free for each (#1355). A write past the limit fails whole, so
+	// without them the cost clock resets on every resume.
+	Spored []string
 	// PostLaunch are the tags spawn writes on the instance after RunInstances
 	// (a Spot instance's price, an ephemeral FSx's mount tags), counted in
 	// Count because they need room too.
@@ -49,13 +55,23 @@ func (e *TagLimitError) Error() string {
 	if len(e.SporedSettings) > 0 {
 		droppable = append(droppable, "the optional spored settings "+strings.Join(e.SporedSettings, ", "))
 	}
-	if len(droppable) == 0 {
-		droppable = append(droppable, "the launch options that each add a spawn: tag (webhooks, notifications, storage, DNS)")
+	if e.CustomTags+len(e.SporedSettings) < e.Count-e.Limit {
+		// Not enough on its own: name what else takes a slot (#1355).
+		droppable = append(droppable, "the launch options that each add a spawn: tag or a slot kept for one "+
+			"(a job array, webhooks, notifications, storage, DNS, a web app, Spot)")
 	}
 	b.WriteString(strings.Join(droppable, "; "))
 	b.WriteString(". The remaining spawn: tags are what spored enforces the TTL, idle and cost limits from")
+	if len(e.Spored) > 0 {
+		fmt.Fprintf(&b, ". Counted: %d slot(s) spored needs for the tags it writes once running (%s)",
+			len(e.Spored), strings.Join(e.Spored, ", "))
+	}
 	if len(e.PostLaunch) > 0 {
-		fmt.Fprintf(&b, ". Counted: %d tag(s) spawn writes after launch (%s)", len(e.PostLaunch), strings.Join(e.PostLaunch, ", "))
+		sep := ". Counted: "
+		if len(e.Spored) > 0 {
+			sep = "; and "
+		}
+		fmt.Fprintf(&b, "%s%d tag(s) spawn writes after launch (%s)", sep, len(e.PostLaunch), strings.Join(e.PostLaunch, ", "))
 	}
 	return b.String()
 }
@@ -69,40 +85,18 @@ var sporedSettingFlags = map[string]string{
 	"spawn:metrics-enabled": "--metrics",
 }
 
-// postLaunchTags are the instance tags spawn's own launch code writes after
-// RunInstances, which the tag set RunInstances gets must leave room for:
-//
-//   - a Spot instance's spawn:spot-price-per-hour (recordLaunchSpotPrice),
-//     and on a persistent request spawn:original-instance-id, which the TTL
-//     reaper uses to tell a replacement apart (tagOriginalInstance). The
-//     request carries the same tag set as the instance, so one slot covers
-//     both.
-//   - an ephemeral FSx created after the launch (#213): spawn:fsx-pending and
-//     its mount point and S3 paths, written by UpdateInstanceTags once the
-//     filesystem exists (launchWithProgress, launcher.Provision). A failed
-//     write there deletes the filesystem and terminates the instance.
-func postLaunchTags(c LaunchConfig) []string {
-	var out []string
-	if c.Spot {
-		out = append(out, SpotPriceTag)
-	}
-	if c.FSxLustreCreate && c.FSxLustreID == "" && c.FSxPending == "" {
-		out = append(out, "spawn:fsx-pending", "spawn:fsx-mount-point", "spawn:fsx-s3-import-path", "spawn:fsx-s3-export-path")
-	}
-	return out
-}
-
-// launchTagLimit is how many tags RunInstances may be given for c: AWS's limit
-// less the ones spawn writes after the launch.
-func launchTagLimit(c LaunchConfig) int {
-	return awsMaxTagsPerResource - len(postLaunchTags(c))
+// launchTagLimit is how many tags RunInstances may be given for c, whose tag
+// set so far is tags: AWS's limit less the reserve kept for tags written after
+// the launch (tagReserve, #1355).
+func launchTagLimit(c LaunchConfig, tags []types.Tag) int {
+	return awsMaxTagsPerResource - tagReserveSize(c, tags)
 }
 
 // checkTagLimit refuses tags, the set before sweep parameters, when it does
-// not fit. customTags is how many of them came from c.Tags.
+// not leave the reserve free. customTags is how many of them came from c.Tags.
 func checkTagLimit(c LaunchConfig, tags []types.Tag, customTags int) error {
-	post := postLaunchTags(c)
-	if len(tags)+len(post) <= awsMaxTagsPerResource {
+	spored, post := tagReserve(c, tags)
+	if len(tags)+len(spored)+len(post) <= awsMaxTagsPerResource {
 		return nil
 	}
 	var settings []string
@@ -125,10 +119,11 @@ func checkTagLimit(c LaunchConfig, tags []types.Tag, customTags int) error {
 		settings = append(settings, flag+" ("+aws.ToString(t.Key)+")")
 	}
 	return &TagLimitError{
-		Count:          len(tags) + len(post),
+		Count:          len(tags) + len(spored) + len(post),
 		Limit:          awsMaxTagsPerResource,
 		CustomTags:     customTags,
 		SporedSettings: settings,
+		Spored:         spored,
 		PostLaunch:     post,
 	}
 }

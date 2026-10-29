@@ -154,6 +154,50 @@ func TestLaunchOverTheTagLimitMakesNoAWSCall(t *testing.T) {
 	}
 }
 
+// A `spawn launch` whose tags fit in 50 but leave no slot for the ones spored
+// writes once it runs (#1355) is refused before any AWS call beyond the audit
+// identity lookup, saying how many slots spored needs. #1336 allowed it: at 50
+// tags every spored write fails, spawn:compute-seconds among them.
+func TestLaunchLeavingSporedNoRoomMakesNoAWSCall(t *testing.T) {
+	f := serveTagLimitAWS(t)
+	prev := struct {
+		name, instanceType, region, ttl, ami string
+		tags                                 []string
+		yes                                  bool
+	}{name, instanceType, region, ttl, ami, launchTags, autoYes}
+	t.Cleanup(func() {
+		name, instanceType, region, ttl, ami, launchTags, autoYes =
+			prev.name, prev.instanceType, prev.region, prev.ttl, prev.ami, prev.tags, prev.yes
+	})
+	name, instanceType, region, ttl, ami, launchTags, autoYes =
+		"tagged", "m7i.large", "us-east-1", "1h", "", fiftyTags(), true
+
+	// How many tags the launch writes besides the --tag values, from the
+	// refusal of fifty of them.
+	var limit *aws.TagLimitError
+	if err := runLaunch(launchCmd, nil); !errors.As(err, &limit) {
+		t.Fatalf("runLaunch with 50 --tag values = %v; want a *aws.TagLimitError", err)
+	}
+	reserve := len(limit.Spored) + len(limit.PostLaunch)
+	own := limit.Count - reserve - 50
+	if own <= 0 {
+		t.Fatalf("refusal counts %d tags with %d reserved; cannot size the launch", limit.Count, reserve)
+	}
+
+	launchTags = fiftyTags()[:50-own] // exactly 50 tags at launch
+	err := runLaunch(launchCmd, nil)
+	if !errors.As(err, &limit) {
+		t.Fatalf("runLaunch with %d tags at launch and none of the %d reserved slots free = %v; want a *aws.TagLimitError",
+			50, reserve, err)
+	}
+	if want := fmt.Sprintf("%d slot(s) spored needs", len(limit.Spored)); len(limit.Spored) == 0 || !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal does not say how many slots spored needs (%q): %v", want, err)
+	}
+	if calls := f.beyondIdentity(); len(calls) != 0 {
+		t.Errorf("a launch refused for leaving spored no room made %d AWS call(s) first: %v", len(calls), calls)
+	}
+}
+
 // A parameter sweep any of whose members is over the limit is refused before
 // any AWS call (#1336): before applyCLIIAMToSweep creates a role, and before
 // either orchestration path imports a key pair or uploads the params. Here
