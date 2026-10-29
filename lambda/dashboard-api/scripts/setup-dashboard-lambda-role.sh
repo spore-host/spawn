@@ -119,7 +119,7 @@ POLICY_DOCUMENT=$(cat <<EOF
       "Sid": "Sweeps",
       "Effect": "Allow",
       "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
-      "Resource": ["${T}/spawn-sweep-orchestration", "${T}/spawn-sweep-orchestration/index/team_id-index"]
+      "Resource": ["${T}/spawn-sweep-orchestration", "${T}/spawn-sweep-orchestration/index/team_id-index", "${T}/spawn-sweep-orchestration/index/user_id-created_at-index"]
     },
     {
       "Sid": "Teams",

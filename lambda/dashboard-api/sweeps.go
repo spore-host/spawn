@@ -18,6 +18,10 @@ import (
 
 const (
 	dynamoSweepTable = "spawn-sweep-orchestration"
+	// sweepUserIndex is the table's user_id (HASH) / created_at (RANGE) GSI,
+	// projection ALL. The dashboard role grants Query on exactly this index
+	// (scripts/setup-dashboard-lambda-role.sh, the Sweeps statement).
+	sweepUserIndex = "user_id-created_at-index"
 )
 
 // handleListSweeps handles GET /api/sweeps
@@ -27,19 +31,21 @@ func handleListSweeps(ctx context.Context, cfg aws.Config, cliIamArn, teamID str
 
 	dynamodbClient := dynamodb.NewFromConfig(cfg)
 
-	// Personal sweeps via scan with user_id filter, over the whole table. This
-	// used to be one Scan page with Limit 200, and a Scan's Limit counts items
-	// EVALUATED before the filter: once the table held more than 200 sweeps, a
-	// user saw only their sweeps among an arbitrary 200, as if that were all of
-	// them (#1421).
-	scanInput := &dynamodb.ScanInput{
-		TableName:        aws.String(dynamoSweepTable),
-		FilterExpression: aws.String("user_id = :user_id"),
+	// Personal sweeps via a Query on user_id-created_at-index (#1426), every
+	// page (#1421). This was a Scan of the whole table filtered on user_id, so
+	// each dashboard load read every user's sweeps. The index projects ALL
+	// attributes (scripts/setup-sweep-dynamodb.sh), so its items are complete
+	// records and need no read-back from the base table; and every writer sets
+	// both user_id and created_at, so no sweep is missing from it. Newest first.
+	personal, err := queryAll(ctx, dynamodbClient, &dynamodb.QueryInput{
+		TableName:              aws.String(dynamoSweepTable),
+		IndexName:              aws.String(sweepUserIndex),
+		KeyConditionExpression: aws.String("user_id = :user_id"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":user_id": &types.AttributeValueMemberS{Value: cliIamArn},
 		},
-	}
-	personal, err := scanAll(ctx, dynamodbClient, scanInput)
+		ScanIndexForward: aws.Bool(false),
+	})
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("Failed to query sweeps: %v", err)), nil
 	}
