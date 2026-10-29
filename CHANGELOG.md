@@ -71,6 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)).
+  - **Newly required:**
+    - `spawn cleanup --schedule-params` lists your buckets and reads object tags
+      (`s3:ListAllMyBuckets`, `s3:GetObjectTagging`) (#1398).
+    - `spawn resume` / `sweep resume` check the Elastic IP quota for multi-card EFA
+      members (`servicequotas:GetAWSDefaultServiceQuota`; without it they warn) (#1407).
+  - **Already required, now listed:** `iam:PassRole` on every command that launches
+    with an instance profile or creates a schedule (#1397).
+
 - **A launch installs the spored of the spawn that launched it** (#1412).
   Every bootstrap installed the unversioned latest `spawn/spored-linux-*`
   while its bootstrap body was pinned to the launching CLI's release (#1274),
