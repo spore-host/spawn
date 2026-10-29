@@ -71,9 +71,11 @@ func checkExtendCostLimitFlags(explicit float64, raise, keep bool) error {
 // fire first:
 //
 //	compute:              spawn:price-per-hour x (compute so far + now..deadline)
-//	EBS:                  spawn:ebs-hourly-cost x (original launch..deadline)
-//	auto-assigned IPv4:   $0.005/hr x spawn:public-ipv4-count x compute hours
-//	Elastic IPs:          $0.005/hr x spawn:elastic-ipv4-count x (original launch..deadline)
+//	EBS:                  measured EBS $/hr x (original launch..deadline)
+//	auto-assigned IPv4:   $0.005/hr x auto-assigned count x compute hours
+//	Elastic IPs:          $0.005/hr x Elastic count x (original launch..deadline)
+//
+// (the measured figures from spawn:cost-footprint, costmodel.MeasuredFromTags)
 //
 // all through costLimitSpend (pkg/costmodel.Accrue), the function the agent
 // enforces with, so the two cannot drift (#51).

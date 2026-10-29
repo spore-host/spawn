@@ -300,8 +300,10 @@ func paramKeysOf(tags []tagPair) []string {
 //
 // With the slots kept for spored's tags (#1355) it fits on the #477 maximal
 // shape as a sweep member, with the version, OS and price source a real
-// launch tags: 38 at launch + 10 kept = 48. The same shape as a job-array
-// member too is 53, 3 over, and is refused naming the slots spored needs.
+// launch tags: 38 at launch + 8 kept = 46 (48 before spored's three footprint
+// tags became one, #1428). The same shape as a job-array member too is 43 + 8
+// = 51 (53 before #1428), still 1 over, and is refused naming the slots
+// spored needs.
 func TestMonitoringSettingsFitOnAMaximalLaunch(t *testing.T) {
 	cfg := maximalConfig()
 	cfg.IdleCPUPercent = 10
@@ -317,6 +319,14 @@ func TestMonitoringSettingsFitOnAMaximalLaunch(t *testing.T) {
 	tags := builtTags(t, priced) // fails the test if buildTags refuses it
 	launch, reserve, _ := tagCounts(t, priced)
 	t.Logf("maximal sweep member + --metrics --metrics-bind --idle-cpu-threshold: %d + %d kept = %d", launch, reserve, launch+reserve)
+	if launch != 38 || reserve != 8 {
+		t.Errorf("maximal sweep member + monitoring = %d at launch + %d kept, want 38 + 8", launch, reserve)
+	}
+	arrayPriced := withArray
+	arrayPriced.PricePerHour, arrayPriced.PriceSource = 0.085, "live"
+	if al, ar, _ := tagCounts(t, arrayPriced); al != 43 || ar != 8 {
+		t.Errorf("as a job-array member too = %d at launch + %d kept, want 43 + 8", al, ar)
+	}
 	if launch+reserve > awsMaxTagsPerResource {
 		t.Errorf("maximal sweep member + --metrics --metrics-bind --idle-cpu-threshold = %d tags with its reserve, over AWS's %d", launch+reserve, awsMaxTagsPerResource)
 	}

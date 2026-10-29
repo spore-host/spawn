@@ -176,20 +176,23 @@ func maximalLaunch() LaunchConfig {
 
 // The maximal launch's counts. It was 66 tags before the launch config object
 // (and refused, #1336) and 46 after it (#1359). With the slots kept for the
-// tags written after launch (#1355) it needs 58: 45 at launch, and 13 kept, 12
-// for spored (its 7 on every instance, 3 for the web app's readiness, 2 for
-// DNS status) and 1 for the Spot price. A key added to a launch that pushes
+// tags written after launch (#1355) it needed 58, 45 at launch and 13 kept;
+// with spored's three footprint tags made one (#1428) it needs 56: 45 at
+// launch, and 11 kept, 10 for spored (its 5 on every instance, 3 for the web
+// app's readiness, 2 for DNS status) and 1 for the Spot price. A key added to a launch that pushes
 // maximalLaunchTags up has been classified as staying a tag
 // (pkg/launchconfig.TagKeys); raise this with that reason, or move the key
 // into the object.
 const (
 	maximalLaunchTags    = 45
-	maximalLaunchReserve = 13
+	maximalLaunchReserve = 11
 )
 
 // withoutOverTheLimit drops the settings of maximalLaunch that, with the
 // reserve kept, take it past AWS's 50: a job array's five tags on a sweep member, and a web
-// app's three readiness tags. Without them it fits exactly.
+// app's three readiness tags. Without them it is 48, 2 to spare since #1428;
+// either alone is not enough (51 without the job array, 53 without the web
+// app).
 func withoutOverTheLimit(c *LaunchConfig) {
 	c.JobArrayID, c.JobArrayName, c.JobArraySize, c.JobArrayIndex = "", "", 0, 0
 	c.AppMode, c.ReadyPort, c.ReadyHealthPath, c.WebAuth = "", 0, "", ""

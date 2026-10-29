@@ -30,8 +30,9 @@ For a single instance launched with 'spawn launch' (which has no sweep cost
 record), shows an on-the-fly estimate of its cost so far: the on-demand rate
 (spawn:price-per-hour tag) × its compute time across every stop and start
 (spored's spawn:compute-seconds; compute bills only while running), plus EBS
-over the time since first launch when spawn:ebs-hourly-cost is set (EBS bills
-while stopped too), plus $0.005/hr for each public IPv4 address spored has
+over the time since first launch when spored has measured it (the
+spawn:cost-footprint tag, or spawn:ebs-hourly-cost from an older spored;
+EBS bills while stopped too), plus $0.005/hr for each public IPv4 address spored has
 recorded (an Elastic IP bills while stopped too). The total is the figure
 --cost-limit is enforced against.
 
@@ -277,7 +278,8 @@ func runtimeSoFar(inst *aws.InstanceInfo, now time.Time) instanceRuntime {
 // singleInstanceCostReport renders the cost-so-far estimate for one instance:
 // its on-demand rate (the spawn:price-per-hour tag truffle resolved at launch,
 // #533) × its compute time across every boot (runtimeSoFar), plus EBS over the
-// wall clock since first launch when the spawn:ebs-hourly-cost tag is present.
+// wall clock since first launch when spored has recorded the EBS rate
+// (costmodel.MeasuredFromTags).
 // A standalone instance has no DynamoDB cost record (that table is keyed by
 // sweep id), so this is an on-the-fly estimate, clearly labelled, not a billing
 // figure. now is a parameter so the output is deterministically testable.
@@ -342,9 +344,9 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 	case fp.EBSPerHour > 0 && unknownWindow:
 		fmt.Fprintf(&b, "Est. storage:    unknown, not counted (%s)\n", accrualUnknownReason)
 	case fp.EBSPerHour > 0 && rt.Since > 0 && rt.Window.Ended:
-		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (spawn:ebs-hourly-cost × launch to termination)\n", spend.EBS)
+		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (measured EBS rate × launch to termination)\n", spend.EBS)
 	case fp.EBSPerHour > 0 && rt.Since > 0:
-		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (spawn:ebs-hourly-cost × time since launch; EBS bills while stopped too)\n",
+		fmt.Fprintf(&b, "Est. storage:    ~$%.2f (measured EBS rate × time since launch; EBS bills while stopped too)\n",
 			spend.EBS)
 	}
 	switch {
