@@ -49,6 +49,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin install`) are on the list but take no slot: the command reports a
   failed write. A launch with every setting at once is now refused (58 of
   50); without a job array and a web app it fits at exactly 50.
+- **The bootstrap body no longer ships its maintainer comments inside the
+  spored unit and the `--command` script header** (#1422). Comments inside a
+  heredoc are data, so `internal/shellmin` keeps them, and they cost every
+  launch about 1 KB of gzipped user data. They are now shell comments above
+  each heredoc, which are stripped. The unit and the script do exactly what
+  they did: `/etc/systemd/system/spored.service` and `/tmp/spawn-command.sh`
+  lose only their comment lines. The inline bootstrap (dev builds, a replaced
+  spawn module) drops from 8182 to 7133 bytes gzipped of its 8192 budget, and
+  a new test fails while fewer than 1024 bytes of that budget are spare. The
+  published bootstrap body changes, so its sha256 does too.
 
 - **spored's launch-fixed settings are a per-launch config object, not
   instance tags** (#1359). The settings only spored reads, at boot, and

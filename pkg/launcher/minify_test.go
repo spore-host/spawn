@@ -152,6 +152,12 @@ func TestMinifyShellKeepsData(t *testing.T) {
 // lose, so make it in review, not by accident.
 const bootstrapGzipBudget = 8 * 1024
 
+// bootstrapGzipMargin is the headroom under bootstrapGzipBudget the bare
+// bootstrap must keep (#1422). It reached 10 bytes before anything flagged
+// it, so the next change of any size would have failed the budget with no
+// room to reclaim in. The margin fails first, while there is still room.
+const bootstrapGzipMargin = 1024
+
 func TestBareBootstrapFitsItsBudget(t *testing.T) {
 	script, err := BuildLinuxBootstrap(BootstrapConfig{Username: "ec2-user"})
 	if err != nil {
@@ -167,6 +173,10 @@ func TestBareBootstrapFitsItsBudget(t *testing.T) {
 	}
 	if b.Len() > bootstrapGzipBudget {
 		t.Errorf("the bare bootstrap is %d bytes gzipped, over its %d-byte budget (#1246); every byte over comes out of a task's command and manifests", b.Len(), bootstrapGzipBudget)
+	} else if headroom := bootstrapGzipBudget - b.Len(); headroom < bootstrapGzipMargin {
+		t.Errorf("the bare bootstrap is %d bytes gzipped, %d under its %d-byte budget; keep at least %d spare (#1422), "+
+			"so reclaim bytes before adding more (move rationale out of heredoc data, where shellmin cannot strip it) "+
+			"or raise the budget deliberately, in review", b.Len(), headroom, bootstrapGzipBudget, bootstrapGzipMargin)
 	}
 	t.Logf("bare bootstrap: %d bytes raw, %d gzipped (budget %d, EC2 limit 16384)", len(script), b.Len(), bootstrapGzipBudget)
 }
