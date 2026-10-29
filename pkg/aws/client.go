@@ -538,6 +538,11 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	if err := launchConfig.ValidateEFASecondaryType(); err != nil {
 		return nil, err
 	}
+	// And more than one EFA interface with no subnet or AZ to put them in
+	// (#1410). The CLI and Provision refuse it before anything is created.
+	if err := launchConfig.ValidateEFASubnet(); err != nil {
+		return nil, err
+	}
 
 	// Update config for region
 	ec2Client := c.regionalEC2(launchConfig.Region)
@@ -627,11 +632,9 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 		// RunInstances wants an explicit subnet on every interface once there is
 		// more than one ("Each network interface requires either a subnet or a
 		// network interface ID"); a single interface may leave it to EC2.
+		// ValidateEFASubnet, above, made sure there is a subnet or an AZ.
 		cfg := launchConfig
 		if cfg.SubnetID == "" {
-			if cfg.AvailabilityZone == "" {
-				return nil, fmt.Errorf("%d EFA interfaces need a subnet: pass --subnet-id or --az (or --efa-interfaces 1)", cfg.EFAInterfaces)
-			}
 			subnet, err := c.GetSubnetForAZ(ctx, cfg.Region, cfg.AvailabilityZone, cfg.VPCID)
 			if err != nil {
 				return nil, fmt.Errorf("subnet for %d EFA interfaces in %s: %w", cfg.EFAInterfaces, cfg.AvailabilityZone, err)

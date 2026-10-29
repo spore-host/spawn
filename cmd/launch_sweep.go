@@ -385,6 +385,10 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	if err := preflightSweepElasticIPs(ctx, awsClient, launchConfigs, os.Stderr); err != nil {
 		return err
 	}
+	// And each multi-card member's subnet, or the refusal (#1410).
+	if err := resolveSweepEFASubnets(ctx, awsClient, launchConfigs, nil, os.Stderr); err != nil {
+		return err
+	}
 
 	// Step 1: Detect AMI — per config, so a heterogeneous sweep (#372) gets an
 	// arch/GPU-appropriate AMI per instance type instead of the first entry's AMI

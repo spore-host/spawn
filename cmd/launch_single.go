@@ -1335,6 +1335,12 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	if _, err := resolveEFAInterfaces(ctx, awsClient, config); err != nil {
 		return err
 	}
+	// More than one of them needs one subnet (#1410): picked in --az, or the
+	// launch refused here, rather than at RunInstances after the key pair and
+	// the spored role exist.
+	if err := resolveEFASubnet(ctx, awsClient, config, cohortHasAZChain(config, count), os.Stderr); err != nil {
+		return err
+	}
 	// More than one EFA interface means an Elastic IP per instance (#661):
 	// check the region has that many left before anything is created.
 	if err := preflightElasticIPQuota(ctx, awsClient, config, count, os.Stderr); err != nil {

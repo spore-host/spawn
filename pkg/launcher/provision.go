@@ -98,6 +98,12 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	if err := config.ValidateNestedSpawnTTL(); err != nil {
 		return nil, fmt.Errorf("provision: %w", err)
 	}
+	// More than one EFA interface with neither a subnet nor an AZ to pick one
+	// in (#1410). Client.Launch refuses it too, but only after the AMI lookup
+	// and the spored IAM role set up here.
+	if err := config.ValidateEFASubnet(); err != nil {
+		return nil, fmt.Errorf("provision: %w", err)
+	}
 	if config.InstanceType == "" {
 		return nil, fmt.Errorf("provision: instance type is required")
 	}
