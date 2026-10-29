@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/elasticip"
 )
 
@@ -1098,6 +1099,7 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	})
 
 	statements = append(statements, sporedHybridRegistryStatement())
+	statements = append(statements, sporedLaunchConfigReadStatement())
 	statements = append(statements, sporedSelfTerminateStatement())
 	statements = append(statements, sporedOwnElasticIPStatements()...)
 
@@ -1364,6 +1366,43 @@ func sporedSelfTerminateStatementJSON() string {
 
 // sporedHybridRegistryStatementJSON renders the same statement for the static
 // DCV policy, so the two policies cannot drift on it.
+// sporedLaunchConfigReadStatement lets spored read its launch config object
+// (#1359): s3:GetObject on launch-config/config-<sha256>.json in the account's
+// own staging buckets, and nothing else in them.
+//
+// It cannot be one object: the shared spored-instance-role serves every launch
+// in the account, and the per-task roles are shared by every task with the
+// same policy (taskiam.StagedFilesResources), so a per-launch Resource would
+// be overwritten by the next launch. Within one role IAM cannot tell its
+// instances apart anyway. What it does instead:
+//
+//   - the prefix and the 64-character name keep it off the task bootstrap
+//     objects beside them (bootstrap/...), whose keys are their secret;
+//   - no spored role may list the bucket, so a role reads only an object whose
+//     sha it already has;
+//   - spored refuses any object that does not hash to its own spawn:config.
+//
+// So an instance can read another instance's object only by reading that
+// instance's spawn:config tag first, which every spored role can
+// (ec2:DescribeTags). The URLs in it are no longer readable by every principal
+// in the account with DescribeInstances, which is what #1359 set out to end;
+// code running on a spawn instance in the same account still can.
+func sporedLaunchConfigReadStatement() map[string]interface{} {
+	return map[string]interface{}{
+		"Effect":   "Allow",
+		"Action":   []interface{}{"s3:GetObject"},
+		"Resource": launchconfig.ObjectARNPattern(sporedAccountPlaceholder),
+	}
+}
+
+func sporedLaunchConfigReadStatementJSON() string {
+	b, err := json.Marshal(sporedLaunchConfigReadStatement())
+	if err != nil {
+		panic(err) // static content; cannot fail
+	}
+	return string(b)
+}
+
 func sporedHybridRegistryStatementJSON() string {
 	b, err := json.Marshal(sporedHybridRegistryStatement())
 	if err != nil {
@@ -1887,9 +1926,10 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
     },
     %s,
     %s,
+    %s,
     %s
   ]
-}`, reaperControlTagKeysJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedSelfTerminateStatementJSON(), sporedOwnElasticIPStatementsJSON())
+}`, reaperControlTagKeysJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedLaunchConfigReadStatementJSON(), sporedSelfTerminateStatementJSON(), sporedOwnElasticIPStatementsJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It
