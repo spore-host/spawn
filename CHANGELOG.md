@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A role for approval-gated CI deploys of the operated Lambdas** (#1445).
+  `scripts/setup-lambda-deploy-ci-role.sh` creates `GitHubActions-spawn-lambda-deploy` in the infra account, and `--delete` is its deleter.
+  Only a spore-host/spawn job in the `production` GitHub environment can assume it, through the GitHub OIDC provider.
+  That environment requires the owner's review, has no admin bypass, and deploys from `v*` tags only.
+  The role may replace the code of the nine operated functions, read their configuration, and restamp their `spawn:*` tags. It cannot touch IAM, configuration, mappings or stacks.
+  A test fails when its function list and the deploy checklist's discovered set differ.
+
 - **Every release now gets a deploy checklist of the operated components it changed** (#1444).
   A release does not deploy the operated Lambdas, so someone has to work out what to redeploy.
   For v0.151.0 that first pass was wrong: `git diff -- lambda/` showed only the #1434 files, but

@@ -271,6 +271,15 @@ the main module's `go` directive, and the deploy script or template itself.
 - **added**: a new mechanism, so this is the function's first deploy.
 - **removed**: nothing deploys it any more, so tear down what it created.
 
+**The CI deploy role.** `GitHubActions-spawn-lambda-deploy` (#1445) is what
+the deploy job will assume for **code-only** lines. Create or update it with
+`AWS_PROFILE=spore-host-infra scripts/setup-lambda-deploy-ci-role.sh`, and
+remove it with `--delete`. It trusts only
+`repo:spore-host/spawn:environment:production`, so its strength is that
+environment's protection: the owner as required reviewer, no admin bypass,
+`v*` tags only. Keep those settings. A workflow that names a missing
+environment creates it unprotected.
+
 **What is not counted.** These never mark a component changed: `_test.go`
 files, docs, a package the Lambda does not compile, a Dependabot bump to a module
 it does not link, and DynamoDB item writes (backfills are data, not deploys).
