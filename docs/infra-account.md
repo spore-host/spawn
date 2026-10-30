@@ -254,8 +254,8 @@ the main module's `go` directive, and the deploy script or template itself.
 **How to read each line.**
 
 - **code-only**: only compiled inputs changed. A code update ships it: run
-  the listed command from a clean checkout of the tag. #1445 will deploy
-  these lines automatically, once the owner approves, and nothing else.
+  the listed command from a clean checkout of the tag. The CI deploy (below)
+  ships these lines, once the owner approves, and nothing else.
 - **manual**: something other than code changed. That can be the Lambda's own
   deploy script, its template or Makefile, or a file they read. It can also be a
   separate deploy input, listed as its own line under *Other deploy inputs*:
@@ -272,7 +272,7 @@ the main module's `go` directive, and the deploy script or template itself.
 - **removed**: nothing deploys it any more, so tear down what it created.
 
 **The CI deploy role.** `GitHubActions-spawn-lambda-deploy` (#1445) is what
-the deploy job will assume for **code-only** lines. Create or update it with
+the deploy job assumes for **code-only** lines. Create or update it with
 `AWS_PROFILE=spore-host-infra scripts/setup-lambda-deploy-ci-role.sh`, and
 remove it with `--delete`. It trusts only
 `repo:spore-host/spawn:environment:production`, so its strength is that
@@ -293,6 +293,120 @@ redeploy it. The orchestrators changed only behind a flag they never set, and
 they were redeployed anyway so their version stamps would match. Deciding
 whether a changed line needs a deploy is still the operator's call. The tool
 only makes sure the question gets asked about every component.
+
+## Deploying code-only changes from CI
+
+After the release job, `release.yaml` calls `.github/workflows/deploy-lambdas.yaml`
+(#1445). Its **plan** job refuses anything but a `vX.Y.Z` tag and puts the
+checklist in its summary. Its **deploy** job runs in the `production`
+environment, so it waits for the owner's approval. Nothing waits on it, so a
+pending approval holds up no other job. On approval it assumes
+`GitHubActions-spawn-lambda-deploy` and runs `scripts/deploylambdas`. That tool
+deploys only the **code-only** lines, and lists everything else in the record
+as "manual, not deployed".
+
+**How to approve.** Open the release's workflow run and choose *Review
+deployments*, then *production*, then *Approve and deploy*. Read the plan job's
+summary first: it lists exactly what will ship. To skip a release, reject it,
+or leave it until the approval times out. Either way the run ends red, and
+nothing was changed.
+
+**How to dry-run.** Run it by hand on a tag:
+
+```sh
+gh workflow run deploy-lambdas.yaml --repo spore-host/spawn --ref v0.152.0 -f dry_run=true
+```
+
+`dry_run` defaults to true, so the same run without `-f` is also a dry run, and
+it still needs the approval. A dry run does the pre-flight, the build and the
+download of the live code, and makes no mutating call. Its record says, per
+function, which sha it would replace with which and the stamp it would write.
+The call from `release.yaml` stays a dry run until the repository variable
+`LAMBDA_DEPLOY_MODE` is `live`. Set it once a dry run's record has been
+reviewed, with `gh variable set LAMBDA_DEPLOY_MODE --repo spore-host/spawn --body live`.
+A tag older than the one that added this workflow (v0.151.0 and before) cannot
+be run: `workflow_dispatch` reads the workflow from the ref it runs on.
+
+**What it checks, per function, before changing any of them.**
+
+- It refuses unless the checkout is a clean release tag that is the checklist's
+  `--to`, and the function's ARN is in 966362334030, us-east-1.
+- The live function must be `Active` and settled, `PackageType` `Zip`, and on
+  the architecture of the checklist's `GOARCH`. Today that is x86_64 for the
+  sweep orchestrator and arm64 for the pipeline orchestrator and the reaper.
+  Its Runtime and Handler must be what the component's own deploy script or
+  template declares. A mismatch is a configuration deploy, and stays manual.
+- For a component whose deploy script runs `spawn bootstrap-body`, today the
+  sweep orchestrator, it checks the published body. The body at
+  `spawn-binaries-us-east-1/spawn/versions/<v>/bootstrap.sh` must be the one
+  the tag renders. It is fetched over HTTPS, so it needs no S3 permission.
+- It builds exactly the checklist's `go build` line (GOOS, GOARCH, `-tags`,
+  `-ldflags` with `${SPAWN_VERSION}` filled in) with cgo off, from the tag.
+  Any other build flag refuses. The zip holds `bootstrap` at its root, as every
+  mechanism's does. A component with two deploy scripts uses the checklist's
+  build line. For `dashboard-api` that is `lambda/dashboard-api/deploy.sh`'s
+  `-ldflags="-s -w"`.
+- It downloads the live code from `get-function`'s presigned URL, and checks
+  that its sha is the live CodeSha256.
+
+Then, one function at a time:
+
+1. Re-read the configuration, which must be unchanged since the pre-flight.
+2. Update the code (with the snapshot's revision id) and wait for it to settle.
+3. Check that the remote CodeSha256 is the local zip's.
+4. Diff the configuration against the snapshot. It must be empty, apart from
+   the code, update-status and runtime-version fields. Lambda moves the runtime
+   version on an update under automatic runtime management, and the record
+   notes when it does.
+5. Stamp `spawn:version` and read it back.
+
+A function that already runs the identical build (a re-run, since the zip is
+reproducible) is only stamped.
+
+**Rollback.** Any failure at or after the update restores the saved code,
+waits, and re-verifies its CodeSha256. If a stamp was written, it restores the
+previous `spawn:version`. Then the job fails, and the remaining functions are
+"not attempted". The record says which functions were deployed, which one
+failed, whether its rollback verified, and which were never touched. The role
+cannot write configuration. A rollback therefore cannot undo a configuration
+change, and the diff check exists to catch exactly that; such a rollback is
+recorded as `ROLLBACK INCOMPLETE`, to be fixed by hand.
+
+**SAM-managed functions: expected drift.** The pipeline orchestrator
+(`spawn-pipeline-orchestrator`) and the reaper (`spawn-ttl-reaper-production`)
+belong to CloudFormation stacks. A direct code update leaves two things stale:
+the stack's `Code` (the S3 object of its last `sam deploy`) and its `Version`
+parameter (the function's `spawn:version` tag says the new version, while the
+stack's template value says the old). This is deliberate. `sam deploy` would
+need CloudFormation execute rights and `iam:PassRole`, which this role must not
+have. The drift is harmless while it lasts:
+
+- CloudFormation re-applies `Code` only when the template's code location
+  changes.
+- An update that touches only parameters leaves the code and the tag alone.
+- The next `make -C lambda/<name> deploy` from a release tag uploads its own
+  build and asserts `Version`, which reconciles both.
+
+There is one trap. If a later stack update that DOES change the code fails and
+rolls back, CloudFormation restores the stack's previous code, which is older
+than the CI deploy. After a failed stack update, check the CodeSha256 and run
+this workflow again. The record notes the stack name on every SAM-managed line.
+Template or Makefile changes are mechanism changes, so the checklist marks them
+manual and this job never ships them.
+
+**What it could not port** from the manual scripts, all because the role does
+not grant the call:
+
+- `deploy-custom-dns.sh` checks that the Function URL's auth type is `AWS_IAM`.
+  That needs `lambda:GetFunctionUrlConfig`. A code update does not change the
+  URL configuration.
+- `lambda/dashboard-api/deploy.sh` checks that its IAM role exists. That needs
+  `iam:GetRole`, and matters only when creating the function.
+
+The account check uses the function ARN instead of `sts get-caller-identity`.
+Every configuration write the scripts make is deliberately left out: timeout,
+memory, environment, role policies, log retention, Function URL and permissions.
+Those stay manual.
 
 ## Known traps
 

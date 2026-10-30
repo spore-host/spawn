@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Approval-gated CI deploy of a release's code-only Lambda changes** (#1445).
+  After the release job, `.github/workflows/deploy-lambdas.yaml` waits in the `production` environment for the owner's approval, then runs `scripts/deploylambdas` as `GitHubActions-spawn-lambda-deploy`.
+  It deploys only the Lambdas the deploy checklist marks changed and code-only. Everything else is listed in the record as manual, not deployed.
+  - **Pre-flight, for every function before any is changed.** The live Architectures, Runtime, Handler and PackageType must match the build, or it refuses. The build comes from the checklist; the runtime and handler come from the component's own deploy mechanism.
+    The sweep orchestrator's published-bootstrap-body check is ported too.
+    The live code is downloaded and its sha checked, so it can be restored.
+  - **Deploy.** It builds exactly the checklist's `go build` line from the clean tag checkout. Then it updates the code and checks that the remote CodeSha256 is the build and that the configuration diff is empty.
+    It stamps `spawn:version` last. Any failure after the update rolls back to the saved code, and the job stops at the first failed function.
+  - **Record.** Before and after shas, the config diff and the stamp, per function. It goes to the job summary and to a comment on the release PR.
+  - **Dry run by default.** A manual run (`workflow_dispatch` on a tag) is a dry run unless `dry_run` is unticked. The call from `release.yaml` stays a dry run until the repository variable `LAMBDA_DEPLOY_MODE` is `live`.
+  - **SAM-managed functions** (pipeline orchestrator, reaper) are deployed the same way, and their stack's `Code` and `Version` parameter drift until the next `make deploy`. docs/infra-account.md has the detail.
+
 - **A role for approval-gated CI deploys of the operated Lambdas** (#1445).
   `scripts/setup-lambda-deploy-ci-role.sh` creates `GitHubActions-spawn-lambda-deploy` in the infra account, and `--delete` is its deleter.
   Only a spore-host/spawn job in the `production` GitHub environment can assume it, through the GitHub OIDC provider.
