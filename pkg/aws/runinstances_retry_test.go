@@ -116,7 +116,7 @@ func stubSleep(t *testing.T) *[]time.Duration {
 	t.Helper()
 	var got []time.Duration
 	orig := runInstancesSleep
-	runInstancesSleep = func(d time.Duration) { got = append(got, d) }
+	runInstancesSleep = func(_ context.Context, d time.Duration) error { got = append(got, d); return nil }
 	t.Cleanup(func() { runInstancesSleep = orig })
 	return &got
 }

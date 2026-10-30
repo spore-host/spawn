@@ -304,6 +304,27 @@ func (q *Queue) Depth(ctx context.Context) (visible, inFlight *int, err error) {
 		knownCount(out.Attributes, types.QueueAttributeNameApproximateNumberOfMessagesNotVisible), nil
 }
 
+// Incarnation identifies this particular queue among every queue the run's
+// name has had: SQS's CreatedTimestamp. A re-create of a live queue returns
+// the same queue and so the same incarnation; a queue created after the
+// previous one was deleted (a failed `pool create`, retried) has a new one.
+// `pool create` derives its workers' RunInstances idempotency tokens from it
+// (#1448).
+func (q *Queue) Incarnation(ctx context.Context) (string, error) {
+	out, err := q.client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       aws.String(q.url),
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameCreatedTimestamp},
+	})
+	if err != nil {
+		return "", fmt.Errorf("creation time of queue %s: %w", q.name, err)
+	}
+	ts := out.Attributes[string(types.QueueAttributeNameCreatedTimestamp)]
+	if ts == "" {
+		return "", fmt.Errorf("creation time of queue %s: SQS did not return %s", q.name, types.QueueAttributeNameCreatedTimestamp)
+	}
+	return ts, nil
+}
+
 // knownCount is poolqueue.Count as a pointer: nil when the count is unknown.
 func knownCount(attrs map[string]string, name types.QueueAttributeName) *int {
 	n, ok := poolqueue.Count(attrs, name)
