@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.151.0] - 2026-10-30
+
 ### Added
 
 - **`spawn launch --no-public-ip`: private IPs only** (#1433). No public IP is requested on any
@@ -32,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `spawn launch --dry-run` shows `Public IP: none (private only)` for `--no-public-ip` (#1433).
 
 ### Changed
+
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)). Launches
+  with `--no-public-ip` (#1433) read the subnet's routes and VPC endpoints before
+  anything is created: `ec2:DescribeRouteTables` and `ec2:DescribeVpcEndpoints`
+  (read-only). The inventory lists them under every launching command; only
+  `--no-public-ip` launches call them.
 
 - **`--no-public-ip` refuses what needs a public IP** (#1433): `--dns`, the custom DNS target flags
   and `--wait-for-ssh`; the DNS record `--name` implies is skipped with a notice. It is also refused
@@ -13047,7 +13056,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.150.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.151.0...HEAD
+[0.151.0]: https://github.com/spore-host/spawn/compare/v0.150.0...v0.151.0
 [0.150.0]: https://github.com/spore-host/spawn/compare/v0.149.0...v0.150.0
 [0.149.0]: https://github.com/spore-host/spawn/compare/v0.148.0...v0.149.0
 [0.148.0]: https://github.com/spore-host/spawn/compare/v0.147.0...v0.148.0
