@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // The dashboard's DynamoDB-stream wiring is named in four places that nothing
@@ -87,6 +89,16 @@ func submatches(re *regexp.Regexp, s string, split func(string) []string) []stri
 	return out
 }
 
+// skipWalkDir names the directories the tree walks below skip: git metadata
+// and build output, none of it source.
+func skipWalkDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "bin", "build", "dist":
+		return true
+	}
+	return false
+}
+
 // createdTables discovers every table a repo shell script creates with
 // `aws dynamodb create-table`, from a literal --table-name or the file's
 // TABLE_NAME="..." assignment.
@@ -97,15 +109,25 @@ func createdTables(t *testing.T) map[string]string {
 	created := map[string]string{}
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
-		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
+		if d.IsDir() && skipWalkDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		if !d.Type().IsRegular() || !strings.HasSuffix(path, ".sh") {
 			return nil
 		}
-		src := readRepoFile(t, path)
+		b, err := os.ReadFile(path) //nolint:gosec // walking this repo
+		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
+			return err
+		}
+		src := string(b)
 		if !strings.Contains(src, "dynamodb create-table") {
 			return nil
 		}
@@ -157,9 +179,12 @@ func TestNothingNamesTheRemovedAutoscaleTable(t *testing.T) {
 	var hits []string
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
-		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
+		if d.IsDir() && skipWalkDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		if !d.Type().IsRegular() || path == "CHANGELOG.md" {
@@ -167,6 +192,9 @@ func TestNothingNamesTheRemovedAutoscaleTable(t *testing.T) {
 		}
 		b, err := os.ReadFile(path) //nolint:gosec // walking this repo
 		if err != nil {
+			if treewalk.Vanished(".", path, err) {
+				return nil
+			}
 			return err
 		}
 		if strings.Contains(string(b), name) {
