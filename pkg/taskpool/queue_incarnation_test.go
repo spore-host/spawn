@@ -2,6 +2,8 @@ package taskpool
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -38,5 +40,20 @@ func TestIncarnationIsTheQueueCreationTime(t *testing.T) {
 	q = &Queue{client: createdSQS{attrs: map[string]string{"VisibilityTimeout": "900"}}, name: "q"}
 	if got, err := q.Incarnation(context.Background()); err == nil {
 		t.Fatalf("Incarnation with no CreatedTimestamp = %q, want an error", got)
+	}
+}
+
+// A failed `pool create` deletes its queue, and SQS refuses the name for 60s
+// after that; a retry inside the minute is told to wait rather than shown a
+// bare SQS error (#1448).
+func TestCreateQueueExplainsTheDeletedRecentlyWait(t *testing.T) {
+	msg := "You must wait 60 seconds after deleting a queue before you can create another with the same name."
+	_, err := CreateQueue(context.Background(), errSQS{err: &types.QueueDeletedRecently{Message: &msg}}, "oeb-kissat-m2", 900)
+	if err == nil || !strings.Contains(err.Error(), "retry in a minute") {
+		t.Errorf("CreateQueue error = %v, want the 60s wait explained", err)
+	}
+	_, err = CreateQueue(context.Background(), errSQS{err: errors.New("boom")}, "oeb-kissat-m2", 900)
+	if err == nil || strings.Contains(err.Error(), "retry in a minute") {
+		t.Errorf("CreateQueue error = %v, want no 60s hint for an unrelated error", err)
 	}
 }

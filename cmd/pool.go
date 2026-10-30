@@ -2,15 +2,16 @@ package cmd
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/spf13/cobra"
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
@@ -355,7 +356,7 @@ var poolCreateCmd = &cobra.Command{
 		}
 		pool, err := taskpool.CreateForRunWithConfig(ctx, awsClient.Config(), poolRunID, specBucket, poolqueue.SpecPrefix, vis)
 		if err != nil {
-			return fmt.Errorf("create pool queue: %w%s", err, queueDeletedRecentlyHint(err))
+			return fmt.Errorf("create pool queue: %w", err)
 		}
 		if terr := pool.Queue.TagErr(); terr != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  the pool's queue was created without its spawn tags (%v): 'spawn cleanup --pool-queues' and the reaper cannot recognise it, so only 'spawn pool drain --run-id %s' will delete it. Grant sqs:TagQueue to tag future pools.\n", terr, poolRunID)
@@ -364,12 +365,9 @@ var poolCreateCmd = &cobra.Command{
 		// Provision the workers as a partial cohort: ask for N, accept >= minViable
 		// (best-effort/eventual). Each worker boots with user-data that runs
 		// `spored pool-worker`, pointed at this run's queue + spec bucket.
-		generation, err := poolWorkerGeneration(ctx, pool.Queue)
-		if err == nil {
-			var ready string
-			ready, err = provisionPoolWorkers(ctx, awsClient, region, specBucket, generation)
-			fmt.Fprint(os.Stderr, ready)
-		}
+		generation := poolWorkerGeneration(ctx, pool.Queue, os.Stderr)
+		ready, err := provisionPoolWorkers(ctx, awsClient, region, specBucket, generation)
+		fmt.Fprint(os.Stderr, ready)
 		if err != nil {
 			// The queue was created above; if provisioning failed there are no workers
 			// to drain it, so delete it now rather than leak an orphaned SQS queue
@@ -625,12 +623,22 @@ func poolFaultText(f cohort.Fault) string {
 // same queue (CreateQueue returns an existing queue), so it gets the same
 // tokens and EC2 refuses or dedupes them, after poolLiveWorkers has already
 // refused it in words.
-func poolWorkerGeneration(ctx context.Context, q *taskpool.Queue) (string, error) {
+//
+// Reading the creation time needs sqs:GetQueueAttributes, which `pool status`
+// needs too. Without it the tokens are scoped to this run of the command
+// instead: a retry still works, and only a create on a live pool loses the
+// token backstop, keeping poolLiveWorkers' refusal.
+func poolWorkerGeneration(ctx context.Context, q interface {
+	Incarnation(context.Context) (string, error)
+}, warn io.Writer) string {
 	inc, err := q.Incarnation(ctx)
-	if err != nil {
-		return "", fmt.Errorf("scope the workers' launch tokens to this queue: %w", err)
+	if err == nil {
+		return "q" + inc
 	}
-	return "q" + inc, nil
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:]) // crypto/rand.Read does not fail
+	fmt.Fprintf(warn, "⚠️  could not read the queue's creation time (%v); this attempt's launch tokens are its own, so a create on a live pool relies on the live-worker check alone\n", err)
+	return "r" + hex.EncodeToString(nonce[:])
 }
 
 // poolLiveWorkers names the run's workers that are not terminated or shutting
@@ -648,16 +656,6 @@ func poolLiveWorkers(ctx context.Context, client taskcohort.LaunchAPI, region, r
 	}
 	sort.Strings(live)
 	return live, nil
-}
-
-// queueDeletedRecentlyHint explains SQS's refusal to re-create a queue name
-// within 60s of deleting it, which is what a failed create did with its queue.
-func queueDeletedRecentlyHint(err error) string {
-	var recent *sqstypes.QueueDeletedRecently
-	if errors.As(err, &recent) {
-		return "\n   SQS will not re-create a queue name for 60 seconds after deleting it, as a failed 'pool create' does; retry in a minute"
-	}
-	return ""
 }
 
 var poolSubmitCmd = &cobra.Command{

@@ -122,6 +122,11 @@ func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTim
 		in.Tags = nil
 		out, err = client.CreateQueue(ctx, in)
 	}
+	var recent *types.QueueDeletedRecently
+	if errors.As(err, &recent) {
+		// What a failed `pool create` leaves its retry: it deleted the queue (#1448).
+		return nil, fmt.Errorf("create queue %s: %w (SQS will not re-create a queue name for 60 seconds after it is deleted, as a failed 'pool create' does; retry in a minute)", name, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create queue %s: %w", name, err)
 	}

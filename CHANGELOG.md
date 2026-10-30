@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   How to read it: `docs/infra-account.md`, "Deploy checklist".
 
+### Changed
+
+- **`spawn pool create` says how many workers came up** (#1448). It printed `ready: requested 4 workers (min viable 1)` for a pool with one worker. It now prints `ready: N of M workers` and lists each missing worker with the AWS error that stopped it.
+- **`spawn pool create` refuses a run id whose workers are still alive** (#1448), naming them and pointing at `spawn pool drain`. Before, it fell through to RunInstances and every worker failed with `IdempotentParameterMismatch`.
+- **Launch retries a just-created instance profile for a minute, not 14 seconds** (#1448). EC2's "Invalid IAM Instance Profile name" (#572) is retried at 2, 4, 8, 16 and 30 second intervals. A genuinely bad profile name now fails about a minute later than before.
+
 ### Fixed
 
 - **A spot launch now records its spot price** (#1442).
@@ -63,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`spawn launch --help` no longer shows a bogus `spawn connect` value on `--no-public-ip`, `--allow-missing-endpoints` and `--wait-for-ssh`** (#1441).
   pflag reads the first back-quoted span in a flag's usage text as that flag's value name, so these bool flags looked as if they took an argument.
   A test now walks every command and fails if any bool flag's usage has a value name.
+- **`aws.InstanceProfilePropagationRetryWindow` and `taskpool.Queue.Incarnation`** (#1448). The first is how long Launch retries a just-created instance profile, for a caller sizing a deadline around Launch. The second is a queue's SQS creation time, which `pool create` scopes worker tokens to.
+
+- **Pool workers lost to the instance-profile race** (#1448). `spawn pool create` gave each worker's launch cohort's default 15 seconds, so the #572 retry was cut off mid-schedule. In us-west-2, four workers were rejected for a profile created moments earlier, three launched 7 seconds later, and the fourth was dropped. The launch budget now covers the whole retry window plus Launch's own calls.
+- **A pool worker's failure has a reason** (#1448). `terminal/ at phase=launch-acked` is now `terminal/InvalidParameterValue: Value (…) for parameter iamInstanceProfile.name is invalid. Invalid IAM Instance Profile name …`, for the failed worker and for the workers cancelled around it. A retry cut short by its context now returns the AWS error with the context error, not the context error alone, and the pool output includes the fault's message.
+- **A failed `spawn pool create` can be retried with the same run id** (#1448). Workers' RunInstances idempotency tokens were fixed per run id and worker, but Launch stamps `spawn:launch-time` and `spawn:ttl-deadline` to the second, so a retry sent the old tokens with new parameters and EC2 refused every worker with `IdempotentParameterMismatch`. The tokens are now scoped to the run's queue incarnation (its SQS creation time). A failed create deletes its queue, so the retry gets new tokens; a create on a live pool's queue gets the live workers' tokens and cannot add a second set. A retry within 60 seconds hits SQS's queue-name rule, and the error now says to wait a minute. Reading the creation time needs `sqs:GetQueueAttributes`, which `spawn pool status` already needs. Without it `pool create` warns and scopes the tokens to the attempt, so the retry still works and only the live-pool backstop is lost.
 
 ## [0.151.0] - 2026-10-30
 
