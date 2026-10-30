@@ -744,6 +744,9 @@ func TestEveryMainPackageIsAPrincipal(t *testing.T) {
 	notPrincipals := map[string]string{
 		".":             "the spawn CLI, which runs as the user (cli-iam-actions.md)",
 		"test/hermetic": "the test wrapper",
+		// Run by the release workflow with no AWS credentials; it reads git and
+		// the Go module graph only. The scripts module has no AWS SDK dependency.
+		"scripts/deploychecklist": "the release deploy checklist (#1444), which calls no AWS API",
 	}
 	var found []string
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
