@@ -747,6 +747,12 @@ func TestEveryMainPackageIsAPrincipal(t *testing.T) {
 		// Run by the release workflow with no AWS credentials; it reads git and
 		// the Go module graph only. The scripts module has no AWS SDK dependency.
 		"scripts/deploychecklist": "the release deploy checklist (#1444), which calls no AWS API",
+		// It does run as an identity, GitHubActions-spawn-lambda-deploy, but it
+		// calls AWS only through the `aws` CLI, which this SDK call-graph
+		// analysis cannot see. Its own gate does the same job for it:
+		// TestEveryLambdaCallIsGrantedByTheCIRole reads every subcommand it can
+		// invoke and checks each against scripts/setup-lambda-deploy-ci-role.sh.
+		"scripts/deploylambdas": "the CI Lambda deployer (#1445), gated against its role by its own test",
 	}
 	var found []string
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {

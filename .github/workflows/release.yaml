@@ -437,3 +437,24 @@ jobs:
           fi
           gh pr comment "$prs" --repo "$GITHUB_REPOSITORY" --body-file "$out/checklist.md"
           echo "✅ Posted the deploy checklist on #${prs}"
+
+  # The approval-gated deploy of this release's code-only Lambda changes
+  # (#1445): .github/workflows/deploy-lambdas.yaml, in the `production`
+  # environment. After the release job, so the spored and bootstrap body this
+  # release's Lambdas fetch are published first. It waits for the owner's
+  # approval without blocking anything: no other job needs it.
+  #
+  # A dry run until the repository variable LAMBDA_DEPLOY_MODE is `live`, so the
+  # first release that carries this job cannot be the deployer's first live
+  # use. Set it once a dry run's record has been reviewed:
+  #   gh variable set LAMBDA_DEPLOY_MODE --repo spore-host/spawn --body live
+  deploy-lambdas:
+    name: Deploy code-only Lambdas
+    needs: goreleaser
+    uses: ./.github/workflows/deploy-lambdas.yaml
+    with:
+      dry_run: ${{ vars.LAMBDA_DEPLOY_MODE != 'live' }}
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
