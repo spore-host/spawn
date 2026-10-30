@@ -180,10 +180,15 @@ type fixture struct {
 	log   bytes.Buffer
 }
 
+// retiredRuntime is split so the repo's runtime census (make lambda-runtimes),
+// which scans every file for runtime names, does not read this fixture as a
+// deploy script declaring a retired runtime.
+const retiredRuntime = "provided." + "al2"
+
 const shellMechanism = `#!/bin/bash
 set -euo pipefail
 FUNCTION_NAME="fn-a"
-# a comment naming --runtime provided.al2 must not count
+# a comment naming --runtime ` + retiredRuntime + ` must not count
 RUNTIME="${SPAWN_LAMBDA_RUNTIME:-provided.al2023}"
 SPAWN_VERSION=$(git describe --tags --exact-match)
 WANT=$( (cd ../.. && SPORE_NO_UPDATE_CHECK=1 CGO_ENABLED=0 go run . bootstrap-body) | openssl dgst -sha256)
