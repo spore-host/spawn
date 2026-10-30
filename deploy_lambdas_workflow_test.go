@@ -32,13 +32,13 @@ type wfStep struct {
 }
 
 type wfJob struct {
-	Needs       any               `yaml:"needs"`
-	Uses        string            `yaml:"uses"`
-	With        map[string]any    `yaml:"with"`
-	Environment any               `yaml:"environment"`
-	Permissions any               `yaml:"permissions"`
-	Concurrency any               `yaml:"concurrency"`
-	Steps       []wfStep          `yaml:"steps"`
+	Needs       any            `yaml:"needs"`
+	Uses        string         `yaml:"uses"`
+	With        map[string]any `yaml:"with"`
+	Environment any            `yaml:"environment"`
+	Permissions any            `yaml:"permissions"`
+	Concurrency any            `yaml:"concurrency"`
+	Steps       []wfStep       `yaml:"steps"`
 }
 
 type wfInput struct {
