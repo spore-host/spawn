@@ -14,9 +14,12 @@ AWS_PROFILE=$1
 REGION="us-east-1"
 FUNCTION_NAME="spawn-dashboard-websocket-processor"
 
+# The tables whose streams feed the processor. Keep in step with the table
+# switch in lambda/dashboard-websocket-processor/main.go, ProcessorStreams in
+# lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh and
+# enable-streams.sh; dashboard_streams_test.go checks that they agree.
 TABLES=(
     "spawn-sweep-orchestration"
-    "spawn-autoscale-groups-production"
 )
 
 echo "Setting up event source mappings for $FUNCTION_NAME in region $REGION with profile $AWS_PROFILE"
@@ -30,6 +33,49 @@ LAMBDA_ARN=$(aws lambda get-function \
     --output text)
 
 echo "Lambda ARN: $LAMBDA_ARN"
+
+# Named deleter (#1434): remove any DynamoDB-stream mapping on the processor
+# whose source table no longer exists. A mapping outlives its table, sitting
+# Disabled with "Stream is closed" (the removed autoscale table left one).
+# Only a ResourceNotFoundException from describe-table counts as gone; any
+# other failure keeps the mapping, so an existing table's mapping is never
+# deleted. Mappings from other sources (SQS, Kinesis) are left alone.
+echo ""
+echo "Checking existing event source mappings for deleted source tables..."
+MAPPINGS=$(aws lambda list-event-source-mappings \
+    --function-name "$FUNCTION_NAME" \
+    --region "$REGION" \
+    --profile "$AWS_PROFILE" \
+    --query 'EventSourceMappings[].[UUID,EventSourceArn]' \
+    --output text)
+REMOVED=0
+while IFS=$'\t' read -r MAP_UUID SOURCE_ARN; do
+    case "$SOURCE_ARN" in
+        arn:aws:dynamodb:*:table/*/stream/*) ;;
+        *) continue ;;
+    esac
+    SOURCE_TABLE=${SOURCE_ARN#*:table/}
+    SOURCE_TABLE=${SOURCE_TABLE%%/*}
+    if DESCRIBE_ERR=$(aws dynamodb describe-table \
+        --table-name "$SOURCE_TABLE" \
+        --region "$REGION" \
+        --profile "$AWS_PROFILE" 2>&1 >/dev/null); then
+        continue
+    fi
+    case "$DESCRIBE_ERR" in
+        *ResourceNotFoundException*) ;;
+        *)
+            echo "Warning: could not check table $SOURCE_TABLE, keeping mapping $MAP_UUID: $DESCRIBE_ERR"
+            continue ;;
+    esac
+    aws lambda delete-event-source-mapping \
+        --uuid "$MAP_UUID" \
+        --region "$REGION" \
+        --profile "$AWS_PROFILE" >/dev/null
+    echo "Removed event source mapping $MAP_UUID: table $SOURCE_TABLE no longer exists ($SOURCE_ARN)"
+    REMOVED=$((REMOVED + 1))
+done <<< "$MAPPINGS"
+echo "Removed $REMOVED event source mapping(s) whose source table no longer exists."
 
 for TABLE_NAME in "${TABLES[@]}"; do
     echo ""

@@ -167,7 +167,7 @@ POLICY_DOCUMENT=$(cat <<EOF
       "Sid": "ProcessorStreams",
       "Effect": "Allow",
       "Action": ["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"],
-      "Resource": ["${T}/spawn-sweep-orchestration/stream/*", "${T}/spawn-autoscale-groups-production/stream/*"]
+      "Resource": ["${T}/spawn-sweep-orchestration/stream/*"]
     },
     {
       "Sid": "ProcessorListStreams",

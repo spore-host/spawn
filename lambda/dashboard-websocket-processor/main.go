@@ -146,9 +146,6 @@ func parseStreamRecord(record events.DynamoDBEventRecord) (eventType string, eve
 	case "spawn-sweep-orchestration":
 		return parseSweepEvent(record)
 
-	case "spawn-autoscale-groups-production":
-		return parseAutoscaleEvent(record)
-
 	default:
 		return "", nil, "", nil // Skip unknown tables
 	}
@@ -197,53 +194,6 @@ func parseSweepEvent(record events.DynamoDBEventRecord) (eventType string, event
 
 		data := map[string]string{"sweep_id": sweepID}
 		return "sweep:delete", data, userIDVal, nil
-
-	default:
-		return "", nil, "", nil
-	}
-}
-
-// parseAutoscaleEvent parses an autoscale group table stream event
-func parseAutoscaleEvent(record events.DynamoDBEventRecord) (eventType string, eventData interface{}, userID string, err error) {
-	switch record.EventName {
-	case "INSERT", "MODIFY":
-		// Extract autoscale group data from NewImage
-		if record.Change.NewImage == nil {
-			return "", nil, "", fmt.Errorf("NewImage is nil for INSERT/MODIFY event")
-		}
-
-		// Convert to map[string]interface{} directly from events.DynamoDBAttributeValue
-		group := make(map[string]interface{})
-		for key, val := range record.Change.NewImage {
-			// Extract the underlying value from DynamoDBAttributeValue
-			if strVal := val.String(); strVal != "" {
-				group[key] = strVal
-			} else if numVal := val.Number(); numVal != "" {
-				group[key] = numVal
-			} else if boolVal := val.Boolean(); boolVal {
-				group[key] = boolVal
-			}
-		}
-
-		// TODO: Extract user ID from group data or associated instances
-		// For v0.22.0, broadcast to all users (frontend already filters properly)
-		userID = ""
-
-		return "autoscale:update", group, userID, nil
-
-	case "REMOVE":
-		// Extract autoscale_group_id from OldImage
-		if record.Change.OldImage == nil {
-			return "", nil, "", fmt.Errorf("OldImage is nil for REMOVE event")
-		}
-
-		var groupID string
-		if val, ok := record.Change.OldImage["autoscale_group_id"]; ok {
-			groupID = val.String()
-		}
-
-		data := map[string]string{"autoscale_group_id": groupID}
-		return "autoscale:delete", data, "", nil
 
 	default:
 		return "", nil, "", nil
