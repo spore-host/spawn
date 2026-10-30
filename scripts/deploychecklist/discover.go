@@ -22,9 +22,12 @@ import (
 //   - a SAM template, lambda/*/template.yaml, declaring AWS::Serverless::Function;
 //   - a shell script anywhere in the repo that runs
 //     `aws lambda create-function|update-function-code`;
-//   - Go code calling .CreateFunction( (pkg/reaperdeploy). That one deploys the
-//     SELF-HOSTED reaper into a user's own account from the CLI, so it ships
-//     with the CLI release and is reported as such, not as an operated Lambda.
+//   - Go code calling the Lambda SDK's CreateFunction (pkg/reaperdeploy). That
+//     one deploys the SELF-HOSTED reaper into a user's own account from the
+//     CLI, so it ships with the CLI release and is reported as such, not as an
+//     operated Lambda. (Not spelled as the call here: the census finds Go
+//     deploys by a raw-text match that includes comments, and this comment
+//     once made it report this package as a deploy path.)
 
 var (
 	// Exactly the census's shell-deploy rule: a raw-text match, so that the two
