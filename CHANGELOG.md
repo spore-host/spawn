@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **AWS permissions for the credentials you run spawn with**
+  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)). Launches
+  with `--no-public-ip` (#1433) read the subnet's routes and VPC endpoints before
+  anything is created: `ec2:DescribeRouteTables` and `ec2:DescribeVpcEndpoints`
+  (read-only). The inventory lists them under every launching command; only
+  `--no-public-ip` launches call them.
+
 - **`--no-public-ip` refuses what needs a public IP** (#1433): `--dns`, the custom DNS target flags
   and `--wait-for-ssh`; the DNS record `--name` implies is skipped with a notice. It is also refused
   on a detached sweep (the subnet check runs at launch with your credentials, and the orchestrator
@@ -51,15 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - Leftovers of autoscale, which was removed in #772, are gone (#1434). The table `spawn-autoscale-groups-production` no longer exists, but the dashboard WebSocket processor still had a case for its stream, the dashboard role's `ProcessorStreams` statement still granted read access to that stream, and `enable-streams.sh` and `setup-event-source-mappings.sh` still listed the table. The unused `AutoScaleGroupInfo`, `GroupDetailInfo` and `GroupInstanceInfo` dashboard-api models, the one-off `backfill-autoscale-user-ids.py` script and the `/api/autoscale-groups` hint in `setup-all.sh` are removed too. The next run of the role script narrows `ProcessorStreams` to the sweep table's stream. The umbrella dashboard's own Autoscale Groups tab is tracked in spore-host/spore-host#617.
-
-### Changed
-
-- **AWS permissions for the credentials you run spawn with**
-  ([`docs/reference/cli-iam-actions.md`](docs/reference/cli-iam-actions.md)). Launches
-  with `--no-public-ip` (#1433) read the subnet's routes and VPC endpoints before
-  anything is created: `ec2:DescribeRouteTables` and `ec2:DescribeVpcEndpoints`
-  (read-only). The inventory lists them under every launching command; only
-  `--no-public-ip` launches call them.
 
 ### Fixed
 
