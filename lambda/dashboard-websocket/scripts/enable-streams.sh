@@ -15,7 +15,6 @@ REGION="us-east-1"
 
 TABLES=(
     "spawn-sweep-orchestration"
-    "spawn-autoscale-groups-production"
 )
 
 echo "Enabling DynamoDB Streams in region $REGION with profile $AWS_PROFILE"

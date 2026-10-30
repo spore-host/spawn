@@ -240,43 +240,6 @@ type CostSummaryAPIResponse struct {
 	Cost    CostSummary `json:"cost"`
 }
 
-// AutoScaleGroupInfo represents autoscale group summary information
-type AutoScaleGroupInfo struct {
-	AutoScaleGroupID string    `json:"autoscale_group_id"`
-	GroupName        string    `json:"group_name"`
-	Status           string    `json:"status"`
-	DesiredCapacity  int       `json:"desired_capacity"`
-	CurrentCapacity  int       `json:"current_capacity"`
-	MinCapacity      int       `json:"min_capacity"`
-	MaxCapacity      int       `json:"max_capacity"`
-	PolicyType       string    `json:"policy_type"`
-	LastScaleEvent   time.Time `json:"last_scale_event"`
-	CreatedAt        time.Time `json:"created_at"`
-	TeamID           string    `dynamodbav:"team_id" json:"team_id,omitempty"`
-}
-
-// GroupDetailInfo represents detailed autoscale group information
-type GroupDetailInfo struct {
-	AutoScaleGroupInfo
-	HealthyCount        int                 `json:"healthy_count"`
-	UnhealthyCount      int                 `json:"unhealthy_count"`
-	PendingCount        int                 `json:"pending_count"`
-	QueueDepth          *int                `json:"queue_depth,omitempty"`
-	MetricValue         *float64            `json:"metric_value,omitempty"`
-	NextScheduledAction *string             `json:"next_scheduled_action,omitempty"`
-	Instances           []GroupInstanceInfo `json:"instances"`
-}
-
-// GroupInstanceInfo represents instance info within an autoscale group
-type GroupInstanceInfo struct {
-	InstanceID       string    `json:"instance_id"`
-	State            string    `json:"state"`
-	HealthStatus     string    `json:"health_status"`
-	HeartbeatAge     float64   `json:"heartbeat_age_seconds"`
-	SpotInterruption bool      `json:"spot_interruption"`
-	LaunchedAt       time.Time `json:"launched_at"`
-}
-
 // CostSummary represents current cost information
 type CostSummary struct {
 	TotalHourlyCost      float64             `json:"total_hourly_cost"`

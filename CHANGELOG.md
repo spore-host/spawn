@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Leftovers of autoscale, which was removed in #772, are gone (#1434). The table `spawn-autoscale-groups-production` no longer exists, but the dashboard WebSocket processor still had a case for its stream, the dashboard role's `ProcessorStreams` statement still granted read access to that stream, and `enable-streams.sh` and `setup-event-source-mappings.sh` still listed the table. The unused `AutoScaleGroupInfo`, `GroupDetailInfo` and `GroupInstanceInfo` dashboard-api models, the one-off `backfill-autoscale-user-ids.py` script and the `/api/autoscale-groups` hint in `setup-all.sh` are removed too. The next run of the role script narrows `ProcessorStreams` to the sweep table's stream. The umbrella dashboard's own Autoscale Groups tab is tracked in spore-host/spore-host#617.
+
+### Fixed
+
+- `setup-event-source-mappings.sh` now deletes any DynamoDB-stream event-source mapping on `spawn-dashboard-websocket-processor` whose source table no longer exists, and prints each mapping it removes (#1434). A table counts as gone only when `describe-table` returns `ResourceNotFoundException`. Any other error keeps the mapping, so a mapping for an existing table is never deleted. Before this, nothing removed a mapping once its table was gone: the removed autoscale table's mapping sat `Disabled` with "Stream is closed". A test checks that the processor's table switch, the role script's stream grant and both scripts' table lists agree, and that each table they name is created by a setup script in the repo.
+
 ## [0.150.0] - 2026-10-29
 
 ### Added
