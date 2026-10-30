@@ -44,6 +44,10 @@ type Client struct {
 	// --no-public-ip check the CLI ran before creating anything is not
 	// repeated by Launch, nor once per member of a job array (#1433).
 	privateNets sync.Map
+	// privateNetReported is every line PreflightNoPublicIP has written, so a
+	// repeat check (Launch after the CLI's, each job array member) prints
+	// nothing it already printed (#1443).
+	privateNetReported sync.Map
 }
 
 // CallerVersion is the resolved version of the launching spawn binary,

@@ -404,10 +404,10 @@ func init() {
 		"so the region's Elastic IP quota does not limit the fleet. Needs --subnet-id, or --az to let spawn pick a subnet. "+
 		"Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a NAT gateway route, "+
 		"or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the "+
-		"launch if not. `spawn connect` uses SSM. Refused with --dns and --wait-for-ssh; the DNS record --name implies is skipped")
+		"launch if not. spawn connect uses SSM. Refused with --dns and --wait-for-ssh; the DNS record --name implies is skipped")
 	launchCmd.Flags().BoolVar(&allowMissingEndpoints, "allow-missing-endpoints", false, "With --no-public-ip: launch even when the subnet lacks a VPC endpoint or NAT route it needs. "+
 		"What is missing is still listed; without it the bootstrap may not install spored, spored may not enforce --ttl or --cost-limit, "+
-		"and `spawn connect` may not reach the instance")
+		"and spawn connect may not reach the instance")
 	launchCmd.Flags().StringVar(&efaGroup, "efa-group", "", "With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper")
 
 	// Shared storage
@@ -487,7 +487,7 @@ func init() {
 	launchCmd.Flags().BoolVar(&interactive, "interactive", false, "Force interactive wizard")
 	launchCmd.Flags().BoolVar(&quiet, "quiet", false, "Minimal output")
 	launchCmd.Flags().BoolVar(&waitForRunning, "wait-for-running", true, "Wait until running")
-	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", false, "Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: `spawn connect` uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait)")
+	launchCmd.Flags().BoolVar(&waitForSSH, "wait-for-ssh", false, "Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: spawn connect uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait)")
 	launchCmd.Flags().BoolVar(&skipRegionCheck, "skip-region-check", false, "Skip data locality region mismatch warnings")
 	launchCmd.Flags().BoolVar(&keepOnErrorFlag, "keep-on-error", false, "If the launch fails after the instance was created (spored never came up, it never reached running, ...), keep the instance instead of terminating it. For a job array or sweep, keep every member when the launch fails part way, and keep a member whose spored never came up. A kept instance has no TTL/idle/cost-limit enforcement until spored is confirmed running")
 	launchCmd.Flags().BoolVar(&terminateOnError, "terminate-on-error", false, "Terminate the instance if the launch fails after it was created (now the default)")

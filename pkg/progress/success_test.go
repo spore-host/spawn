@@ -142,3 +142,25 @@ func TestEveryPreregisteredStepIsStarted(t *testing.T) {
 		}
 	}
 }
+
+// #1443: a --no-public-ip launch's summary printed a blank "Public IP" row. An
+// instance with no public address says so, in the dry run's words.
+func TestSuccessSummaryNamesAMissingPublicIP(t *testing.T) {
+	if err := i18n.Init(i18n.Config{Language: "en"}); err != nil {
+		t.Fatal(err)
+	}
+	label := i18n.T("spawn.progress.success.label.public_ip")
+	for ip, want := range map[string]string{"": NoPublicIP, "198.51.100.7": "198.51.100.7"} {
+		var buf bytes.Buffer
+		renderSuccess(&buf, SuccessSummary{InstanceID: "i-0123", PublicIP: ip, ConnectCommand: "spawn connect demo"}, nil)
+		var row string
+		for _, l := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(l, label) {
+				row = l
+			}
+		}
+		if got := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(row), label)); got != want {
+			t.Errorf("PublicIP %q: row %q shows %q, want %q", ip, row, got, want)
+		}
+	}
+}

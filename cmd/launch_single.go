@@ -896,14 +896,13 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	prog.Complete("Waiting for instance")
 
 	// Step 9: Get public IP
-	prog.Start("Getting public IP")
-	publicIP, err := awsClient.GetInstancePublicIP(ctx, config.Region, result.InstanceID)
+	publicIP, err := launchedPublicIP(prog, config, func() (string, error) {
+		return awsClient.GetInstancePublicIP(ctx, config.Region, result.InstanceID)
+	})
 	if err != nil {
-		prog.Error("Getting public IP", err)
 		return err
 	}
 	result.PublicIP = publicIP
-	prog.Complete("Getting public IP")
 
 	// Steps 10 and 10b: wait for the instance to be usable, then verify spored
 	// (#1296: SSH is waited for only when asked; spored is verified regardless).
@@ -1001,6 +1000,23 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	prog.DisplaySuccess(summary, config)
 
 	return nil
+}
+
+// launchedPublicIP is step 9, the launched instance's public IP. A
+// --no-public-ip launch has none to look up, so the step is skipped (#1443).
+func launchedPublicIP(prog *progress.Progress, config *aws.LaunchConfig, lookup func() (string, error)) (string, error) {
+	prog.Start("Getting public IP")
+	if config.NoPublicIP {
+		prog.Skip("Getting public IP")
+		return "", nil
+	}
+	ip, err := lookup()
+	if err != nil {
+		prog.Error("Getting public IP", err)
+		return "", err
+	}
+	prog.Complete("Getting public IP")
+	return ip, nil
 }
 
 // launchDNSDomain is the zone a launched spore registers under: its custom
