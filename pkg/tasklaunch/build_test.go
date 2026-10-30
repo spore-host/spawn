@@ -200,3 +200,40 @@ func TestTaskSpecCarriesNoEFA(t *testing.T) {
 		t.Errorf("task config enables EFA: %+v", cfg)
 	}
 }
+
+// A task cannot ask for a private-only launch (#1433), so it has nothing to
+// carry --no-public-ip to: no TaskSpec field names a public IP, and the config
+// a task launches with never sets NoPublicIP, so its launch is unchanged. If
+// TaskSpec gains one, this fails until taskLaunchConfig threads it (and a task
+// gets a subnet to check).
+var publicIPName = regexp.MustCompile(`(?i)public_?ip|private_?only`)
+
+func TestTaskSpecCarriesNoPublicIPChoice(t *testing.T) {
+	var walk func(reflect.Type, string)
+	found := 0
+	walk = func(typ reflect.Type, path string) {
+		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map {
+			typ = typ.Elem()
+		}
+		if typ.Kind() != reflect.Struct {
+			return
+		}
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			found++
+			if publicIPName.MatchString(f.Name) || publicIPName.MatchString(f.Tag.Get("json")) {
+				t.Errorf("TaskSpec%s.%s names a public IP: thread it through taskLaunchConfig as LaunchConfig.NoPublicIP, then update this gate", path, f.Name)
+			}
+			walk(f.Type, path+"."+f.Name)
+		}
+	}
+	walk(reflect.TypeOf(taskproto.TaskSpec{}), "")
+	if found == 0 {
+		t.Fatal("discovered no TaskSpec fields")
+	}
+	spec := &taskproto.TaskSpec{TaskID: "t", Command: []string{"x"}, Lifecycle: taskproto.Lifecycle{TTL: "1h"}}
+	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "c8gn.48xlarge"}, "us-east-1", "p", "w")
+	if cfg.NoPublicIP || cfg.AllowMissingEndpoints {
+		t.Errorf("task config asks for a private-only launch: %+v", cfg)
+	}
+}

@@ -54,6 +54,11 @@ type fakeEC2 struct {
 	// subnets answers DescribeSubnets, filtered by the request's vpc-id and
 	// availability-zone filters as EC2 does (#1389).
 	subnets []fakeSubnet
+
+	// routeTablesXML / vpcEndpointsXML, when set, are the item sets
+	// DescribeRouteTables and DescribeVpcEndpoints answer with, for the
+	// --no-public-ip subnet check (#1433).
+	routeTablesXML, vpcEndpointsXML string
 }
 
 type fakeSubnet struct {
@@ -166,6 +171,9 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var b bytes.Buffer
 		b.WriteString(`<DescribeSubnetsResponse ` + ns + `><requestId>r</requestId><subnetSet>`)
 		for _, sn := range f.subnets {
+			if v := form.Get("SubnetId.1"); v != "" && v != sn.id {
+				continue
+			}
 			if v, ok := want["vpc-id"]; ok && v != sn.vpc {
 				continue
 			}
@@ -177,6 +185,12 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		b.WriteString(`</subnetSet></DescribeSubnetsResponse>`)
 		_, _ = w.Write(b.Bytes()) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+	case "DescribeRouteTables":
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+		_, _ = w.Write([]byte(`<DescribeRouteTablesResponse ` + ns + `><requestId>r</requestId><routeTableSet>` + f.routeTablesXML + `</routeTableSet></DescribeRouteTablesResponse>`))
+	case "DescribeVpcEndpoints":
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+		_, _ = w.Write([]byte(`<DescribeVpcEndpointsResponse ` + ns + `><requestId>r</requestId><vpcEndpointSet>` + f.vpcEndpointsXML + `</vpcEndpointSet></DescribeVpcEndpointsResponse>`))
 	case "TerminateInstances":
 		_, _ = w.Write([]byte(`<TerminateInstancesResponse ` + ns + `><requestId>r</requestId><instancesSet/></TerminateInstancesResponse>`))
 	case "DescribeAddresses":
