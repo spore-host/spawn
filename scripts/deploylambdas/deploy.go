@@ -437,8 +437,13 @@ func (d *deployer) rollback(ctx context.Context, p *prepared, r *result, stamped
 }
 
 // run is the whole deploy. It always returns a record, also on failure.
-func (d *deployer) run(ctx context.Context, c *checklist) (*record, error) {
-	rec := &record{From: c.From, To: c.To, DryRun: d.dryRun}
+func (d *deployer) run(ctx context.Context, c *checklist) (rec *record, err error) {
+	rec = &record{From: c.From, To: c.To, DryRun: d.dryRun}
+	defer func() {
+		if err != nil {
+			rec.Error = err.Error()
+		}
+	}()
 	targets, skipped := selectTargets(c)
 	rec.Skipped = skipped
 	for _, t := range targets {

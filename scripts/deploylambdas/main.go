@@ -91,9 +91,6 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		pollAttempts: 120, pollInterval: 5 * time.Second,
 	}
 	rec, runErr := d.run(ctx, c)
-	if runErr != nil {
-		rec.Error = runErr.Error()
-	}
 	if werr := writeRecord(rec, stdout, *recordMD, *recordJSON); werr != nil && runErr == nil {
 		runErr = werr
 	}
