@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.151.0] - 2026-10-30
+
 ### Added
 
 - **`spawn launch --no-public-ip`: private IPs only** (#1433). No public IP is requested on any
@@ -13047,7 +13049,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.150.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.151.0...HEAD
+[0.151.0]: https://github.com/spore-host/spawn/compare/v0.150.0...v0.151.0
 [0.150.0]: https://github.com/spore-host/spawn/compare/v0.149.0...v0.150.0
 [0.149.0]: https://github.com/spore-host/spawn/compare/v0.148.0...v0.149.0
 [0.148.0]: https://github.com/spore-host/spawn/compare/v0.147.0...v0.148.0
