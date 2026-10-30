@@ -64,6 +64,7 @@ func roleStreamTables(t *testing.T) []string {
 		}
 		out = append(out, m[1])
 	}
+	slices.Sort(out)
 	return out
 }
 
