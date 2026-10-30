@@ -172,8 +172,11 @@ type launchPlan struct {
 	EFALayout        []string `json:"efa_layout,omitempty"`
 	// EFASecondaryType is the interface type on the cards after card 0 of a
 	// multi-card launch (#1404): efa-only, or efa (with a private IP each).
-	EFASecondaryType     string `json:"efa_secondary_type,omitempty"`
-	ElasticIP            bool   `json:"elastic_ip,omitempty"`
+	EFASecondaryType string `json:"efa_secondary_type,omitempty"`
+	ElasticIP        bool   `json:"elastic_ip,omitempty"`
+	// PublicIP is "none (private only)" for --no-public-ip (#1433), and
+	// empty otherwise (the interface or Elastic IP lines say how it is got).
+	PublicIP             string `json:"public_ip,omitempty"`
 	NestedVirtualization bool   `json:"nested_virtualization,omitempty"`
 	Hibernate            bool   `json:"hibernate,omitempty"`
 	JobArrayName         string `json:"job_array_name,omitempty"`
@@ -198,6 +201,9 @@ type launchPlan struct {
 	// they are looking at.
 	CostLimitUSD float64 `json:"cost_limit_usd,omitempty"`
 }
+
+// noPublicIPPlan is the dry-run's Public IP for a --no-public-ip launch.
+const noPublicIPPlan = "none (private only)"
 
 // describeLaunchPlan projects a resolved LaunchConfig into the dry-run's
 // display shape. Pure — no AWS, no I/O — so it's directly unit-testable.
@@ -236,6 +242,9 @@ func describeLaunchPlan(config *aws.LaunchConfig) launchPlan {
 		Tags:                 config.Tags,
 		CostLimitUSD:         config.CostLimit,
 	}
+	if config.NoPublicIP {
+		plan.PublicIP = noPublicIPPlan
+	}
 
 	plan.IamInstanceProfile, plan.IamInstanceProfileIsPreview = previewIAMInstanceProfile(config)
 	plan.SecurityGroupPlan = previewSecurityGroupPlan(config)
@@ -258,7 +267,7 @@ func applyEFAPlan(plan *launchPlan, config aws.LaunchConfig, capacity aws.EFACap
 	for _, ni := range nis {
 		plan.EFALayout = append(plan.EFALayout, aws.DescribeEFAInterface(ni))
 	}
-	plan.ElasticIP = aws.NeedsLaunchElasticIP(nis)
+	plan.ElasticIP = !config.NoPublicIP && aws.NeedsLaunchElasticIP(nis)
 	plan.EFASecondaryType = ""
 	if len(nis) > 1 {
 		plan.EFASecondaryType = aws.EFASecondaryTypeEFAOnly
@@ -457,6 +466,9 @@ func renderLaunchPlanTable(out io.Writer, p launchPlan) {
 			fmt.Fprintln(out, "              (EC2 auto-assigns none with more than one interface; released by spawn terminate,")
 			fmt.Fprintln(out, "              or by the TTL reaper once the instance is gone; not allocated in --dry-run)")
 		}
+	}
+	if p.PublicIP != "" {
+		fmt.Fprintf(out, "Public IP:    %s\n", p.PublicIP)
 	}
 	if p.NestedVirtualization {
 		fmt.Fprintln(out, "Nested virt:  enabled")

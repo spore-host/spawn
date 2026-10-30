@@ -86,7 +86,7 @@ func preflightSweepElasticIPs(ctx context.Context, client *aws.Client, cfgs []*a
 	need := map[string]int{}
 	first := map[string]*aws.LaunchConfig{}
 	for _, cfg := range cfgs {
-		if cfg.EFAEnabled && cfg.EFAInterfaces > 1 {
+		if cfg.EFAEnabled && cfg.EFAInterfaces > 1 && !cfg.NoPublicIP { // --no-public-ip: no Elastic IP (#1433)
 			need[cfg.Region]++
 			if first[cfg.Region] == nil {
 				first[cfg.Region] = cfg

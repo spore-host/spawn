@@ -100,6 +100,11 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	"efa-secondary-type":     honouredOnWindows(whyEC2Param + " (the interface type on cards after card 0); Windows configures the extra interfaces itself, though AWS documents that a multi-interface Windows instance needs static routing"),
 	"efa-group":              honouredOnWindows(whyEC2Param + " (a security group shared by EFA instances)"),
 
+	// --no-public-ip (#1433): the Windows bootstrap downloads the AWS CLI
+	// installer from the internet, so its subnet check requires a NAT route.
+	"no-public-ip":            honouredOnWindows(whyEC2Param + " (no public IP on the interface); the subnet check requires a NAT route on Windows, whose bootstrap downloads the AWS CLI installer. RDP: `spawn connect --rdp --via-ssm`"),
+	"allow-missing-endpoints": honouredOnWindows("read by --no-public-ip's subnet check, the same on Windows"),
+
 	// Instance shape, network and purchase: EC2 parameters.
 	"instance-type":         honouredOnWindows(whyEC2Param),
 	"region":                honouredOnWindows(whyEC2Param),

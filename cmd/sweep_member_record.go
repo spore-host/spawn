@@ -347,6 +347,7 @@ var oldCheckpointLostCategory = map[string]string{
 	"spot": catPurchase, "spot-max-price": catPurchase, "reservation-id": catPurchase, "capacity-block": catPurchase,
 	"security-group": catNetwork, "security-group-ids": catNetwork, "subnet": catNetwork, "subnet-id": catNetwork,
 	"efa": catNetwork, "efa-interfaces": catNetwork, "efa-secondary-type": catNetwork, "placement-group": catNetwork,
+	"no-public-ip": catNetwork, "allow-missing-endpoints": catNetwork,
 	"efs-id": catStorage, "efs-mount-point": catStorage, "efs-mount-options": catStorage, "efs-profile": catStorage,
 	"fsx-id": catStorage, "fsx-mount-point": catStorage, "fsx-skip-validate": catStorage, "attach-volume": catStorage,
 	"tag": catTags, "team": catTags, "name": catTags, "dns": catTags, "no-dns": catTags,

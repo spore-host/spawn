@@ -92,6 +92,8 @@ var (
 	efaInterfaces         int
 	efaSecondaryType      string
 	efaGroup              string
+	noPublicIP            bool
+	allowMissingEndpoints bool
 
 	// Shared storage
 	efsID           string
@@ -398,6 +400,14 @@ func init() {
 		"efa is EFA with ENA: each card also gets a private IP in the launch subnet, so IP traffic (S3, say) can use that card's bandwidth. "+
 		"Only the primary interface gets the public or Elastic IP. The OS must route the extra interfaces: Ubuntu's cloud-init and "+
 		"Amazon Linux's amazon-ec2-net-utils set up per-interface policy routing at boot; spawn adds none. Refused without multi-card EFA")
+	launchCmd.Flags().BoolVar(&noPublicIP, "no-public-ip", false, "Launch with private IPs only: no public IP on any interface, and no Elastic IP for a multi-card --efa launch, "+
+		"so the region's Elastic IP quota does not limit the fleet. Needs --subnet-id, or --az to let spawn pick a subnet. "+
+		"Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a NAT gateway route, "+
+		"or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the "+
+		"launch if not. `spawn connect` uses SSM. Refused with --dns and --wait-for-ssh; the DNS record --name implies is skipped")
+	launchCmd.Flags().BoolVar(&allowMissingEndpoints, "allow-missing-endpoints", false, "With --no-public-ip: launch even when the subnet lacks a VPC endpoint or NAT route it needs. "+
+		"What is missing is still listed; without it the bootstrap may not install spored, spored may not enforce --ttl or --cost-limit, "+
+		"and `spawn connect` may not reach the instance")
 	launchCmd.Flags().StringVar(&efaGroup, "efa-group", "", "With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper")
 
 	// Shared storage

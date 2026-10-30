@@ -1335,6 +1335,12 @@ func ensureAMIAndPreflight(ctx context.Context, awsClient *aws.Client, config *a
 	if _, err := resolveEFAInterfaces(ctx, awsClient, config); err != nil {
 		return err
 	}
+	// --no-public-ip (#1433): its subnet, picked in --az and pinned, checked
+	// for the endpoints or NAT route a private instance needs, before anything
+	// is created. Before the EFA subnet below, which then finds it set.
+	if err := preflightNoPublicIP(ctx, awsClient, config, os.Stderr); err != nil {
+		return err
+	}
 	// More than one of them needs one subnet (#1410): picked in --az, or the
 	// launch refused here, rather than at RunInstances after the key pair and
 	// the spored role exist.
@@ -1362,7 +1368,8 @@ var elasticIPQuotaFor = func(ctx context.Context, awsClient *aws.Client, region 
 // warns and lets the launch go on: Launch still terminates an instance whose
 // AllocateAddress fails, so the check is an early answer, not the only guard.
 func preflightElasticIPQuota(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, instances int, warn io.Writer) error {
-	if !config.EFAEnabled || config.EFAInterfaces <= 1 {
+	// --no-public-ip (#1433) allocates no Elastic IP.
+	if !config.EFAEnabled || config.EFAInterfaces <= 1 || config.NoPublicIP {
 		return nil
 	}
 	need := instances
