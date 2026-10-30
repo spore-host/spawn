@@ -370,3 +370,70 @@ jobs:
             https://api.github.com/repos/spore-host/spore-host/dispatches \
             -d '{"event_type":"cli-docs-updated","client_payload":{"cli":"spawn"}}'
           echo "✅ Dispatched cli-docs-updated (spawn) to the docs repo"
+
+  # Which spore.host-operated components this release changed, and how each one
+  # deploys (#1444), posted as a checklist on the release PR. A release does not
+  # deploy the operated Lambdas, and on v0.151.0 working out which ones it had
+  # touched went wrong: `git diff -- lambda/` missed that both orchestrators
+  # compile pkg/aws, which the release changed. scripts/deploychecklist runs
+  # `go list -deps` for every Lambda the deploy mechanisms name, and compares
+  # every role, policy, mapping and template script, between the previous
+  # release tag and this one.
+  #
+  # Report only, and a separate job on purpose: no `needs`, so it waits on
+  # nothing and nothing waits on it, and continue-on-error, so a failure here
+  # can never fail or reorder the release (spored publish, verify, GoReleaser).
+  # No AWS credentials: it reads git and the Go module graph only.
+  #
+  # Posted on the release PR, found as the one merged PR whose merge commit is
+  # the tagged commit (the release ritual tags the release PR's merge). Not the
+  # GitHub release notes: GoReleaser creates and writes that body in the other
+  # job, late, so editing it would race it and need contents: write. When no
+  # single PR matches (a tag pushed on a direct commit), the checklist is still
+  # in this job's summary, with the JSON in its log. The only permission it
+  # adds is pull-requests: write on this job's GITHUB_TOKEN, to comment.
+  deploy-checklist:
+    name: Deploy checklist
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+
+      - name: Compute the deploy checklist
+        run: |
+          set -euo pipefail
+          prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${GITHUB_REF_NAME}^")"
+          out="${RUNNER_TEMP}/deploy-checklist"
+          mkdir -p "$out"
+          (cd scripts && go run ./deploychecklist --from "$prev" --to "$GITHUB_REF_NAME" --json-out "$out/checklist.json") > "$out/checklist.md"
+          cat "$out/checklist.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::deploy checklist JSON (#1445 consumes this form)"
+          cat "$out/checklist.json"
+          echo "::endgroup::"
+
+      - name: Post the checklist on the release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/deploy-checklist"
+          sha="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          prs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
+            --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"${sha}\") | .number] | unique | .[]")"
+          n="$(printf '%s\n' "$prs" | grep -c . || true)"
+          if [ "$n" != 1 ]; then
+            echo "::warning::found ${n} merged PRs whose merge commit is ${sha}, not exactly one; the deploy checklist is in this job's summary instead"
+            exit 0
+          fi
+          gh pr comment "$prs" --repo "$GITHUB_REPOSITORY" --body-file "$out/checklist.md"
+          echo "✅ Posted the deploy checklist on #${prs}"

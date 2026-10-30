@@ -57,6 +57,14 @@ func TestEveryCommandIsBuiltByARelease(t *testing.T) {
 			case ".git", "lambda", "test", "docs-gen", "node_modules", "web", "testdata":
 				return filepath.SkipDir
 			}
+			// Another module (its own go.mod) is not "this module": the
+			// scripts/ module's release-time tools (scripts/deploychecklist,
+			// #1444) are run by the release workflow with `go run`, not shipped.
+			if path != "." {
+				if _, serr := os.Stat(filepath.Join(path, "go.mod")); serr == nil {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
