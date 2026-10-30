@@ -634,8 +634,10 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// AMI's root snapshot also sets a hard minimum size: EC2 rejects a root
 	// volume smaller than its snapshot (InvalidBlockDeviceMapping), so a custom
 	// AMI with a large baked root launches without --volume-size (#25). Both come
-	// from one DescribeImages call.
-	rootDeviceName, amiMinGiB := rootDeviceInfoFromAMI(ctx, ec2Client, launchConfig.AMI)
+	// from one DescribeImages call, which also gives the billing platform the
+	// spot price record needs (#1442).
+	ami := launchInfoFromAMI(ctx, ec2Client, launchConfig.AMI)
+	rootDeviceName, amiMinGiB := ami.rootDeviceName, ami.minRootGiB
 
 	// Build run instances input
 	input := &ec2.RunInstancesInput{
@@ -745,9 +747,12 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	}
 
 	// Best-effort: record what this spot instance actually pays, so spored and
-	// `spawn status` don't cost it at the on-demand rate (#896).
+	// `spawn status` don't cost it at the on-demand rate (#896). The platform
+	// comes from the AMI and the zone from the response (or the request), so
+	// the just-launched instance is not re-described into EC2's
+	// eventual-consistency window (#1442).
 	if launchConfig.Spot {
-		recordLaunchSpotPrice(ctx, ec2Client, result.Instances[0])
+		recordLaunchSpotPrice(ctx, ec2Client, launchedForSpotPrice(result.Instances[0], ami, launchConfig.AvailabilityZone))
 	}
 
 	launched := newLaunchResult(result.Instances[0], launchConfig.Name, launchConfig.Region, launchConfig.KeyName)

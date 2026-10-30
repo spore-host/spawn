@@ -117,7 +117,7 @@ func TestSpotProductDescription(t *testing.T) {
 func TestSpotPriceForInstance_DescribesWhenTheResponseIsIncomplete(t *testing.T) {
 	full := launchedSpot()
 	f := &fakeSpotEC2{instance: &full, history: []types.SpotPrice{spotHistory("us-west-2b", "0.3600", time.Now())}}
-	sp, err := spotPriceForInstance(context.Background(), f, types.Instance{InstanceId: full.InstanceId})
+	sp, err := spotPriceForInstance(context.Background(), f, types.Instance{InstanceId: full.InstanceId}, nil)
 	if err != nil {
 		t.Fatalf("spotPriceForInstance: %v", err)
 	}

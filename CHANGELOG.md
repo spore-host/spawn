@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   How to read it: `docs/infra-account.md`, "Deploy checklist".
 
+### Fixed
+
+- **A spot launch now records its spot price** (#1442).
+  `spawn:spot-price-per-hour` was almost never written: the RunInstances response has no `platformDetails`, so spawn re-described the instance it had just launched, and EC2 answers that with `InvalidInstanceID.NotFound` for a moment after launch. spawn did not retry, so spored costed the instance at the on-demand rate. 99 of 99 recent launches in one `~/.spawn/spawn.log` failed this way.
+  The billing platform now comes from the AMI, from the `DescribeImages` call the launch already makes, and the zone from the response or the request, so there is no re-describe. When one is still needed, a NotFound is retried up to three times within the existing 10s budget.
+
 ## [0.151.0] - 2026-10-30
 
 ### Added

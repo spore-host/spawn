@@ -134,18 +134,42 @@ func estimateVolumeSize(instanceType string) int32 {
 // mapping whose root DeviceName matches the AMI (#284) and is sized to at least
 // the AMI's snapshot (#25).
 func rootDeviceInfoFromAMI(ctx context.Context, ec2Client *ec2.Client, amiID string) (rootName string, minGiB int32) {
+	info := launchInfoFromAMI(ctx, ec2Client, amiID)
+	return info.rootDeviceName, info.minRootGiB
+}
+
+// amiLaunchInfo is what Launch takes from the AMI's one DescribeImages call.
+type amiLaunchInfo struct {
+	rootDeviceName string
+	minRootGiB     int32
+	// platformDetails and platform are the AMI's billing platform, which the
+	// instance launched from it inherits. The spot price lookup needs it, and
+	// RunInstances' response does not carry it (#1442).
+	platformDetails string
+	platform        types.PlatformValues
+}
+
+// launchInfoFromAMI is rootDeviceInfoFromAMI plus the AMI's billing platform,
+// from the same single DescribeImages call. Best-effort: any error returns the
+// zero value.
+func launchInfoFromAMI(ctx context.Context, ec2Client *ec2.Client, amiID string) amiLaunchInfo {
 	if amiID == "" {
-		return "", 0
+		return amiLaunchInfo{}
 	}
 	out, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{amiID},
 	})
 	if err != nil || len(out.Images) == 0 {
-		return "", 0
+		return amiLaunchInfo{}
 	}
 	img := out.Images[0]
-	rootName = aws.ToString(img.RootDeviceName)
-	return rootName, rootVolumeSizeFromMappings(rootName, img.BlockDeviceMappings)
+	rootName := aws.ToString(img.RootDeviceName)
+	return amiLaunchInfo{
+		rootDeviceName:  rootName,
+		minRootGiB:      rootVolumeSizeFromMappings(rootName, img.BlockDeviceMappings),
+		platformDetails: aws.ToString(img.PlatformDetails),
+		platform:        img.Platform,
+	}
 }
 
 // rootVolumeSizeFromMappings picks the root volume size from an AMI's block
