@@ -33,7 +33,10 @@ compare link. Both failure modes had already happened before the gate existed.
    backward-compatible features, **PATCH** for backward-compatible fixes. (Pre-1.0,
    breaking changes bump MINOR.)
 3. Update the comparison links at the bottom of the file.
-4. Tag `vX.Y.Z` — that triggers the GoReleaser release workflow.
+4. Tag `vX.Y.Z` — that triggers the GoReleaser release workflow. Its **Deploy
+   checklist** job posts on the release PR which operated Lambdas and deploy
+   inputs the release changed (#1444). How to read it is in
+   [docs/infra-account.md](docs/infra-account.md), under "Deploy checklist".
 5. **Security advisories** (#828). For each advisory whose fix is **in this
    release** (check, don't assume: `git merge-base --is-ancestor <fix> vX.Y.Z^{}`),
    set `patched_versions`. A PATCH replaces the whole `vulnerabilities` array, so

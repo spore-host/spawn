@@ -394,5 +394,15 @@ lambda-versions:
 lambda-versions-deployed:
 	@scripts/lambda-deploy-census.sh --deployed
 
+# Deploy checklist (#1444): which operated Lambdas and deploy inputs changed
+# between two refs, each code-only or manual, with its deploy command. Offline;
+# the release workflow posts it on the release PR. FROM defaults to the release
+# before TO. Add JSON=1 for the machine-readable form (#1445).
+.PHONY: deploy-checklist
+deploy-checklist:
+	@to="$(or $(TO),HEAD)"; from="$(FROM)"; \
+	[ -n "$$from" ] || from=$$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$$to^"); \
+	cd scripts && go run ./deploychecklist --from "$$from" --to "$$to" $(if $(JSON),--json)
+
 lambda-runtimes-deployed:
 	@scripts/lambda-runtime-census.sh --deployed

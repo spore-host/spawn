@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Every release now gets a deploy checklist of the operated components it changed** (#1444).
+  A release does not deploy the operated Lambdas, so someone has to work out what to redeploy.
+  For v0.151.0 that first pass was wrong: `git diff -- lambda/` showed only the #1434 files, but
+  both orchestrators compile `pkg/aws`, which #1433 changed, and only `go list -deps` caught it.
+  - **The tool.** `scripts/deploychecklist` (`make deploy-checklist FROM=… TO=…`) takes two refs.
+    It finds the Lambdas from the deploy mechanisms, using the same rules as
+    `make lambda-versions`, and a test fails if the two disagree.
+  - **What it compares.** For each Lambda: the files `go list -deps` says are compiled in, built
+    for the platform and tags in its own `go build` line; the module versions it links; and its
+    deploy script or template.
+  - **Deploy inputs.** Role, policy, mapping, stream, table and template inputs are separate
+    line items.
+  - **Labels.** Each line is marked `code-only` (a code update ships it) or `manual`, with the
+    deploy command taken from its mechanism. `--json` gives the form #1445 will consume.
+  - **On the release PR.** The release workflow posts the checklist there from a separate job.
+    It is report-only and has no AWS credentials, so it cannot block or reorder a release. Its
+    only new permission is `pull-requests: write` on that job's `GITHUB_TOKEN`.
+  - **Checked against v0.151.0.** The tool reproduces the v0.151.0 deploy record: the
+    orchestrators, ws-processor and dashboard-api are code-only; the dashboard role script and
+    the event-source mapping script are manual; the reaper is unchanged.
+
+  How to read it: `docs/infra-account.md`, "Deploy checklist".
+
 ## [0.151.0] - 2026-10-30
 
 ### Added

@@ -13,6 +13,7 @@
 //
 //	go -C scripts run ./deploychecklist --from v0.150.0 --to v0.151.0
 //	go -C scripts run ./deploychecklist --from v0.150.0 --to v0.151.0 --json
+//	make deploy-checklist FROM=v0.150.0 TO=v0.151.0
 //
 // Both refs are read with `git archive`, never checked out, so the working tree
 // is not touched. The report is read-only: it calls no AWS API.
@@ -45,6 +46,7 @@ func run(args []string, stdout io.Writer) error {
 	to := fs.String("to", "HEAD", "the new release ref")
 	repo := fs.String("repo", ".", "any directory inside the git repository")
 	asJSON := fs.Bool("json", false, "print JSON (the contract #1445 consumes) instead of markdown")
+	jsonOut := fs.String("json-out", "", "also write the JSON to this file (one computation for both forms)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -54,6 +56,15 @@ func run(args []string, stdout io.Writer) error {
 	rep, err := checklist(*repo, *from, *to, goListCompile)
 	if err != nil {
 		return err
+	}
+	if *jsonOut != "" {
+		b, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*jsonOut, append(b, '\n'), 0o644); err != nil {
+			return err
+		}
 	}
 	if *asJSON {
 		enc := json.NewEncoder(stdout)

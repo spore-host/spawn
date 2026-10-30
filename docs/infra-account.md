@@ -229,6 +229,62 @@ covers the above (#653). Known consequences:
   CLI and the control plane is readable in one API call instead of inferred from
   `LastModified`.
 
+## Deploy checklist
+
+A release does not deploy any of the functions above. After each tag, the
+release workflow's **Deploy checklist** job (#1444) posts a comment on the
+release PR saying which operated components the release changed. If no single
+PR matches, the comment goes to that job's summary instead. To produce the same
+report locally, offline:
+
+```sh
+make deploy-checklist TO=v0.151.0            # FROM defaults to the previous tag
+make deploy-checklist FROM=v0.150.0 TO=v0.151.0 JSON=1
+```
+
+**Where the list comes from.** It is not a hand-written list. The Lambdas are
+the ones the deploy mechanisms name, discovered by the same rules as
+`make lambda-versions`. A test fails if the two ever disagree. For each Lambda,
+the tool runs `go list -deps` with the `GOOS`, `GOARCH` and `-tags` from that
+mechanism's own `go build` line, at both refs. It then compares the repo files
+that are compiled in, which can live in its own module or its `replace ../..`
+parent. It also compares the third-party module versions the binary links,
+the main module's `go` directive, and the deploy script or template itself.
+
+**How to read each line.**
+
+- **code-only**: only compiled inputs changed. A code update ships it: run
+  the listed command from a clean checkout of the tag. #1445 will deploy
+  these lines automatically, once the owner approves, and nothing else.
+- **manual**: something other than code changed. That can be the Lambda's own
+  deploy script, its template or Makefile, or a file they read. It can also be a
+  separate deploy input, listed as its own line under *Other deploy inputs*:
+  - a script that makes a control-plane change (IAM role or policy, event-source
+    mapping, DynamoDB table or stream, API Gateway, DNS, KMS);
+  - a CloudFormation or SAM template;
+  - a policy document a script applies with `file://`;
+  - a script that runs one of those.
+
+  Review the diff and apply it by hand, the way v0.151.0's role and mapping
+  changes were applied (snapshot, dry run, apply, diff; the record is on PR
+  #1440).
+- **added**: a new mechanism, so this is the function's first deploy.
+- **removed**: nothing deploys it any more, so tear down what it created.
+
+**What is not counted.** These never mark a component changed: `_test.go`
+files, docs, a package the Lambda does not compile, a Dependabot bump to a module
+it does not link, and DynamoDB item writes (backfills are data, not deploys).
+EC2, EFS and FSx calls are workload resources, not operated state, so a smoke
+test is not a deploy input.
+
+**What it cannot judge.** A changed line means the shipped bytes differ. It
+does not mean the behaviour does. On v0.151.0 the tool reports `dashboard-api` as
+changed (code-only), because it deleted unused types. The owner chose not to
+redeploy it. The orchestrators changed only behind a flag they never set, and
+they were redeployed anyway so their version stamps would match. Deciding
+whether a changed line needs a deploy is still the operator's call. The tool
+only makes sure the question gets asked about every component.
+
 ## Known traps
 
 Recorded because each cost a real failure:
