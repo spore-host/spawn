@@ -56,6 +56,13 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// And --no-public-ip on a path that does not build its config from the
+	// launch flags (#1433), which would drop it and launch with a public IP.
+	if err := validateNoPublicIPPath(batchQueueFile != "" || queueTemplate != "",
+		launchMode(interactive, instanceType, isTerminal(os.Stdin)) == modeWizard); err != nil {
+		return err
+	}
+
 	// Reject an unparseable --ttl/--idle-timeout (etc.) before any AWS call,
 	// on every launch path below (#990).
 	if err := validateLaunchDurationFlags(); err != nil {

@@ -209,24 +209,6 @@ func (s LaunchSettings) Apply(input *ec2.RunInstancesInput) error {
 	return nil
 }
 
-// applyNoPublicIP makes a private-only launch (#1433) ask for no public IP on
-// any interface. A single interface says so explicitly: left unset, a subnet
-// with MapPublicIpOnLaunch (every default subnet) assigns one anyway. With more
-// than one, EC2 accepts no AssociatePublicIpAddress at all and assigns none, so
-// it is left unset (the multi-card EFA layout never sets it).
-func applyNoPublicIP(input *ec2.RunInstancesInput, lc LaunchConfig) {
-	if !lc.NoPublicIP {
-		return
-	}
-	if len(input.NetworkInterfaces) == 1 {
-		input.NetworkInterfaces[0].AssociatePublicIpAddress = aws.Bool(false)
-		return
-	}
-	for i := range input.NetworkInterfaces {
-		input.NetworkInterfaces[i].AssociatePublicIpAddress = nil
-	}
-}
-
 // applyLaunchSettings sets the RunInstances fields Client.Launch derives from
 // lc beyond the instance type, AMI, key, profile, client token, user data and
 // tags: block devices, CPU options, network interfaces (unless input already
@@ -271,7 +253,6 @@ func applyLaunchSettings(input *ec2.RunInstancesInput, lc LaunchConfig, rootDevi
 			input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{ni}
 		}
 	}
-	applyNoPublicIP(input, lc)
 
 	// Add placement (AZ, placement group, and reservation)
 	placement := &types.Placement{}

@@ -73,9 +73,13 @@ var detachedDispositions = map[string]detachedDisposition{
 	// Refused on its own (#1404): with EFAInterfaces 0 there is no secondary
 	// card, and with more the multi-card launch itself is refused.
 	"EFASecondaryType": {refused: true, prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
-	"EBSKMSKeyID":      {refused: true, settings: true},
-	"FSxLustreCreate":  {refused: true},
-	"FSxLustreRecall":  {refused: true},
+	// Refused, not carried (#1433): the subnet check runs at launch with the
+	// caller's VPC reads, which the orchestrator does not make.
+	"NoPublicIP":            {refused: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	"AllowMissingEndpoints": {refused: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	"EBSKMSKeyID":           {refused: true, settings: true},
+	"FSxLustreCreate":       {refused: true},
+	"FSxLustreRecall":       {refused: true},
 
 	"PlacementGroupPrefix": {why: whyNotSweep + " (an MPI job array's per-AZ groups)"},
 	"DNSFunctionARN":       {why: whyNotSweep + " (the custom-DNS preflight, which a sweep does not run on either path)"},

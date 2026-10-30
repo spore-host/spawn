@@ -466,6 +466,24 @@ func defaultRoute(rt types.RouteTable) (nat, other string) {
 	return "", other
 }
 
+// applyNoPublicIP makes a private-only launch (#1433) ask for no public IP on
+// any interface. A single interface says so explicitly: left unset, a subnet
+// with MapPublicIpOnLaunch (every default subnet) assigns one anyway. With more
+// than one, EC2 accepts no AssociatePublicIpAddress at all and assigns none, so
+// it is left unset (the multi-card EFA layout never sets it).
+func applyNoPublicIP(input *ec2.RunInstancesInput, lc LaunchConfig) {
+	if !lc.NoPublicIP {
+		return
+	}
+	if len(input.NetworkInterfaces) == 1 {
+		input.NetworkInterfaces[0].AssociatePublicIpAddress = aws.Bool(false)
+		return
+	}
+	for i := range input.NetworkInterfaces {
+		input.NetworkInterfaces[i].AssociatePublicIpAddress = nil
+	}
+}
+
 // PreflightNoPublicIP settles a private-only launch's network before anything
 // is created (#1433): with only an AZ, the subnet SubnetInAZ picks is pinned
 // on cfg (and printed to out), so the instance launches in the subnet that was

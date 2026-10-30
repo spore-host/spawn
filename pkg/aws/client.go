@@ -710,6 +710,11 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// options. Shared with a detached sweep member's launch (LaunchSettings), so
 	// the Lambda that launches one composes these exactly as this does (#1353).
 	applyLaunchSettings(input, launchConfig, rootDeviceName, amiMinGiB, tags)
+	// No public IP on any interface (#1433). Here rather than in
+	// applyLaunchSettings, like the multi-card EFA layout above: it comes with
+	// a subnet check only Launch runs, and a detached sweep refuses it
+	// (cmd/launch_sweep_detached_settings.go).
+	applyNoPublicIP(input, launchConfig)
 
 	// Launch instance. runInstancesWithRetry retries only the narrow #572
 	// transient (a freshly-created scoped instance profile that's visible on

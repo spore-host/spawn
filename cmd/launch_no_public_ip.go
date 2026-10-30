@@ -43,6 +43,25 @@ func validateNoPublicIPFlags() error {
 	return nil
 }
 
+// validateNoPublicIPPath refuses --no-public-ip (and --allow-missing-endpoints)
+// on the two launch paths that do not build their config from the launch
+// flags, which would drop it and launch with a public IP: the batch queue
+// (batchQueueLaunchConfig, which also registers DNS) and the wizard.
+func validateNoPublicIPPath(batchQueue, wizard bool) error {
+	if !noPublicIP && !allowMissingEndpoints {
+		return nil
+	}
+	switch {
+	case batchQueue:
+		return errors.New("--no-public-ip is not supported with --batch-queue or --queue-template: the queue instance's config " +
+			"is built from the queue file, not the launch flags, and registers DNS, which needs a public IP")
+	case wizard:
+		return errors.New("--no-public-ip is not supported by the interactive wizard, which does not read the launch flags; " +
+			"pass --instance-type (and --subnet-id or --az) to launch with flags")
+	}
+	return nil
+}
+
 // noPublicIPInternetNeeds are what this launch's bootstrap fetches from outside
 // AWS beyond what the config itself names (aws.CheckPrivateNetwork reads
 // those): only a NAT route reaches them.
