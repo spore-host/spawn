@@ -73,9 +73,13 @@ var detachedDispositions = map[string]detachedDisposition{
 	// Refused on its own (#1404): with EFAInterfaces 0 there is no secondary
 	// card, and with more the multi-card launch itself is refused.
 	"EFASecondaryType": {refused: true, prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
-	"EBSKMSKeyID":      {refused: true, settings: true},
-	"FSxLustreCreate":  {refused: true},
-	"FSxLustreRecall":  {refused: true},
+	// Refused, not carried (#1433): the subnet check runs at launch with the
+	// caller's VPC reads, which the orchestrator does not make.
+	"NoPublicIP":            {refused: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	"AllowMissingEndpoints": {refused: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	"EBSKMSKeyID":           {refused: true, settings: true},
+	"FSxLustreCreate":       {refused: true},
+	"FSxLustreRecall":       {refused: true},
 
 	"PlacementGroupPrefix": {why: whyNotSweep + " (an MPI job array's per-AZ groups)"},
 	"DNSFunctionARN":       {why: whyNotSweep + " (the custom-DNS preflight, which a sweep does not run on either path)"},
@@ -327,6 +331,7 @@ func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 	}{
 		"fsx-create":          {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
 		"fsx-recall":          {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
+		"no public ip":        {base: aws.LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1"}, want: "--no-public-ip", alt: "--no-detach"},
 		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, row: map[string]interface{}{"instance_type": "p5en.48xlarge"}, want: "--efa with 4 EFA interfaces", alt: "--no-detach"},
 		"every-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa with 2 EFA interfaces", alt: "--efa-interfaces 1"},
 		"efa secondary type":  {base: aws.LaunchConfig{EFAEnabled: true, EFASecondaryType: "efa"}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa-secondary-type efa", alt: "--no-detach"},

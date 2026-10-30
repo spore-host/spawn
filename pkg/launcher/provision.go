@@ -104,6 +104,12 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	if err := config.ValidateEFASubnet(); err != nil {
 		return nil, fmt.Errorf("provision: %w", err)
 	}
+	// And a private-only launch (#1433) with no subnet or AZ to check, or with
+	// DNS registration, which needs a public IP. Client.Launch then checks
+	// the subnet's endpoints before RunInstances.
+	if err := config.ValidateNoPublicIP(); err != nil {
+		return nil, fmt.Errorf("provision: %w", err)
+	}
 	if config.InstanceType == "" {
 		return nil, fmt.Errorf("provision: instance type is required")
 	}

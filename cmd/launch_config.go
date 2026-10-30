@@ -235,6 +235,13 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if err := validateEFAGroup(efaGroup, efaEnabled); err != nil {
 		return nil, err
 	}
+	// --no-public-ip (#1433): the flags it cannot be combined with, before
+	// anything is created. The subnet check needs AWS and runs in
+	// ensureAMIAndPreflight.
+	if err := validateNoPublicIPFlags(); err != nil {
+		return nil, err
+	}
+	config.NoPublicIP, config.AllowMissingEndpoints = noPublicIP, allowMissingEndpoints
 	// --placement-group without --mpi: same gap. The flag was applied only in
 	// resolveMPIPlacement, which returns early when --mpi is off, so an explicit
 	// cluster placement group was silently ignored on a single launch.
@@ -298,7 +305,14 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	// gate only the CLI's own registration attempt, while spored registered the
 	// name anyway: "skip DNS registration entirely" skipped nothing (#872).
 	if dnsName != "" && dnsRegistrationEnabled() {
-		config.DNSName = dnsName
+		if noPublicIP {
+			// The record --name implies is skipped: spored registers the public
+			// IP, and there is none (#1433). An explicit --dns is refused by
+			// validateNoPublicIPFlags.
+			fmt.Fprintf(os.Stderr, "ℹ️  --no-public-ip: no DNS record for %s (spored registers the public IP, and there is none); `spawn connect %s` uses SSM\n", dnsName, name)
+		} else {
+			config.DNSName = dnsName
+		}
 	}
 	if slackWorkspaceID != "" {
 		config.SlackWorkspaceID = slackWorkspaceID

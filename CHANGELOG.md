@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn launch --no-public-ip`: private IPs only** (#1433). No public IP is requested on any
+  interface (a single interface now asks for none explicitly, since a default subnet would
+  otherwise assign one), and a multi-card `--efa` launch allocates, associates and later releases
+  no Elastic IP, so the region's Elastic IP quota no longer limits a fleet that never uses the
+  addresses. Off by default; without it nothing changes. Needs `--subnet-id`, or `--az` to let
+  spawn pick a subnet, which is then pinned (a job array or MPI cohort launches every member there
+  rather than falling back across AZs into unchecked subnets).
+- **A pre-flight check that the subnet can serve a private-only instance** (#1433). Before
+  anything is created, spawn reads the subnet's route table and its VPC's endpoints and refuses
+  the launch, listing what is missing, unless it finds a NAT gateway route, or: an S3 gateway
+  endpoint on the subnet's route table (the bootstrap's spored download uses the global-style S3
+  name, which an S3 interface endpoint does not serve), and interface endpoints with private DNS
+  enabled for `ec2`, `ssm`, `ssmmessages` and `ec2messages`. Conditional needs are checked too:
+  `dynamodb` for a `spawn burst` member, `fsx` with `--fsx-create`, and a NAT route for webhooks,
+  Slack notifications, the Windows bootstrap's AWS CLI download and the MPI bootstrap's EFA
+  installer. An interface endpoint with private DNS disabled does not count; one with no subnet in
+  the instance's AZ counts with a warning. The list is held to spored's own AWS calls by a gate over
+  its call graph. `--allow-missing-endpoints` launches anyway, still listing what is missing.
+  The check needs `ec2:DescribeRouteTables` and `ec2:DescribeVpcEndpoints` (read-only) on the
+  launching identity, and the nested-spawn role now grants both.
+- `spawn launch --dry-run` shows `Public IP: none (private only)` for `--no-public-ip` (#1433).
+
+### Changed
+
+- **`--no-public-ip` refuses what needs a public IP** (#1433): `--dns`, the custom DNS target flags
+  and `--wait-for-ssh`; the DNS record `--name` implies is skipped with a notice. It is also refused
+  on a detached sweep (the subnet check runs at launch with your credentials, and the orchestrator
+  launches later without it: use `--no-detach`), with `--batch-queue`/`--queue-template` and in the
+  wizard, which do not read the launch flags. A foreground sweep and `spawn sweep resume` check
+  every member's subnet.
+- `spawn connect` to an instance with no public IP now says it is using SSM Session Manager, and
+  that `--ssh` needs a public IP, instead of switching silently (#1433).
+- The nested-spawn role's grant document gains two read-only actions, so its role name (a hash of
+  the document) changes: a nested launch after upgrading creates a new `spawn-instance-nested-*`
+  role, and the old one is deleted by the TTL reaper's instance-role sweep (or `spawn cleanup
+  --instance-roles`) once nothing has used it for 24h, as the design intends (#1433).
+
 ### Removed
 
 - Leftovers of autoscale, which was removed in #772, are gone (#1434). The table `spawn-autoscale-groups-production` no longer exists, but the dashboard WebSocket processor still had a case for its stream, the dashboard role's `ProcessorStreams` statement still granted read access to that stream, and `enable-streams.sh` and `setup-event-source-mappings.sh` still listed the table. The unused `AutoScaleGroupInfo`, `GroupDetailInfo` and `GroupInstanceInfo` dashboard-api models, the one-off `backfill-autoscale-user-ids.py` script and the `/api/autoscale-groups` hint in `setup-all.sh` are removed too. The next run of the role script narrows `ProcessorStreams` to the sweep table's stream. The umbrella dashboard's own Autoscale Groups tab is tracked in spore-host/spore-host#617.

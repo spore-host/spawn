@@ -385,6 +385,12 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	if err := preflightSweepElasticIPs(ctx, awsClient, launchConfigs, os.Stderr); err != nil {
 		return err
 	}
+	// --no-public-ip (#1433): each member's subnet, pinned and checked for the
+	// endpoints or NAT route a private instance needs. Before the EFA subnets,
+	// which then find it set.
+	if err := preflightSweepNoPublicIP(ctx, awsClient, launchConfigs, nil, os.Stderr); err != nil {
+		return err
+	}
 	// And each multi-card member's subnet, or the refusal (#1410).
 	if err := resolveSweepEFASubnets(ctx, awsClient, launchConfigs, nil, os.Stderr); err != nil {
 		return err

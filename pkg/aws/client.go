@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -39,6 +40,10 @@ import (
 // for spawn-managed instances. Create one with [NewClient] or [NewClientFromConfig].
 type Client struct {
 	cfg aws.Config
+	// privateNets caches DescribePrivateNetwork by region and subnet, so a
+	// --no-public-ip check the CLI ran before creating anything is not
+	// repeated by Launch, nor once per member of a job array (#1433).
+	privateNets sync.Map
 }
 
 // CallerVersion is the resolved version of the launching spawn binary,
@@ -209,6 +214,21 @@ type LaunchConfig struct {
 	// primary interface gets the Elastic IP either way. "efa" without a
 	// multi-card EFA launch is refused (ValidateEFASecondaryType).
 	EFASecondaryType string
+	// NoPublicIP launches the instance with private IPs only (#1433): no
+	// AllocateAddress, AssociateAddress or Elastic IP release, and no public
+	// IP requested on any interface (a single interface asks for none
+	// explicitly, since a default subnet would otherwise assign one). Launch
+	// needs SubnetID or AvailabilityZone (an AZ is resolved to a subnet and
+	// pinned) and first checks the subnet can reach what spored and the SSM
+	// agent need, through VPC endpoints or a NAT route
+	// ([CheckPrivateNetwork]); it refuses a subnet that cannot, unless
+	// AllowMissingEndpoints is set. DNS registration needs a public IP and is
+	// refused with it.
+	NoPublicIP bool
+	// AllowMissingEndpoints launches a NoPublicIP instance even when the
+	// subnet's VPC lacks an endpoint or NAT route it needs (#1433). The
+	// missing services are still listed. Without NoPublicIP it is refused.
+	AllowMissingEndpoints bool
 
 	// spawn-specific tags
 	TTL             string
@@ -548,9 +568,23 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	if err := launchConfig.ValidateEFASubnet(); err != nil {
 		return nil, err
 	}
+	// And a private-only launch (#1433) with no subnet to check, or with DNS
+	// registration, which needs the public IP it will not have.
+	if err := launchConfig.ValidateNoPublicIP(); err != nil {
+		return nil, err
+	}
 
 	// Update config for region
 	ec2Client := c.regionalEC2(launchConfig.Region)
+
+	// A private-only launch checks, before anything is created, that its subnet
+	// can reach what spored and the SSM agent need (#1433). The CLI has run it
+	// already, so this is a cache hit there; an SDK caller gets it here. With
+	// only an AZ the subnet is chosen and pinned, so the check is of the subnet
+	// the instance lands in.
+	if _, err := c.PreflightNoPublicIP(ctx, &launchConfig, nil, os.Stderr); err != nil {
+		return nil, err
+	}
 
 	if launchConfig.SpawnVersion == "" {
 		launchConfig.SpawnVersion = CallerVersion
@@ -676,6 +710,11 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// options. Shared with a detached sweep member's launch (LaunchSettings), so
 	// the Lambda that launches one composes these exactly as this does (#1353).
 	applyLaunchSettings(input, launchConfig, rootDeviceName, amiMinGiB, tags)
+	// No public IP on any interface (#1433). Here rather than in
+	// applyLaunchSettings, like the multi-card EFA layout above: it comes with
+	// a subnet check only Launch runs, and a detached sweep refuses it
+	// (cmd/launch_sweep_detached_settings.go).
+	applyNoPublicIP(input, launchConfig)
 
 	// Launch instance. runInstancesWithRetry retries only the narrow #572
 	// transient (a freshly-created scoped instance profile that's visible on
@@ -718,7 +757,9 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// interface once the instance is running, so SSH, `spawn connect`, DNS and
 	// spored all see a public address as on any other launch. If that fails the
 	// instance is terminated rather than left running unreachable.
-	if NeedsLaunchElasticIP(input.NetworkInterfaces) {
+	// With NoPublicIP (#1433) there is no public address to give it: no
+	// Elastic IP is allocated, associated or later released.
+	if !launchConfig.NoPublicIP && NeedsLaunchElasticIP(input.NetworkInterfaces) {
 		// The ARN tag is what lets spored release the address itself (#661);
 		// RunInstances reports the owning account, so no extra call is needed.
 		instanceARN := ""

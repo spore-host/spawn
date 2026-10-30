@@ -181,7 +181,9 @@ const (
 // linuxConnectTransport picks SSH or SSM for a Linux instance (#1296), and any
 // note to print about the choice.
 //
-//   - --session-manager, or no public IP: SSM, as before.
+//   - --session-manager: SSM, as before.
+//   - no public IP (a --no-public-ip launch, #1433): SSM, with a note saying
+//     why, which also answers an --ssh it cannot honour.
 //   - --ssh: SSH, as before, without reading the security groups.
 //   - otherwise the groups are read once: if none can admit the SSH port, SSM
 //     straight away, saying why. If they might (or cannot be read), SSH as
@@ -194,8 +196,18 @@ const (
 // command and waited on stdin.
 func linuxConnectTransport(ctx context.Context, sessionMgr, forceSSH, oneShot bool, publicIP string, port int32,
 	ingress func(ctx context.Context, port int32) (aws.PortIngress, error)) (connectTransport, string, error) {
-	if sessionMgr || publicIP == "" {
+	if sessionMgr {
 		return connectTransportSSM, "", nil
+	}
+	if publicIP == "" {
+		// A private-only instance (--no-public-ip, #1433, or a private subnet):
+		// SSM is the only way in, and saying so beats a silent switch, above
+		// all when --ssh asked for the other.
+		note := fmt.Sprintf("%s the instance has no public IP (private only), so connect uses SSM Session Manager.\n", i18n.Symbol("info"))
+		if forceSSH {
+			note = fmt.Sprintf("%s --ssh needs a public IP, and this instance has none (private only); using SSM Session Manager instead.\n", i18n.Symbol("info"))
+		}
+		return connectTransportSSM, note, nil
 	}
 	if forceSSH {
 		return connectTransportSSH, "", nil

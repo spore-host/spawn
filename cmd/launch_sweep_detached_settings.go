@@ -44,6 +44,15 @@ func detachedSettingsGuard(cfg aws.LaunchConfig) error {
 		return fmt.Errorf("%s cannot be used on a detached sweep: %s. %s", what, why, instead)
 	}
 	switch {
+	case cfg.NoPublicIP || cfg.AllowMissingEndpoints:
+		// Refused rather than carried (#1433): the subnet check needs the
+		// caller's VPC reads at the moment of launch, in the subnet the member
+		// lands in, and the orchestrator launches later, without it. Before the
+		// EFA cases, so the refusal names this flag rather than the multi-card
+		// layout it would otherwise make possible.
+		return refuse("--no-public-ip", "the check that the member's subnet can reach what spored and the SSM agent "+
+			"need (VPC endpoints or a NAT route) runs at launch with your credentials, and the orchestrator launches "+
+			"members later without it", noDetach)
 	case cfg.EFASecondaryType != "" && cfg.EFASecondaryType != aws.EFASecondaryTypeEFAOnly:
 		// Applies only to a multi-card EFA launch, which is refused below; named
 		// here so the refusal says which flag to drop (#1404).

@@ -232,6 +232,7 @@ field InstanceInfo.Tags map[string]string
 field LaunchConfig.AMI string
 field LaunchConfig.ActivePortsRaw string
 field LaunchConfig.ActiveProcessesRaw string
+field LaunchConfig.AllowMissingEndpoints bool
 field LaunchConfig.AppMode string
 field LaunchConfig.AppName string
 field LaunchConfig.AttachVolumes []AttachVolumeSpec
@@ -283,6 +284,7 @@ field LaunchConfig.JobArraySize int
 field LaunchConfig.KeyName string
 field LaunchConfig.Name string
 field LaunchConfig.NestedVirtualization bool
+field LaunchConfig.NoPublicIP bool
 field LaunchConfig.NotifyCommand string
 field LaunchConfig.NotifyPlatform string
 field LaunchConfig.NotifyURL string
@@ -371,6 +373,31 @@ field PortIngress.Open bool
 field PortIngress.Port int32
 field PreparedImage.Cleanup func()
 field PreparedImage.Reader io.ReadCloser
+field PrivateCheck.Met []string
+field PrivateCheck.Missing []string
+field PrivateCheck.Network PrivateNetwork
+field PrivateCheck.Warnings []string
+field PrivateEndpoint.AvailabilityZones []string
+field PrivateEndpoint.ID string
+field PrivateEndpoint.PrivateDNS bool
+field PrivateEndpoint.RouteTableIDs []string
+field PrivateEndpoint.Service string
+field PrivateEndpoint.State string
+field PrivateEndpoint.Type string
+field PrivateNetwork.AvailabilityZone string
+field PrivateNetwork.DefaultRoute string
+field PrivateNetwork.Endpoints []PrivateEndpoint
+field PrivateNetwork.NATGatewayID string
+field PrivateNetwork.Region string
+field PrivateNetwork.RouteTableID string
+field PrivateNetwork.SubnetID string
+field PrivateNetwork.VPCID string
+field PrivateService.Endpoint string
+field PrivateService.Gateway bool
+field PrivateService.GatewayOnly bool
+field PrivateService.IAMPrefixes []string
+field PrivateService.When string
+field PrivateService.Why string
 field ReaperCoverage.Covered bool
 field ReaperCoverage.Determined bool
 field ReaperCoverage.How string
@@ -456,6 +483,7 @@ func (*Client) DeleteS3Object(ctx context.Context, region, bucket, key string) e
 func (*Client) DescribeAvailabilityZones(ctx context.Context, region string) ([]string, error)
 func (*Client) DescribeCapacityReservation(ctx context.Context, region, reservationID string) (*CapacityReservation, error)
 func (*Client) DescribeFSxBrief(ctx context.Context, filesystemID, region string) (FSxBrief, error)
+func (*Client) DescribePrivateNetwork(ctx context.Context, region, subnetID string) (PrivateNetwork, error)
 func (*Client) DescribeSporedLiveness(ctx context.Context, region, instanceID string) (SporedLiveness, error)
 func (*Client) DiscoverManagedResources(ctx context.Context, opts DiscoverOptions) ([]ManagedResource, int, error)
 func (*Client) EFACapacityInRegion(ctx context.Context, instanceType, region string) (EFACapacity, error)
@@ -508,6 +536,7 @@ func (*Client) ListS3Keys(ctx context.Context, region, bucket, prefix, expectedO
 func (*Client) LiveInstancesWithTag(ctx context.Context, region, key, value string) ([]InstanceInfo, error)
 func (*Client) NewLaunchTagger(ctx context.Context) (*LaunchTagger, error)
 func (*Client) OpenImageSource(ctx context.Context, source, region string) (io.ReadCloser, error)
+func (*Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, internet []string, out io.Writer) (PrivateCheck, error)
 func (*Client) PrepareSnapshotImage(ctx context.Context, source, region string, maxBytes int64, tempDir string) (*PreparedImage, error)
 func (*Client) PurchaseCapacityBlock(ctx context.Context, region, offeringID, platform string, dryRun bool, tags map[string]string) (string, error)
 func (*Client) PutS3Object(ctx context.Context, region, bucket, key, expectedOwner string, body []byte) error
@@ -559,12 +588,15 @@ func (LaunchConfig) ValidateDurations() error
 func (LaunchConfig) ValidateEFASecondaryType() error
 func (LaunchConfig) ValidateEFASubnet() error
 func (LaunchConfig) ValidateNestedSpawnTTL() error
+func (LaunchConfig) ValidateNoPublicIP() error
 func (LaunchConfig) ValidateSporedSettings() error
 func (LaunchConfig) ValidateTagCount() error
 func (LaunchConfig) ValidateUserDataSize() error
 func (LaunchSettings) Apply(input *ec2.RunInstancesInput) error
 func (ManagedResource) IsRunningInstance() bool
 func (ManagedResource) OwnedBy(callerARN string) bool
+func (PrivateCheck) OK() bool
+func (PrivateService) AppliesTo(cfg LaunchConfig) bool
 func (ReaperCoverage) Summary() string
 func (SporedObservability) Validate() error
 func AccountBase36(accountID string) string
@@ -574,6 +606,7 @@ func BuildLaunchTags(lc LaunchConfig, accountID, userARN, accountNameSlug string
 func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error
 func CheckElasticIPHeadroom(q ElasticIPQuota, region string, need int) error
 func CheckNestedSpawnTTL(source, profile, ttl string) error
+func CheckPrivateNetwork(n PrivateNetwork, cfg LaunchConfig, internet []string) PrivateCheck
 func CheckUserDataSize(encoded string) error
 func DNSInvokePolicyName(functionARN string) string
 func DecodeLaunchSettings(raw interface{}) (LaunchSettings, error)
@@ -619,6 +652,7 @@ func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
 func NewLaunchSettings(lc LaunchConfig, rootDeviceName string, amiMinGiB int32) LaunchSettings
 func PostLaunchTagKeys() []string
 func PredictedInstanceRoleName(config IAMRoleConfig) string
+func PrivateServices() []PrivateService
 func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) string
 func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, region string) (DisplayPrice, error)
 func RetryPlacementGroupDelete(ctx context.Context, name string, del func() error) error
@@ -667,6 +701,10 @@ type ManagedResource struct
 type MountSnapshotResult struct
 type PortIngress struct
 type PreparedImage struct
+type PrivateCheck struct
+type PrivateEndpoint struct
+type PrivateNetwork struct
+type PrivateService struct
 type ReaperCoverage struct
 type S3BucketConfig struct
 type SSMRunResult struct
@@ -684,7 +722,9 @@ var ErrAMIWaitExhausted
 var ErrEFANeedsSubnet
 var ErrNestedSpawnNeedsTTL
 var ErrNestedSpawnRoleReserved
+var ErrNoPublicIPNeedsSubnet
 var ErrNotSpawnManagedAMI
+var ErrPrivateNetworkIncomplete
 var ErrS3NoSuchKey
 var ErrSSMUnreachable
 var ErrWaitTimeout
