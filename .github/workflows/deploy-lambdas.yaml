@@ -1,0 +1,181 @@
+name: Deploy Lambdas
+
+# Approval-gated deploy of a release's code-only Lambda changes (#1445).
+#
+# What it deploys is decided by scripts/deploychecklist (#1444) for
+# <previous tag>..<this tag>: only Lambdas whose status is "changed" and whose
+# deploy kind is "code-only". A Lambda whose own deploy script, template or
+# Makefile changed, and every role, policy, mapping or template input, stays a
+# manual deploy and is listed as such in the record. scripts/deploylambdas does
+# the deploy: pre-flight, build, save the live code, update, verify the
+# CodeSha256 and an empty configuration diff, stamp spawn:version, and roll back
+# on any failure after the update. See docs/infra-account.md, "Deploying
+# code-only changes from CI".
+#
+# Two ways in:
+#   - workflow_call from release.yaml, after the release job succeeded (so the
+#     release's spored and bootstrap body are published);
+#   - workflow_dispatch on a tag, with dry_run defaulting to true.
+#
+# The deploy job runs in the `production` environment: the owner must approve
+# it, admins cannot bypass that, and only v* tags may deploy. Only a job in that
+# environment can assume GitHubActions-spawn-lambda-deploy, whose trust is the
+# OIDC subject repo:spore-host/spawn:environment:production
+# (scripts/setup-lambda-deploy-ci-role.sh). Nothing runs until it is approved,
+# and a pending approval blocks no other job.
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: Pre-flight, build and save only; change nothing
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Pre-flight, build and save only; change nothing
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  # Without credentials or the environment: refuse a non-release ref before the
+  # owner is asked to approve anything, and show what the deploy would cover.
+  plan:
+    name: Plan the Lambda deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      prev: ${{ steps.plan.outputs.prev }}
+    steps:
+      - name: Refuse a non-release ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != tag ] || ! [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::run this on a release tag (vX.Y.Z), not ${REF_TYPE} ${REF_NAME}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+
+      - name: Compute the deploy checklist
+        id: plan
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${GITHUB_REF_NAME}^")"
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
+          out="${RUNNER_TEMP}/deploy-checklist"
+          mkdir -p "$out"
+          (cd scripts && go run ./deploychecklist --from "$prev" --to "$GITHUB_REF_NAME" --json-out "$out/checklist.json") > "$out/checklist.md"
+          {
+            echo "## Lambda deploy plan: ${prev}..${GITHUB_REF_NAME} (dry_run: ${DRY_RUN})"
+            echo
+            echo "On approval, the deploy job ships only the lines below marked **code-only**; every other line stays manual."
+            echo
+            cat "$out/checklist.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy code-only Lambdas
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: production
+    # One deploy at a time, and never cancel one that is running: a cancelled
+    # deploy could stop between an update and its rollback.
+    concurrency:
+      group: deploy-lambdas-production
+      cancel-in-progress: false
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+
+      # Recomputed here rather than passed from the plan job, from this job's
+      # own checkout of the tag, outside the tree (the deployer refuses a dirty
+      # one).
+      - name: Compute the deploy checklist
+        env:
+          PREV: ${{ needs.plan.outputs.prev }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/deploy-lambdas"
+          mkdir -p "$out"
+          (cd scripts && go run ./deploychecklist --from "$PREV" --to "$GITHUB_REF_NAME" --json-out "$out/checklist.json") > /dev/null
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::966362334030:role/GitHubActions-spawn-lambda-deploy
+          role-session-name: deploy-lambdas
+          aws-region: us-east-1
+
+      - name: Deploy
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/deploy-lambdas"
+          rc=0
+          (cd scripts && go run ./deploylambdas \
+            --checklist "$out/checklist.json" \
+            --tag "$GITHUB_REF_NAME" \
+            --dry-run="$DRY_RUN" \
+            --record-md "$out/record.md" \
+            --record-json "$out/record.json") || rc=$?
+          if [ -s "$out/record.md" ]; then
+            cat "$out/record.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+      # Posted on the release PR, found as release.yaml's deploy-checklist job
+      # finds it: the one merged PR whose merge commit is the tagged commit.
+      # Posted whether the deploy passed or failed, since a failed record says
+      # what was rolled back.
+      - name: Post the deploy record on the release PR
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/deploy-lambdas"
+          if [ ! -s "$out/record.md" ]; then
+            echo "::warning::no deploy record was written; see the Deploy step's log"
+            exit 0
+          fi
+          sha="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          prs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
+            --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"${sha}\") | .number] | unique | .[]")"
+          n="$(printf '%s\n' "$prs" | grep -c . || true)"
+          if [ "$n" != 1 ]; then
+            echo "::warning::found ${n} merged PRs whose merge commit is ${sha}, not exactly one; the deploy record is in this job's summary instead"
+            exit 0
+          fi
+          gh pr comment "$prs" --repo "$GITHUB_REPOSITORY" --body-file "$out/record.md"
+          echo "✅ Posted the deploy record on #${prs}"
