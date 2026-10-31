@@ -287,7 +287,7 @@ func init() {
 	launchCmd.Flags().StringVar(&region, "region", "",
 		"AWS region. Precedence: this flag > SPORE_REGION/AWS_REGION > your spore config > auto-detect "+
 			"(auto-detect picks the lowest-latency region that actually offers the instance type)")
-	launchCmd.Flags().StringVar(&az, "az", "", "Availability zone")
+	launchCmd.Flags().StringVar(&az, "az", "", "Availability zone. Pins the launch there; without it (and without --subnet-id), a single launch that hits a capacity error (InsufficientInstanceCapacity) tries the other zones that offer the instance type")
 	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023")
 	launchCmd.Flags().StringVar(&osFlag, "os", "", "Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset.")
 	launchCmd.Flags().BoolVar(&nestedVirt, "nested-virtualization", false, "Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type.")

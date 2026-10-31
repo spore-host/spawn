@@ -334,6 +334,7 @@ field LaunchResult.PrivateIP string
 field LaunchResult.PublicIP string
 field LaunchResult.Region string
 field LaunchResult.State string
+field LaunchResult.ZoneAttempts []ZoneAttempt
 field LaunchSettings.AttachVolumes []LaunchSettingsVolume
 field LaunchSettings.AvailabilityZone string
 field LaunchSettings.CapacityBlock bool
@@ -450,6 +451,17 @@ field TagLimitError.Spored []string
 field TagLimitError.SporedSettings []string
 field UserDataTooLargeError.DecodedBytes int
 field UserDataTooLargeError.EncodedBytes int
+field ZoneAttempt.Code string
+field ZoneAttempt.Message string
+field ZoneAttempt.Zone string
+field ZoneFallbackError.Attempts []ZoneAttempt
+field ZoneFallbackError.Blocker string
+field ZoneFallbackError.InstanceType string
+field ZoneFallbackError.LookupErr error
+field ZoneFallbackError.OtherZones []string
+field ZoneFallbackError.Region string
+field ZoneOfferings.Launchable []string
+field ZoneOfferings.Offered []string
 func (*AccessDeniedError) Error() string
 func (*AccessDeniedError) Unwrap() error
 func (*Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*MountSnapshotResult, error)
@@ -527,8 +539,10 @@ func (*Client) InstanceMemoryMiB(ctx context.Context, region, instanceType strin
 func (*Client) InstancePortIngress(ctx context.Context, region, instanceID string, port int32) (PortIngress, error)
 func (*Client) InstanceProfileReady(ctx context.Context, name string) (bool, error)
 func (*Client) InstanceTypeOfferedInRegion(ctx context.Context, region, instanceType string) (bool, error)
+func (*Client) InstanceTypeZones(ctx context.Context, region, instanceType string) (ZoneOfferings, error)
 func (*Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool
 func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error)
+func (*Client) LaunchWithZoneFallback(ctx context.Context, launchConfig LaunchConfig, out io.Writer) (*LaunchResult, error)
 func (*Client) ListAMIs(ctx context.Context, region string, filters map[string]string) ([]AMIInfo, error)
 func (*Client) ListInstances(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, error)
 func (*Client) ListInstancesInRegions(ctx context.Context, region string, stateFilter string) ([]InstanceInfo, []string, error)
@@ -580,6 +594,8 @@ func (*LaunchTagger) TagValues(ctx context.Context, lc LaunchConfig) (map[string
 func (*LaunchTagger) Tags(ctx context.Context, lc LaunchConfig) ([]types.Tag, error)
 func (*TagLimitError) Error() string
 func (*UserDataTooLargeError) Error() string
+func (*ZoneFallbackError) Error() string
+func (*ZoneFallbackError) Unwrap() error
 func (DisplayPrice) SourceLabel() string
 func (EFACapacity) ResolveInterfaces(requested int) (int, error)
 func (ImageProvenance) Recorded() bool
@@ -592,6 +608,7 @@ func (LaunchConfig) ValidateNoPublicIP() error
 func (LaunchConfig) ValidateSporedSettings() error
 func (LaunchConfig) ValidateTagCount() error
 func (LaunchConfig) ValidateUserDataSize() error
+func (LaunchConfig) ZoneFallbackBlocker() string
 func (LaunchSettings) Apply(input *ec2.RunInstancesInput) error
 func (ManagedResource) IsRunningInstance() bool
 func (ManagedResource) OwnedBy(callerARN string) bool
@@ -632,6 +649,7 @@ func ImageProvenanceFromTags(tags map[string]string) ImageProvenance
 func ImageProvenanceTagKeys() []string
 func InstanceProfilePropagationRetryWindow() time.Duration
 func IsAccessDenied(err error) bool
+func IsCapacityErrorCode(code string) bool
 func IsImageProvenanceTagKey(key string) bool
 func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
 func IsNestedSpawnRole(roleName string) bool
@@ -718,6 +736,9 @@ type SubnetChoice struct
 type SubnetHint struct
 type TagLimitError struct
 type UserDataTooLargeError struct
+type ZoneAttempt struct
+type ZoneFallbackError struct
+type ZoneOfferings struct
 var CallerVersion
 var ErrAMIWaitExhausted
 var ErrEFANeedsSubnet

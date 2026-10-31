@@ -35,7 +35,7 @@ spawn launch <name> [flags]
 | `--ami` |  | string |  | AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023 |
 | `--attach-volume` |  | stringArray |  | Attach an EBS volume from a snapshot, mounted at a path: snap-xxx:/mount/point[:ro]. Repeatable. Read-only is the common case for shared reference data. |
 | `--auto-placement-group` |  | bool | `true` | Automatically create placement group for MPI job arrays (default: true) |
-| `--az` |  | string |  | Availability zone |
+| `--az` |  | string |  | Availability zone. Pins the launch there; without it (and without --subnet-id), a single launch that hits a capacity error (InsufficientInstanceCapacity) tries the other zones that offer the instance type |
 | `--batch-queue` |  | string |  | Batch job queue file (JSON) for sequential execution |
 | `--budget` |  | float64 |  | Budget limit in dollars for parameter sweeps (0 = no limit) |
 | `--capacity-block` |  | bool |  | The --reservation-id is a Capacity Block for ML (sets MarketType=capacity-block); mutually exclusive with --spot (#216) |
