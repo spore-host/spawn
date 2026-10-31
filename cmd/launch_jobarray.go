@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -271,13 +272,24 @@ func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		return primary, []cohort.Rung{primary}
 	}
 
-	zones, err := awsClient.DescribeAvailabilityZones(ctx, baseConfig.Region)
+	// The zones that offer the type and have a default subnet (#1458), the
+	// list a single launch falls back across too. All zones, as this used to
+	// take, put rungs in zones without the type, where the cohort's launch
+	// fails as terminal (Unsupported) and the chain stops there.
+	offerings, err := chainZonesFor(ctx, awsClient, baseConfig.Region, baseConfig.InstanceType)
+	zones := offerings.Launchable
 	if err != nil || len(zones) == 0 {
 		// AZ discovery failed — degrade to single-rung rather than fail the launch.
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  AZ fallback unavailable (%v); using a single AZ\n", err)
 		}
 		return primary, []cohort.Rung{primary}
+	}
+	// A zone the caller named stays first even when the lookup leaves it out,
+	// as it did when the chain was every zone: moving a pinned cohort out of
+	// its zone before trying it is not this function's call.
+	if baseConfig.AvailabilityZone != "" && !slices.Contains(zones, baseConfig.AvailabilityZone) {
+		zones = append([]string{baseConfig.AvailabilityZone}, zones...)
 	}
 
 	// Order: operator-selected AZ first (if set and valid), then the rest.
@@ -298,6 +310,12 @@ func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		fmt.Fprintf(os.Stderr, "   AZ fallback enabled across %d zones: %s\n", len(chain), strings.Join(ordered, ", "))
 	}
 	return chain[0], chain
+}
+
+// chainZonesFor lists the zones buildAZChain may chain across. A
+// package-level seam so tests need no AWS.
+var chainZonesFor = func(ctx context.Context, awsClient *aws.Client, region, instanceType string) (aws.ZoneOfferings, error) {
+	return awsClient.InstanceTypeZones(ctx, region, instanceType)
 }
 
 // orderAZs returns zones with preferred first (when non-empty and present),
