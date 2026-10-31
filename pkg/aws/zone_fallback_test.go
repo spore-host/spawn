@@ -342,6 +342,54 @@ func TestLaunchWithZoneFallback_NonCapacityErrorIsNotRetriedElsewhere(t *testing
 	}
 }
 
+// MaxSpotInstanceCountExceeded is the region's Spot instance limit: every zone
+// refuses it alike, so no zone is looked up or tried, pinned or not, and the
+// error says it is regional, naming no other zone. Mid-walk it stops the walk.
+func TestLaunchWithZoneFallback_RegionalSpotLimitIsNotRetriedElsewhere(t *testing.T) {
+	const limit = "MaxSpotInstanceCountExceeded"
+	for _, pinned := range []string{"", "us-west-2a"} {
+		t.Run("az="+pinned, func(t *testing.T) {
+			f := &zoneEC2{
+				offered: []string{"us-west-2a", "us-west-2b"}, defaults: []string{"us-west-2a", "us-west-2b"},
+				runErr: map[string]string{pinned: limit},
+			}
+			cfg := zoneLaunchConfig()
+			cfg.Spot, cfg.AvailabilityZone = true, pinned
+			_, _, err := launchAcross(t, f, cfg)
+			if n := len(f.sent("RunInstances")); n != 1 {
+				t.Errorf("RunInstances sent %d times, want 1: the limit is the region's", n)
+			}
+			if n := len(f.sent("DescribeInstanceTypeOfferings")); n != 0 {
+				t.Errorf("looked up zones %d times, want none", n)
+			}
+			if err == nil {
+				t.Fatal("launched; the region's Spot limit was reached")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "Spot instance limit") || !strings.Contains(msg, "us-west-2's") {
+				t.Errorf("error does not say it is us-west-2's Spot instance limit:\n%s", msg)
+			}
+			for _, unwanted := range []string{"also offered", "us-west-2b", "lagotto watch", "  - "} {
+				if strings.Contains(msg, unwanted) {
+					t.Errorf("error says %q, but no other zone can help:\n%s", unwanted, msg)
+				}
+			}
+			var le *LaunchError
+			if !errors.As(err, &le) || le.Code != limit {
+				t.Errorf("errors.As LaunchError = %+v, want code %s", le, limit)
+			}
+		})
+	}
+	f := &zoneEC2{
+		offered: []string{"us-west-2a", "us-west-2b"}, defaults: []string{"us-west-2a", "us-west-2b"},
+		runErr: map[string]string{"": ice, "us-west-2a": limit},
+	}
+	_, _, err := launchAcross(t, f, zoneLaunchConfig())
+	if got := f.runZones(); !reflect.DeepEqual(got, []string{"", "us-west-2a"}) || err == nil || !strings.Contains(err.Error(), "Spot instance limit") {
+		t.Errorf("RunInstances named zones %q (err %v), want to stop at us-west-2a's regional Spot limit and say so", got, err)
+	}
+}
+
 // fakeZoneLaunchAPI is the zone-fallback seam at the Go level: every
 // RunInstances fails on capacity, and the region offers three zones.
 type fakeZoneLaunchAPI struct {

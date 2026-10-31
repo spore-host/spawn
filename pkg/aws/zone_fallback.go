@@ -21,8 +21,9 @@ import (
 
 // capacityErrorCodes are the RunInstances error codes that mean "no capacity
 // for this request here", which another placement may not share. A job array
-// or pool advances its fallback chain on them (taskcohort.Classifier) and a
-// single launch tries the other zones that offer the type (#1458). Everything
+// or pool advances its fallback chain on them (taskcohort.Classifier), and a
+// single launch tries the other zones that offer the type on all but the
+// regional Spot limit ([IsZoneCapacityErrorCode], #1458). Everything
 // else (a bad AMI, a denied action, a quota) fails the same way in every zone.
 var capacityErrorCodes = map[string]bool{
 	"InsufficientInstanceCapacity": true,
@@ -34,6 +35,26 @@ var capacityErrorCodes = map[string]bool{
 // IsCapacityErrorCode reports whether an AWS error code from RunInstances is a
 // capacity error: one another placement (zone, rung) might not hit.
 func IsCapacityErrorCode(code string) bool { return capacityErrorCodes[code] }
+
+// IsZoneCapacityErrorCode reports whether a capacity error is one zone's, so
+// another zone may not share it: every capacity code but
+// MaxSpotInstanceCountExceeded, the region's Spot instance limit, which every
+// zone of the region hits alike. A single launch moves zone only on these
+// (#1458); the cohort classifiers still count the Spot limit as capacity.
+func IsZoneCapacityErrorCode(code string) bool {
+	return IsCapacityErrorCode(code) && code != regionalSpotLimitCode
+}
+
+// regionalSpotLimitCode is the Spot instance limit of a whole region.
+const regionalSpotLimitCode = "MaxSpotInstanceCountExceeded"
+
+// regionalSpotLimitError is a launch refused for the region's Spot instance
+// limit: no zone would do better, so none other is tried or named.
+func regionalSpotLimitError(err error, region string) error {
+	return fmt.Errorf("%w\n%s is %s's Spot instance limit, not one zone's capacity, so spawn did not try another "+
+		"availability zone: every zone in the region would refuse it the same way. Wait for Spot instances to end, "+
+		"raise the Spot quota, or launch on-demand (without --spot)", err, regionalSpotLimitCode, region)
+}
 
 // ZoneAttempt is one RunInstances attempt of a launch that can move zone on a
 // capacity error (#1458). Zone "" is the first attempt of a launch that named
@@ -206,7 +227,7 @@ func (e *ZoneFallbackError) Unwrap() error { return e.err }
 func (e *ZoneFallbackError) Error() string {
 	var b strings.Builder
 	last := e.Attempts[len(e.Attempts)-1]
-	capacity := IsCapacityErrorCode(last.Code)
+	capacity := IsZoneCapacityErrorCode(last.Code)
 	switch {
 	case e.Blocker != "":
 		where := ""
@@ -307,7 +328,10 @@ func launchAcrossZones(ctx context.Context, api zoneLaunchAPI, p *preparedLaunch
 		return result, nil, nil
 	}
 	code, msg := awsErrorDetail(err)
-	if !IsCapacityErrorCode(code) {
+	if code == regionalSpotLimitCode {
+		return nil, nil, regionalSpotLimitError(newLaunchError(err), cfg.Region)
+	}
+	if !IsZoneCapacityErrorCode(code) {
 		return nil, nil, newLaunchError(err)
 	}
 	attempts := []ZoneAttempt{{Zone: cfg.AvailabilityZone, Code: code, Message: msg}}
@@ -342,7 +366,10 @@ func launchAcrossZones(ctx context.Context, api zoneLaunchAPI, p *preparedLaunch
 		attempts = append(attempts, ZoneAttempt{Zone: zone, Code: code, Message: msg})
 		fmt.Fprintf(out, "   %s: %s\n", zone, code)
 		fail.Attempts, fail.err = attempts, newLaunchError(err)
-		if !IsCapacityErrorCode(code) {
+		if code == regionalSpotLimitCode {
+			return nil, nil, regionalSpotLimitError(newLaunchError(err), cfg.Region)
+		}
+		if !IsZoneCapacityErrorCode(code) {
 			break
 		}
 	}

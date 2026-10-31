@@ -657,6 +657,7 @@ func IsOrphanedSpawnAddress(r ManagedResource) bool
 func IsSharedSporedIdentity(r ManagedResource) bool
 func IsSpawnAllocatedAddress(r ManagedResource) bool
 func IsSpawnManagedAMI(ami AMIInfo) bool
+func IsZoneCapacityErrorCode(code string) bool
 func LaunchConfigObject(lc LaunchConfig) (body []byte, sha string, err error)
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag
 func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
