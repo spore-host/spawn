@@ -108,7 +108,8 @@ func TestBuildCohort(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, err := buildCohort(cohortSpec{mpi: tt.mpi}, "job-1", mkMembers(tt.members), tt.minViableSet)
+			spec := cohortSpec{mpi: tt.mpi}
+			c, err := buildCohort(spec, "job-1", mkMembers(tt.members), tt.minViableSet, cohortBudget(spec, cohortLaunch{attempts: 1}))
 			if err != nil {
 				t.Fatalf("buildCohort: %v", err)
 			}

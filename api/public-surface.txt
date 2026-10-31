@@ -670,6 +670,7 @@ func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
 func NewLaunchSettings(lc LaunchConfig, rootDeviceName string, amiMinGiB int32) LaunchSettings
+func PlacementGroupAvailableWait() time.Duration
 func PostLaunchTagKeys() []string
 func PredictedInstanceRoleName(config IAMRoleConfig) string
 func PrivateServices() []PrivateService
