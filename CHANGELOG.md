@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The region-vacated check no longer delays termination** (#1456).
+  Before, spored ran it after every other wait and, when no other `spawn:managed` instance was running in the region, blocked 60 s before `Terminate`, with or without a notifier configured.
+  The last spawn instance in a region was billed an extra idle minute on every TTL, cost-limit, idle or on-complete termination.
+  - **No notifier (`spawn:notify-url` unset):** the check does not run at all. No `DescribeInstances`, no wait.
+  - **With a notifier:** the first count is taken where the termination is decided (before the `--completion-delay` grace period for on-complete terminate, at the start of `terminate` otherwise), and the re-count when spored warns users, during the existing 5 s warning wait.
+    The settle window is the grace period, the pre-stop hook, the task-record flush and DNS/plugin cleanup, so a relaunch during the termination still suppresses the alarm.
+    It is shorter than 60 s when those waits are: with no pre-stop, about 30 s on on-complete terminate and close to 0 s on TTL, cost-limit and idle terminate, so a relaunch that lands later can now produce a `region_vacated` message where it did not before.
+    A count that has not answered when the warning ends is abandoned and reported "not vacated", so a slow EC2 API never holds `Terminate`.
+  - Time from the completion file to the `Terminate` call is now 35-95 s with the defaults (1-minute poll + 30 s `--completion-delay` + 5 s warning), down from 95-155 s for the last instance in a region.
+  - Reaches instances launched by a CLI with this release; running instances keep the old spored until `spawn upgrade-spored`.
+
 ## [0.152.0] - 2026-10-30
 
 ### Added
