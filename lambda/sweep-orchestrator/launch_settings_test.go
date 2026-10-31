@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -206,8 +207,12 @@ func TestPrivateMemberLaunchesWithNoPublicIP(t *testing.T) {
 	}
 	ni := private.NetworkInterfaces[0]
 	if ni.AssociatePublicIpAddress == nil || *ni.AssociatePublicIpAddress || awssdk.ToString(ni.SubnetId) != "subnet-1" {
-		t.Errorf("a --no-public-ip member's interface asks for public IP %v in subnet %q; want an explicit false "+
-			"(a default subnet assigns one otherwise) in the checked subnet-1", ni.AssociatePublicIpAddress, awssdk.ToString(ni.SubnetId))
+		set := "unset"
+		if ni.AssociatePublicIpAddress != nil {
+			set = fmt.Sprint(*ni.AssociatePublicIpAddress)
+		}
+		t.Errorf("a --no-public-ip member's interface has AssociatePublicIpAddress %s in subnet %q; want an explicit false "+
+			"(a default subnet assigns one otherwise) in the checked subnet-1", set, awssdk.ToString(ni.SubnetId))
 	}
 	if in, err := build(&spawnaws.LaunchConfig{NoPublicIP: true, AvailabilityZone: "us-east-1a"}); err == nil || in != nil {
 		t.Errorf("a private-only member with no subnet was launched (input built: %t, err=%v)", in != nil, err)

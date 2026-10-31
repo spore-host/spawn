@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`aws.PlacementGroupAvailableWait`** (#1454): how long `CreatePlacementGroup` can wait for a new group to become available, for a caller sizing a deadline around it.
+- **A detached sweep can use `--no-public-ip`** (#1437). It was refused there (#1433), because the subnet check ran only in `Client.Launch` and the sweep orchestrator launches members later.
+  - **The subnet check runs at `--detach`,** with your credentials, for every member, in the subnet that member lands in: a row's own `az` is checked, not just the CLI's. With only an AZ, spawn picks the subnet, checks it and pins it in the member's launch settings, so EC2 cannot put the member in a subnet nobody checked. A member whose subnet cannot reach what spored and the SSM agent need refuses the whole detach before anything is uploaded, unless `--allow-missing-endpoints`, exactly as for a foreground launch. `--no-public-ip` needs `--subnet-id` or `--az` there too, and a row's `dns` is refused with it, as `--dns` is.
+  - **The orchestrator applies it** from a new `no_public_ip` field in the member's `spawn_launch_settings` (`aws.LaunchSettings.NoPublicIP`): the interface asks for no public IP. The orchestrator never allocated Elastic IPs, and multi-card `--efa` is still refused on a detached sweep. It needs no new IAM: it does not repeat the subnet check, and refuses `no_public_ip` settings that name no subnet.
+  - **Deploy the sweep orchestrator from this release before relying on it.** An orchestrator from v0.147.0 to v0.152.0 refuses a `--no-public-ip` member as "a field this build cannot apply" (its decoder refuses unknown fields), so the member is not launched rather than launched with a public IP. Settings without the flag are unchanged, and older orchestrators still launch them. The schema version stays 1.
+  - `spawn sweep resume --detach` relaunches from the uploaded params, which carry the flag and the pinned subnet. It does not repeat the subnet check.
+  - Foreground launches compose the no-public-IP interface through the same code (`applyLaunchSettings`), so a detached member's RunInstances request is a foreground member's.
 
 ### Changed
 
