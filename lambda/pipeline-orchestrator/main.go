@@ -1307,8 +1307,8 @@ case "$ARCH" in
 esac
 
 # Download from S3 (public buckets, regional for low latency)
-S3_BASE_URL="https://spawn-binaries-${REGION}.s3.amazonaws.com"
-FALLBACK_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com"
+S3_BASE_URL="https://spawn-binaries-${REGION}.s3.${REGION}.amazonaws.com"
+FALLBACK_URL="https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com"
 %s
 echo "Downloading spored binary..."
 # Verified install, from pkg/sporedinstall: checksum AND signature, failing

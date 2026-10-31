@@ -772,8 +772,8 @@ ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 # normal boot path. On failure the AMI's existing spored stays in place, which is
 # a real fallback; running an unverified download is not.
 if ! spore_install_spored_from_buckets "spored-linux-${ARCH}" \
-      "https://spawn-binaries-${REGION}.s3.amazonaws.com" \
-      "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
+      "https://spawn-binaries-${REGION}.s3.${REGION}.amazonaws.com" \
+      "https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com"; then
   echo "WARNING: could not install a verified spored; keeping the version baked into the AMI"
 fi
 
@@ -786,8 +786,8 @@ while n: n,d=divmod(n,36); r=chr(48+d if d<10 else 87+d)+r
 print(r or '0')" 2>/dev/null || echo "")
   if [ -n "$ACCOUNT_B36" ]; then
     CERT_BUCKET="spawn-certs-${REGION}"
-    aws s3 cp "s3://${CERT_BUCKET}/${ACCOUNT_B36}/cert.pem" /etc/spore/webproxy/cert.pem 2>/dev/null && \
-    aws s3 cp "s3://${CERT_BUCKET}/${ACCOUNT_B36}/key.pem"  /etc/spore/webproxy/key.pem 2>/dev/null && \
+    aws s3 cp --region "$REGION" "s3://${CERT_BUCKET}/${ACCOUNT_B36}/cert.pem" /etc/spore/webproxy/cert.pem 2>/dev/null && \
+    aws s3 cp --region "$REGION" "s3://${CERT_BUCKET}/${ACCOUNT_B36}/key.pem"  /etc/spore/webproxy/key.pem 2>/dev/null && \
     chmod 600 /etc/spore/webproxy/key.pem && \
     echo "TLS cert installed for *.${ACCOUNT_B36}.spore.host" || \
     echo "WARNING: TLS cert not available — spored web proxy will not start"
@@ -935,8 +935,8 @@ ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 # normal boot path. On failure the AMI's existing spored stays in place, which is
 # a real fallback; running an unverified download is not.
 if ! spore_install_spored_from_buckets "spored-linux-${ARCH}" \
-      "https://spawn-binaries-${REGION}.s3.amazonaws.com" \
-      "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
+      "https://spawn-binaries-${REGION}.s3.${REGION}.amazonaws.com" \
+      "https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com"; then
   echo "WARNING: could not install a verified spored; keeping the version baked into the AMI"
 fi
 
@@ -951,8 +951,8 @@ print(r or '0')" 2>/dev/null || echo "")
   if [ -n "$ACCOUNT_B36" ]; then
     CERT_BUCKET="spawn-certs-${REGION}"
     DCV_CERT_DIR="/var/lib/dcv/.config/NICE/dcv/private"
-    aws s3 cp "s3://${CERT_BUCKET}/${ACCOUNT_B36}/cert.pem" "${DCV_CERT_DIR}/dcv.pem" 2>/dev/null && \
-    aws s3 cp "s3://${CERT_BUCKET}/${ACCOUNT_B36}/key.pem"  "${DCV_CERT_DIR}/dcv.key" 2>/dev/null && \
+    aws s3 cp --region "$REGION" "s3://${CERT_BUCKET}/${ACCOUNT_B36}/cert.pem" "${DCV_CERT_DIR}/dcv.pem" 2>/dev/null && \
+    aws s3 cp --region "$REGION" "s3://${CERT_BUCKET}/${ACCOUNT_B36}/key.pem"  "${DCV_CERT_DIR}/dcv.key" 2>/dev/null && \
     chown dcv:dcv "${DCV_CERT_DIR}/dcv.pem" "${DCV_CERT_DIR}/dcv.key" && \
     chmod 600 "${DCV_CERT_DIR}/dcv.pem" "${DCV_CERT_DIR}/dcv.key" && \
     systemctl restart dcvserver && sleep 5 && \

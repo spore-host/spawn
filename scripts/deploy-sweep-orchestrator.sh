@@ -58,7 +58,7 @@ fi
 # one this build compiles in: the release workflow publishes exactly what
 # `spawn bootstrap-body` prints, from the same pkg/launcher this function builds
 # against. Checked in the us-east-1 bucket, the stub's last fallback.
-BODY_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn/versions/${SPAWN_VERSION}/bootstrap.sh"
+BODY_URL="https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com/spawn/versions/${SPAWN_VERSION}/bootstrap.sh"
 if ! WANT_BODY_SHA=$( (cd ../.. && SPORE_NO_UPDATE_CHECK=1 CGO_ENABLED=0 go run . bootstrap-body) | openssl dgst -sha256 | awk '{print $NF}'); then
   echo "ERROR: could not render v$SPAWN_VERSION's bootstrap body (spawn bootstrap-body)." >&2
   exit 1

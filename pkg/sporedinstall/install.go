@@ -126,6 +126,36 @@ const RelabelFuncName = "spore_selinux_relabel"
 // latest paths, as before.
 const BucketInstallFuncName = "spore_install_spored_from_buckets"
 
+// PublishedRegions are the regions the release workflow publishes spored and
+// the bootstrap body to, each in its own spawn-binaries-<region> bucket (its
+// SPAWN_BINARY_BUCKETS; TestPublishedRegionsAreTheReleaseBuckets). Every
+// install path fetches from the launch region's bucket by its regional name,
+// https://spawn-binaries-<region>.s3.<region>.amazonaws.com, then from
+// FallbackRegion's (#1436). In any other region the first fetch finds no
+// bucket, so only the fallback, in another region, can serve the instance.
+func PublishedRegions() []string {
+	return []string{
+		"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+		"ca-central-1",
+		"eu-west-1", "eu-west-2", "eu-central-1",
+		"ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
+	}
+}
+
+// FallbackRegion is the region whose spawn-binaries bucket every install path
+// tries after the launch region's.
+const FallbackRegion = "us-east-1"
+
+// Published reports whether region has its own spawn-binaries bucket.
+func Published(region string) bool {
+	for _, r := range PublishedRegions() {
+		if r == region {
+			return true
+		}
+	}
+	return false
+}
+
 // PinVar is the shell variable naming the spawn release whose spored the
 // script installs. PinScript assigns it.
 const PinVar = "SPAWN_SPORED_VERSION"
