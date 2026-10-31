@@ -82,9 +82,9 @@ var detachedDispositions = map[string]detachedDisposition{
 	"NoPublicIP": {settings: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
 	"AllowMissingEndpoints": {why: "read only by --no-public-ip's subnet check, which runs at --detach (detachedBootstrap.privateNetOf)",
 		prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
-	"EBSKMSKeyID": {refused: true, settings: true},
-	"FSxLustreCreate":       {refused: true},
-	"FSxLustreRecall":       {refused: true},
+	"EBSKMSKeyID":     {refused: true, settings: true},
+	"FSxLustreCreate": {refused: true},
+	"FSxLustreRecall": {refused: true},
 
 	"PlacementGroupPrefix": {why: whyNotSweep + " (an MPI job array's per-AZ groups)"},
 	"DNSFunctionARN":       {why: whyNotSweep + " (the custom-DNS preflight, which a sweep does not run on either path)"},
@@ -334,16 +334,16 @@ func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 		want string
 		alt  string // the remedy the error offers
 	}{
-		"fsx-create":          {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
-		"fsx-recall":          {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
+		"fsx-create":              {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
+		"fsx-recall":              {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
 		"no public ip, no subnet": {base: aws.LaunchConfig{NoPublicIP: true}, want: "--no-public-ip needs a subnet", alt: "--az"},
 		"no public ip, row dns":   {base: aws.LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1"}, row: map[string]interface{}{"dns": "box"}, want: "--no-public-ip cannot register DNS", alt: "--no-dns"},
-		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, row: map[string]interface{}{"instance_type": "p5en.48xlarge"}, want: "--efa with 4 EFA interfaces", alt: "--no-detach"},
-		"every-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa with 2 EFA interfaces", alt: "--efa-interfaces 1"},
-		"efa secondary type":  {base: aws.LaunchConfig{EFAEnabled: true, EFASecondaryType: "efa"}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa-secondary-type efa", alt: "--no-detach"},
-		"customer KMS key":    {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key", alt: "--no-detach"},
-		"vpc without subnet":  {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet", alt: "Pass --subnet"},
-		"hibernation pattern": {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern", alt: "--no-detach"},
+		"multi-card EFA":          {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, row: map[string]interface{}{"instance_type": "p5en.48xlarge"}, want: "--efa with 4 EFA interfaces", alt: "--no-detach"},
+		"every-card EFA":          {base: aws.LaunchConfig{EFAEnabled: true}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa with 2 EFA interfaces", alt: "--efa-interfaces 1"},
+		"efa secondary type":      {base: aws.LaunchConfig{EFAEnabled: true, EFASecondaryType: "efa"}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa-secondary-type efa", alt: "--no-detach"},
+		"customer KMS key":        {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key", alt: "--no-detach"},
+		"vpc without subnet":      {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet", alt: "Pass --subnet"},
+		"hibernation pattern":     {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern", alt: "--no-detach"},
 	}
 	for name, tc := range cases {
 		row := map[string]interface{}{"trial": "a"}
