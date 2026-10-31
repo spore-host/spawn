@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.152.0] - 2026-10-30
+
 ### Added
 
 - **Approval-gated CI deploy of a release's code-only Lambda changes** (#1445).
@@ -51,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   How to read it: `docs/infra-account.md`, "Deploy checklist".
 
+- **`aws.InstanceProfilePropagationRetryWindow` and `taskpool.Queue.Incarnation`** (#1448). The first is how long Launch retries a just-created instance profile, for a caller sizing a deadline around Launch. The second is a queue's SQS creation time, which `pool create` scopes worker tokens to.
+
 ### Changed
 
 - **`spawn pool create` says how many workers came up** (#1448). It printed `ready: requested 4 workers (min viable 1)` for a pool with one worker. It now prints `ready: N of M workers` and lists each missing worker with the AWS error that stopped it.
@@ -69,7 +73,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`spawn launch --help` no longer shows a bogus `spawn connect` value on `--no-public-ip`, `--allow-missing-endpoints` and `--wait-for-ssh`** (#1441).
   pflag reads the first back-quoted span in a flag's usage text as that flag's value name, so these bool flags looked as if they took an argument.
   A test now walks every command and fails if any bool flag's usage has a value name.
-- **`aws.InstanceProfilePropagationRetryWindow` and `taskpool.Queue.Incarnation`** (#1448). The first is how long Launch retries a just-created instance profile, for a caller sizing a deadline around Launch. The second is a queue's SQS creation time, which `pool create` scopes worker tokens to.
 
 - **Pool workers lost to the instance-profile race** (#1448). `spawn pool create` gave each worker's launch cohort's default 15 seconds, so the #572 retry was cut off mid-schedule. In us-west-2, four workers were rejected for a profile created moments earlier, three launched 7 seconds later, and the fourth was dropped. The launch budget now covers the whole retry window plus Launch's own calls.
 - **A pool worker's failure has a reason** (#1448). `terminal/ at phase=launch-acked` is now `terminal/InvalidParameterValue: Value (…) for parameter iamInstanceProfile.name is invalid. Invalid IAM Instance Profile name …`, for the failed worker and for the workers cancelled around it. A retry cut short by its context now returns the AWS error with the context error, not the context error alone, and the pool output includes the fault's message.
@@ -13124,7 +13127,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.151.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.152.0...HEAD
+[0.152.0]: https://github.com/spore-host/spawn/compare/v0.151.0...v0.152.0
 [0.151.0]: https://github.com/spore-host/spawn/compare/v0.150.0...v0.151.0
 [0.150.0]: https://github.com/spore-host/spawn/compare/v0.149.0...v0.150.0
 [0.149.0]: https://github.com/spore-host/spawn/compare/v0.148.0...v0.149.0
