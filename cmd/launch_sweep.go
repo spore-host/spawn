@@ -1400,7 +1400,11 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	}
 	// Each member's spored bootstrap, built as the foreground path builds it
 	// (#1323). After the launch keys, which settle each member's AMI and key.
-	if err := seedDetachedBootstrap(paramFormat, *baseConfig, sweepID, sweepName, newDetachedBootstrap(ctx, regionClient, plat)); err != nil {
+	// --no-public-ip: each member's subnet is checked here, with the caller's
+	// credentials, because the orchestrator cannot (#1437).
+	boot := newDetachedBootstrap(ctx, regionClient, plat)
+	boot.privateNetOf = detachedSubnetCheck(ctx, regionClient)
+	if err := seedDetachedBootstrap(paramFormat, *baseConfig, sweepID, sweepName, boot); err != nil {
 		return fmt.Errorf("detached sweep: %w", err)
 	}
 

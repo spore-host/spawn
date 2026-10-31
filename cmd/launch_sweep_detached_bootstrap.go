@@ -85,7 +85,21 @@ type detachedBootstrap struct {
 	// make it: with only an AZ it picks and pins the subnet, then refuses one
 	// that cannot reach what spored and the SSM agent need, unless
 	// --allow-missing-endpoints. aws.Client.PreflightNoPublicIP in production.
+	//
+	// Only `spawn launch --detach` sets it (detachedSubnetCheck). A schedule
+	// has none: its params are replayed for as long as it runs, so a check
+	// made at `spawn schedule create` would not hold, and no schedule config
+	// sets NoPublicIP.
 	privateNetOf func(cfg *aws.LaunchConfig) error
+}
+
+// detachedSubnetCheck is the production detachedBootstrap.privateNetOf:
+// aws.Client.PreflightNoPublicIP, through the seam the foreground paths use.
+func detachedSubnetCheck(ctx context.Context, client *aws.Client) func(cfg *aws.LaunchConfig) error {
+	return func(cfg *aws.LaunchConfig) error {
+		_, err := preflightNoPublicIPFor(ctx, client, cfg, nil, os.Stderr)
+		return err
+	}
 }
 
 // newDetachedBootstrap returns the production detachedBootstrap: the local
@@ -96,10 +110,6 @@ func newDetachedBootstrap(ctx context.Context, client *aws.Client, plat *platfor
 	storage := newSweepStorage(client, os.Stderr)
 	efa := memoEFACapacity(ctx, client)
 	return detachedBootstrap{
-		privateNetOf: func(cfg *aws.LaunchConfig) error {
-			_, err := preflightNoPublicIPFor(ctx, client, cfg, nil, os.Stderr)
-			return err
-		},
 		efaOf: func(cfg *aws.LaunchConfig) error {
 			return resolveSweepMemberEFA(cfg, efa)
 		},

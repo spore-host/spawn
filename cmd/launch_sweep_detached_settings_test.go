@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -429,7 +430,10 @@ func TestDetachedNoPublicIPChecksEveryMembersSubnet(t *testing.T) {
 	}
 
 	// And the production check is aws.Client.PreflightNoPublicIP, through the
-	// seam the foreground paths use.
+	// seam the foreground paths use, wired into `spawn launch --detach`.
+	if !slices.Contains(funcCalls(t, "launch_sweep.go")["launchSweepDetached"], "detachedSubnetCheck") {
+		t.Error("launchSweepDetached does not give its detached bootstrap the subnet check")
+	}
 	var prodChecked int
 	prev := preflightNoPublicIPFor
 	preflightNoPublicIPFor = func(_ context.Context, _ *aws.Client, cfg *aws.LaunchConfig, _ []string, _ io.Writer) (aws.PrivateCheck, error) {
@@ -437,12 +441,8 @@ func TestDetachedNoPublicIPChecksEveryMembersSubnet(t *testing.T) {
 		return aws.PrivateCheck{}, aws.ErrPrivateNetworkIncomplete
 	}
 	t.Cleanup(func() { preflightNoPublicIPFor = prev })
-	prod := newDetachedBootstrap(context.Background(), nil, nil)
-	if prod.privateNetOf == nil {
-		t.Fatal("the production detached bootstrap has no subnet check")
-	}
 	cfg := base
-	if err := prod.privateNetOf(&cfg); !errors.Is(err, aws.ErrPrivateNetworkIncomplete) || prodChecked != 1 {
+	if err := detachedSubnetCheck(context.Background(), nil)(&cfg); !errors.Is(err, aws.ErrPrivateNetworkIncomplete) || prodChecked != 1 {
 		t.Errorf("production subnet check: err %v after %d checks; want PreflightNoPublicIP's refusal, once", err, prodChecked)
 	}
 }
