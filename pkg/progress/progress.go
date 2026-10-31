@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 	"unicode"
 
@@ -18,6 +19,7 @@ type Progress struct {
 	tty         bool            // stdout is an interactive terminal (redraw in place)
 	printed     map[string]bool // non-TTY: terminal state already logged, per step
 	started     map[string]bool // non-TTY: start already logged, per step
+	errOut      io.Writer       // where Error prints; nil is os.Stderr
 }
 
 // Box drawing. The interior between the ║ borders is boxWidth columns wide.
@@ -197,7 +199,13 @@ func (p *Progress) Complete(stepName string) {
 	p.display()
 }
 
-// Error marks a step as errored
+// Error marks a step as errored and prints err, on stderr.
+//
+// A caller usually returns err as well, and the root command prints what is
+// returned, so a launch failure printed twice: once here, then again plain
+// (#1470). Error records the text it printed and [Reported] tells the root
+// printer it has been shown. A quiet tracker (-o json) prints nothing and
+// records nothing, so the root printer still shows the error there.
 func (p *Progress) Error(stepName string, err error) {
 	i := p.stepIndex(stepName)
 	p.steps[i].Status = "error"
@@ -206,10 +214,46 @@ func (p *Progress) Error(stepName string, err error) {
 	// Outside the lookup on purpose: this used to sit INSIDE the matched-step
 	// branch, so an unregistered name swallowed the error text too — a failure
 	// reported nowhere at all unless the caller also returned the error.
-	if !p.quiet {
-		fmt.Println()
-		fmt.Printf("%s %s: %v\n", i18n.Symbol("error"), i18n.T("spawn.progress.error"), err)
+	if !p.quiet && err != nil {
+		w := p.errOut
+		if w == nil {
+			w = os.Stderr
+		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintf(w, "%s %s: %v\n", i18n.Symbol("error"), i18n.T("spawn.progress.error"), err)
+		reported.add(err.Error())
 	}
+}
+
+// SetErrorOutput sends the error lines [Progress.Error] prints to w instead
+// of stderr.
+func (p *Progress) SetErrorOutput(w io.Writer) { p.errOut = w }
+
+// reported is the text of every error a Progress has printed in this process.
+var reported = reportedErrors{texts: map[string]bool{}}
+
+type reportedErrors struct {
+	mu    sync.Mutex
+	texts map[string]bool
+}
+
+func (r *reportedErrors) add(text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.texts[text] = true
+}
+
+// Reported reports whether a Progress has already printed err's text, so a
+// caller about to print the error a command returned need not repeat it
+// (#1470). An error that wraps the printed one in more text is not reported:
+// the added text has not been shown.
+func Reported(err error) bool {
+	if err == nil {
+		return false
+	}
+	reported.mu.Lock()
+	defer reported.mu.Unlock()
+	return reported.texts[err.Error()]
 }
 
 // Skip marks a step as skipped

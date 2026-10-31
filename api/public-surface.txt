@@ -660,6 +660,7 @@ func IsSpawnAllocatedAddress(r ManagedResource) bool
 func IsSpawnManagedAMI(ami AMIInfo) bool
 func IsZoneCapacityErrorCode(code string) bool
 func LaunchConfigObject(lc LaunchConfig) (body []byte, sha string, err error)
+func LaunchErrorDetail(err error) (code, msg string)
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag
 func NeedsAZSubnetResolution(pinnedSubnetID, pinnedAZ string) bool
 func NeedsLaunchElasticIP(interfaces []types.InstanceNetworkInterfaceSpecification) bool
