@@ -2,8 +2,12 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -328,6 +332,16 @@ var poolCreateCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("resolve account id: %w", err)
 		}
+		// A run whose workers are still alive is not re-created: its queue would
+		// be the same queue, and a second set of workers would drain it. This
+		// is the readable refusal; the idempotency tokens are what make a
+		// duplicate impossible (poolWorkerGeneration, #1448).
+		if live, err := poolLiveWorkers(ctx, awsClient, region, poolRunID); err != nil {
+			return err
+		} else if len(live) > 0 {
+			return fmt.Errorf("pool %q already has %d live worker(s) (%s): drain it first with 'spawn pool drain --run-id %s', or use a new --run-id",
+				poolRunID, len(live), strings.Join(live, ", "), poolRunID)
+		}
 		specBucket := poolSpecBucket(account, region)
 		// Ensure the spec/results bucket exists before workers try to read from it.
 		if err := awsClient.CreateS3BucketIfNotExists(ctx, specBucket, region); err != nil {
@@ -351,14 +365,10 @@ var poolCreateCmd = &cobra.Command{
 		// Provision the workers as a partial cohort: ask for N, accept >= minViable
 		// (best-effort/eventual). Each worker boots with user-data that runs
 		// `spored pool-worker`, pointed at this run's queue + spec bucket.
-		mv := poolMinViable
-		if mv < 1 {
-			mv = 1
-		}
-		if mv > poolWorkers {
-			mv = poolWorkers
-		}
-		if err := provisionPoolWorkers(ctx, awsClient, region, specBucket); err != nil {
+		generation := poolWorkerGeneration(ctx, pool.Queue, os.Stderr)
+		ready, err := provisionPoolWorkers(ctx, awsClient, region, specBucket, generation)
+		fmt.Fprint(os.Stderr, ready)
+		if err != nil {
 			// The queue was created above; if provisioning failed there are no workers
 			// to drain it, so delete it now rather than leak an orphaned SQS queue
 			// (a failed `pool create` must leave nothing behind). Best-effort.
@@ -368,7 +378,6 @@ var poolCreateCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Fprintf(os.Stderr, "✅ Pool %q ready: requested %d workers (min viable %d), queue created.\n", poolRunID, poolWorkers, mv)
 		fmt.Fprintf(os.Stderr, "   Submit tasks:  spawn pool submit --run-id %s --spec <spec.json>\n", poolRunID)
 		fmt.Fprintf(os.Stderr, "   Watch depth:   spawn pool status --run-id %s\n", poolRunID)
 		fmt.Fprintf(os.Stderr, "   Tear down:     spawn pool drain --run-id %s\n", poolRunID)
@@ -410,9 +419,12 @@ func poolWorkerBaseConfig(region, ami, iamProfile, userData string) aws.LaunchCo
 
 // provisionPoolWorkers launches the worker cohort via taskcohort + cohort. Workers
 // are fungible, so one base config (with the pool-worker user-data) fits all; the
-// partial cohort gives best-effort/eventual semantics. Returns nil once the cohort
-// reconciles (Ready with >= minViable) or an error if it can't reach minViable.
-func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, specBucket string) error {
+// partial cohort gives best-effort/eventual semantics. Once the cohort reconciles
+// (Ready with >= minViable) it returns the "ready: N of M" lines, naming each
+// worker that did not come up and why; if it can't reach minViable, an error
+// with every worker's reason. generation scopes the workers' idempotency tokens
+// to this attempt (poolWorkerGeneration).
+func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, specBucket, generation string) (string, error) {
 	// The worker bootstrap runs `spored pool-worker` under a restart-on-error loop
 	// (see buildPoolWorkerCommand): a transient failure re-execs instead of
 	// stranding a billing-but-idle worker (#465), while a clean drain (exit 0)
@@ -425,7 +437,7 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 		CustomUserData: workerCmd,
 	})
 	if err != nil {
-		return fmt.Errorf("build worker bootstrap: %w", err)
+		return "", fmt.Errorf("build worker bootstrap: %w", err)
 	}
 
 	// Resolve the AMI and IAM instance profile UP FRONT, once, for the whole pool.
@@ -436,7 +448,7 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 	// per-pool profile fits all of them (resolve once, reuse across the cohort).
 	ami, err := awsClient.GetRecommendedAMI(ctx, region, poolInstanceType)
 	if err != nil {
-		return fmt.Errorf("auto-detect worker AMI for %s in %s: %w", poolInstanceType, region, err)
+		return "", fmt.Errorf("auto-detect worker AMI for %s in %s: %w", poolInstanceType, region, err)
 	}
 	// A pool worker needs MORE than the bare spored role: it pulls from the run's
 	// SQS queue (GetQueueUrl/ReceiveMessage/DeleteMessage/GetQueueAttributes) and
@@ -448,69 +460,202 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 	// bootstrap needs. CreateOrGetInstanceProfile also guarantees SSM.
 	account, err := awsClient.GetAccountID(ctx)
 	if err != nil {
-		return fmt.Errorf("resolve account id for worker policy: %w", err)
+		return "", fmt.Errorf("resolve account id for worker policy: %w", err)
 	}
 	iamProfile, err := awsClient.CreateOrGetInstanceProfile(ctx,
 		poolWorkerRoleConfig(account, region, specBucket, poolRunID, poolS3Read, poolS3Write, poolContainers))
 	if err != nil {
-		return fmt.Errorf("set up worker IAM instance profile: %w", err)
+		return "", fmt.Errorf("set up worker IAM instance profile: %w", err)
 	}
 
 	base := poolWorkerBaseConfig(region, ami, iamProfile, launcher.EncodeLinuxUserData(userData))
 
-	act := &taskcohort.Actuator{Client: awsClient, Region: region, BaseConfig: base}
-	obs := &taskcohort.Observer{Client: awsClient, Region: region}
+	members, outcome, err := reconcilePoolWorkers(ctx, awsClient, region, base, generation)
+	if err != nil {
+		return "", err
+	}
+	return poolProvisionResult(poolRunID, members, outcome, poolMinViableFor(poolWorkers))
+}
+
+// poolLaunchPreworkAllowance is the part of a worker's launch budget for what
+// aws.Client.Launch does before its first RunInstances: caller identity, the
+// account name, the price through truffle, the launch config object in S3, the
+// AMI's root device. Generous: the budget is a backstop, not a pace.
+const poolLaunchPreworkAllowance = time.Minute
+
+// poolCohortBudget is the pool's per-phase budget. cohort's default gives a
+// launch 15s, which ended the #572 retry (aws.Client.Launch) mid-schedule: in
+// #1448 four workers were rejected for a profile created moments earlier,
+// three were launched 7s later and the fourth was cut off by the deadline
+// with no reason recorded. The launch budget is the whole retry window plus
+// Launch's own calls.
+func poolCohortBudget() cohort.PhaseBudget {
+	b := cohort.DefaultBudget()
+	b.LaunchAcked = aws.InstanceProfilePropagationRetryWindow() + poolLaunchPreworkAllowance
+	return b
+}
+
+// poolMinViableFor clamps --min-viable to [1, workers].
+func poolMinViableFor(workers int) int {
+	mv := poolMinViable
+	if mv < 1 {
+		mv = 1
+	}
+	if mv > workers {
+		mv = workers
+	}
+	return mv
+}
+
+// poolWorkerIntents names the run's workers. Each one's RunInstances
+// idempotency token is cohort.Token("pool", name, generation).
+func poolWorkerIntents(runID, generation string, workers int, rung cohort.Rung) ([]cohort.EntityIntent, error) {
+	members := make([]cohort.EntityIntent, 0, workers)
+	for i := 0; i < workers; i++ {
+		id := cohort.EntityID(fmt.Sprintf("%s-worker-%d", runID, i))
+		intent, err := cohort.NewEntityIntent("pool", id, cohort.Generation(generation), cohort.CohortID(runID),
+			cohort.RungPlacement{Rung: rung, Chain: []cohort.Rung{rung}}, "")
+		if err != nil {
+			return nil, fmt.Errorf("build worker %d intent: %w", i, err)
+		}
+		members = append(members, intent)
+	}
+	return members, nil
+}
+
+// reconcilePoolWorkers launches the workers through the taskcohort seam and
+// returns cohort's per-worker outcome.
+func reconcilePoolWorkers(ctx context.Context, client taskcohort.LaunchAPI, region string, base aws.LaunchConfig, generation string) ([]cohort.EntityIntent, cohort.Outcome, error) {
+	act := &taskcohort.Actuator{Client: client, Region: region, BaseConfig: base}
+	obs := &taskcohort.Observer{Client: client, Region: region}
 
 	capacity := cohort.CapacityOnDemand
 	if poolSpot {
 		capacity = cohort.CapacitySpot
 	}
 	rung := cohort.Rung{InstanceType: poolInstanceType, CapacityModel: capacity}
-
-	members := make([]cohort.EntityIntent, 0, poolWorkers)
-	for i := 0; i < poolWorkers; i++ {
-		id := cohort.EntityID(fmt.Sprintf("%s-worker-%d", poolRunID, i))
-		intent, err := cohort.NewEntityIntent("pool", id, "g1", cohort.CohortID(poolRunID),
-			cohort.RungPlacement{Rung: rung, Chain: []cohort.Rung{rung}}, "")
-		if err != nil {
-			return fmt.Errorf("build worker %d intent: %w", i, err)
-		}
-		members = append(members, intent)
-	}
-	mv := poolMinViable
-	if mv < 1 {
-		mv = 1
-	}
-	if mv > poolWorkers {
-		mv = poolWorkers
-	}
-	c, err := cohort.NewPartialCohort(cohort.CohortID(poolRunID), members, cohort.DefaultBudget(), mv, nil)
+	members, err := poolWorkerIntents(poolRunID, generation, poolWorkers, rung)
 	if err != nil {
-		return fmt.Errorf("build worker cohort: %w", err)
+		return nil, cohort.Outcome{}, err
+	}
+	c, err := cohort.NewPartialCohort(cohort.CohortID(poolRunID), members, poolCohortBudget(), poolMinViableFor(poolWorkers), nil)
+	if err != nil {
+		return nil, cohort.Outcome{}, fmt.Errorf("build worker cohort: %w", err)
 	}
 
 	r := cohort.NewReconciler(act, obs, taskcohort.Classifier{}, nil, nil, nil)
 	fmt.Fprintf(os.Stderr, "🚀 Provisioning up to %d pool workers (%s%s)...\n", poolWorkers, poolInstanceType, spotSuffix(poolSpot))
 	outcome, err := r.Reconcile(ctx, c)
 	if err != nil {
-		return fmt.Errorf("provision workers: %w", err)
+		return nil, cohort.Outcome{}, fmt.Errorf("provision workers: %w", err)
 	}
-	if !outcome.Ready {
-		// Surface WHY: render each member's terminal fault (the AWS error code +
-		// message the Classifier preserved), so a provisioning failure is
-		// diagnosable instead of an opaque "failed to reach min viable". Mirrors
-		// how launchCohort renders job-array member failures.
-		var details []string
-		for _, m := range members {
-			rec := outcome.Records[m.ID]
-			if !rec.Succeeded() {
-				details = append(details, fmt.Sprintf("  %s: %s", m.ID, rec.Summary()))
-			}
+	return members, outcome, nil
+}
+
+// poolProvisionResult renders a reconciled pool. Ready, it says how many of
+// the requested workers exist and lists the rest with their reasons: a pool
+// that came up with 1 of 4 used to report "ready: requested 4 workers" (#1448).
+// Not ready, it is the error, with every missing worker's reason.
+func poolProvisionResult(runID string, members []cohort.EntityIntent, outcome cohort.Outcome, minViable int) (string, error) {
+	var missing []string
+	for _, m := range members {
+		if rec := outcome.Records[m.ID]; !rec.Succeeded() {
+			missing = append(missing, fmt.Sprintf("  %s: %s", m.ID, poolMemberReason(rec)))
 		}
-		return fmt.Errorf("pool failed to reach min viable (%d of %d) workers:\n%s",
-			mv, poolWorkers, strings.Join(details, "\n"))
 	}
-	return nil
+	up := len(members) - len(missing)
+	if !outcome.Ready {
+		return "", fmt.Errorf("pool failed to reach min viable (%d of %d) workers; %d came up:\n%s",
+			minViable, len(members), up, strings.Join(missing, "\n"))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "✅ Pool %q ready: %d of %d workers (min viable %d), queue created.\n", runID, up, len(members), minViable)
+	if len(missing) > 0 {
+		fmt.Fprintf(&b, "⚠️  %d worker(s) did not come up; the pool runs with %d:\n%s\n", len(missing), up, strings.Join(missing, "\n"))
+	}
+	return b.String(), nil
+}
+
+// poolMemberReason is cohort's Record.Summary with the fault's AWS error code
+// and message, which Summary leaves out ("terminal/ at phase=launch-acked",
+// #1448).
+func poolMemberReason(rec cohort.Record) string {
+	switch {
+	case rec.Terminal != nil:
+		return fmt.Sprintf("%s at phase=%s after %d rung(s)", poolFaultText(*rec.Terminal), rec.ReachedPhase, len(rec.Attempts))
+	case rec.CohortCancelled != nil:
+		cc := rec.CohortCancelled
+		return fmt.Sprintf("cohort-cancelled at phase=%s — culprit=%s %s at phase=%s",
+			cc.SurvivorPhase, cc.CulpritID, poolFaultText(cc.CulpritFault), cc.CulpritPhase)
+	default:
+		return rec.Summary()
+	}
+}
+
+func poolFaultText(f cohort.Fault) string {
+	code := f.Code
+	if code == "" {
+		code = "unknown"
+	}
+	s := fmt.Sprintf("%s/%s", f.Class, code)
+	if f.Message != "" {
+		s += ": " + f.Message
+	}
+	return s
+}
+
+// poolWorkerGeneration scopes the workers' RunInstances idempotency tokens to
+// one incarnation of the run's queue (#1448).
+//
+// The token used to be fixed per run id and worker index, while the request
+// it names is not: aws.Client.Launch tags every instance and volume with
+// spawn:launch-time and spawn:ttl-deadline, to the second. A second `pool
+// create` with the same run id sent the first attempt's tokens with new
+// timestamps, and EC2 refused every worker with IdempotentParameterMismatch.
+// Those timestamps are right to differ (a retry's TTL runs from its own
+// launch), so the token changes instead.
+//
+// Why this cannot make duplicate workers: within an attempt, every re-issue of
+// a worker's RunInstances (the SDK's retries, the #572 retry) sends the same
+// input under the same token, so EC2 returns the one instance. Across
+// attempts, a new token needs a new queue: a failed create deletes its queue,
+// so its retry creates a new one; a create while the pool is live finds the
+// same queue (CreateQueue returns an existing queue), so it gets the same
+// tokens and EC2 refuses or dedupes them, after poolLiveWorkers has already
+// refused it in words.
+//
+// Reading the creation time needs sqs:GetQueueAttributes, which `pool status`
+// needs too. Without it the tokens are scoped to this run of the command
+// instead: a retry still works, and only a create on a live pool loses the
+// token backstop, keeping poolLiveWorkers' refusal.
+func poolWorkerGeneration(ctx context.Context, q interface {
+	Incarnation(context.Context) (string, error)
+}, warn io.Writer) string {
+	inc, err := q.Incarnation(ctx)
+	if err == nil {
+		return "q" + inc
+	}
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:]) // crypto/rand.Read does not fail
+	fmt.Fprintf(warn, "⚠️  could not read the queue's creation time (%v); this attempt's launch tokens are its own, so a create on a live pool relies on the live-worker check alone\n", err)
+	return "r" + hex.EncodeToString(nonce[:])
+}
+
+// poolLiveWorkers names the run's workers that are not terminated or shutting
+// down.
+func poolLiveWorkers(ctx context.Context, client taskcohort.LaunchAPI, region, runID string) ([]string, error) {
+	insts, err := client.ListInstances(ctx, region, "") // pending, running, stopping, stopped
+	if err != nil {
+		return nil, fmt.Errorf("check for live workers of pool %q: %w", runID, err)
+	}
+	var live []string
+	for _, in := range insts {
+		if in.Tags["spawn:pool-run-id"] == runID {
+			live = append(live, in.Name)
+		}
+	}
+	sort.Strings(live)
+	return live, nil
 }
 
 var poolSubmitCmd = &cobra.Command{

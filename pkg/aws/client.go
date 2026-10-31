@@ -498,16 +498,41 @@ type runInstancesAPI interface {
 }
 
 // iamInstanceProfilePropagationBackoff is the retry schedule for the specific
-// transient in [isTransientIAMInstanceProfilePropagation] (spawn#572). A
-// handful of seconds on top of CreateOrGetInstanceProfile's existing 10s wait
-// is enough to cover EC2's separate, longer-tailed consumption-side
-// propagation without letting a genuinely bad profile name retry forever.
-var iamInstanceProfilePropagationBackoff = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+// transient in [isTransientIAMInstanceProfilePropagation] (spawn#572). The
+// attempts land 0, 2, 6, 14, 30 and 60 seconds after the first rejection.
+// CloudTrail for a 4-worker pool (spawn#1448) had the profile usable about 7s
+// after the first rejection, and IAM propagation has a longer tail than that,
+// so the schedule reaches a minute; a genuinely bad profile name still fails,
+// a minute later.
+var iamInstanceProfilePropagationBackoff = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
 
-// runInstancesSleep is time.Sleep by default; tests override the package var so
-// the "retries N times" and "exhausts retries" cases don't pay the real
-// wall-clock cost of the backoff schedule.
-var runInstancesSleep = time.Sleep
+// InstanceProfilePropagationRetryWindow is how long Launch keeps retrying a
+// RunInstances that EC2 rejects for a just-created instance profile (#572):
+// the sum of the backoff schedule. A caller that bounds Launch with a context
+// deadline (the pool's cohort launch budget, #1448) must allow at least this
+// much on top of Launch's other calls, or the deadline, not the retry schedule,
+// decides when the launch gives up.
+func InstanceProfilePropagationRetryWindow() time.Duration {
+	var total time.Duration
+	for _, d := range iamInstanceProfilePropagationBackoff {
+		total += d
+	}
+	return total
+}
+
+// runInstancesSleep waits d or until ctx ends, returning ctx's error in that
+// case. A package var so the retry tests count and steer the backoff without
+// paying its wall-clock cost.
+var runInstancesSleep = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
 
 // runInstancesWithRetry calls RunInstances, retrying ONLY the specific
 // transient IAM→EC2 instance-profile-propagation error (spawn#572), with the
@@ -516,27 +541,46 @@ var runInstancesSleep = time.Sleep
 // AMI, etc.) or any other AWS error — is returned immediately with no retry:
 // this must not become a blanket retry-on-any-launch-error mechanism.
 //
+// Every attempt sends the same input, ClientToken included, so a retry is the
+// same request to EC2.
+//
+// If ctx ends while the transient is still being retried, the error returned
+// wraps both ctx's error and the last AWS rejection. Returning ctx's error
+// alone dropped the AWS code, which is how a pool worker came to be reported
+// as "terminal/" with no reason (#1448).
+//
 // Retrying RunInstances here is safe from an orphan-resource perspective:
 // Provision (pkg/launcher/provision.go) creates the instance record, tags, and
 // any ephemeral FSx strictly AFTER RunInstances succeeds (#213) — a rejected
 // RunInstances call has created nothing, so a retry attempt accumulates no
 // partial state to clean up.
 func runInstancesWithRetry(ctx context.Context, api runInstancesAPI, input *ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
+	var rejected error // the last transient rejection, kept for a ctx that ends
 	for attempt := 0; ; attempt++ {
 		result, err := api.RunInstances(ctx, input)
 		if err == nil {
 			return result, nil
 		}
+		if rejected != nil && ctx.Err() != nil {
+			if isTransientIAMInstanceProfilePropagation(err) {
+				rejected = err
+			}
+			return nil, retryStopped(ctx.Err(), attempt, rejected)
+		}
 		if !isTransientIAMInstanceProfilePropagation(err) || attempt >= len(iamInstanceProfilePropagationBackoff) {
 			return nil, err
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		rejected = err
+		if serr := runInstancesSleep(ctx, iamInstanceProfilePropagationBackoff[attempt]); serr != nil {
+			return nil, retryStopped(serr, attempt+1, rejected)
 		}
-		runInstancesSleep(iamInstanceProfilePropagationBackoff[attempt])
 	}
+}
+
+// retryStopped is the error for a #572 retry cut short by its context: it
+// wraps both, so errors.Is finds the context error and errors.As the AWS one.
+func retryStopped(ctxErr error, attempts int, rejected error) error {
+	return fmt.Errorf("RunInstances retry stopped (%w) after %d attempt(s) rejected with: %w", ctxErr, attempts, rejected)
 }
 
 // Launch starts a new EC2 instance as described by launchConfig and returns its

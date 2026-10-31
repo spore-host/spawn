@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 
+	smithy "github.com/aws/smithy-go"
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
 )
@@ -182,26 +183,55 @@ func (o *Observer) Observe(ctx context.Context, ids []cohort.EntityID) ([]cohort
 // identical in spirit to mpicohort's — capacity errors advance the fallback
 // ladder, throttles back off, everything else is terminal — because fault
 // classification is a property of the AWS error, not of what the instance will do.
+//
+// The Fault carries the AWS error code and message, which is what the pool
+// prints for a worker that did not come up (#1448). The code comes from the
+// LaunchError, or from the AWS error itself when Launch failed before
+// RunInstances.
 type Classifier struct{}
 
 func (Classifier) Classify(err error) cohort.Fault {
 	if err == nil {
 		return cohort.Fault{Class: cohort.FaultRetryableConsistency}
 	}
-	var le *aws.LaunchError
-	code := ""
-	if errors.As(err, &le) {
-		code = le.Code
-	}
+	code, msg := launchErrorDetail(err)
 	switch code {
 	case "InsufficientInstanceCapacity", "InsufficientHostCapacity",
 		"MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow":
-		return cohort.Fault{Class: cohort.FaultCapacityExhausted, Code: code, Message: err.Error()}
+		return cohort.Fault{Class: cohort.FaultCapacityExhausted, Code: code, Message: msg}
 	case "RequestLimitExceeded", "Throttling":
-		return cohort.Fault{Class: cohort.FaultThrottle, Code: code, Message: err.Error()}
+		return cohort.Fault{Class: cohort.FaultThrottle, Code: code, Message: msg}
 	default:
-		return cohort.Fault{Class: cohort.FaultTerminal, Code: code, Message: err.Error()}
+		return cohort.Fault{Class: cohort.FaultTerminal, Code: code, Message: msg}
 	}
+}
+
+// launchErrorDetail returns err's AWS error code and a message for a person:
+// AWS's own message when there is one (not the SDK's operation/RequestID
+// wrapping), plus a note when the launch's deadline cut a retry short, since
+// that is why a transient error ended the launch.
+func launchErrorDetail(err error) (code, msg string) {
+	var le *aws.LaunchError
+	if errors.As(err, &le) {
+		code = le.Code
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return code, err.Error()
+	}
+	if code == "" {
+		code = apiErr.ErrorCode()
+	}
+	msg = apiErr.ErrorMessage()
+	if msg == "" {
+		msg = err.Error()
+	}
+	for _, ctxErr := range []error{context.DeadlineExceeded, context.Canceled} {
+		if errors.Is(err, ctxErr) {
+			msg += " (still failing when the launch was stopped: " + ctxErr.Error() + ")"
+		}
+	}
+	return code, msg
 }
 
 // rungOf pulls the current Rung from a RungPlacement intent (zero Rung otherwise).

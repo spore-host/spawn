@@ -630,6 +630,7 @@ func GetEFSDNSName(filesystemID, region string) string
 func ImageCreateTags(userTags, sourceTags map[string]string) map[string]string
 func ImageProvenanceFromTags(tags map[string]string) ImageProvenance
 func ImageProvenanceTagKeys() []string
+func InstanceProfilePropagationRetryWindow() time.Duration
 func IsAccessDenied(err error) bool
 func IsImageProvenanceTagKey(key string) bool
 func IsLikelyOrphan(r ManagedResource, hasRunningInstance bool) bool
@@ -950,6 +951,7 @@ func (*Queue) Ack(ctx context.Context, c *Claimed) error
 func (*Queue) Claim(ctx context.Context, waitSeconds int32) (*Claimed, error)
 func (*Queue) Delete(ctx context.Context) error
 func (*Queue) Depth(ctx context.Context) (visible, inFlight *int, err error)
+func (*Queue) Incarnation(ctx context.Context) (string, error)
 func (*Queue) Submit(ctx context.Context, ref TaskRef) error
 func (*Queue) TagErr() error
 func (*Queue) URL() string

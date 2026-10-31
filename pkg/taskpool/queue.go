@@ -122,6 +122,11 @@ func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTim
 		in.Tags = nil
 		out, err = client.CreateQueue(ctx, in)
 	}
+	var recent *types.QueueDeletedRecently
+	if errors.As(err, &recent) {
+		// What a failed `pool create` leaves its retry: it deleted the queue (#1448).
+		return nil, fmt.Errorf("create queue %s: %w (SQS will not re-create a queue name for 60 seconds after it is deleted, as a failed 'pool create' does; retry in a minute)", name, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create queue %s: %w", name, err)
 	}
@@ -302,6 +307,27 @@ func (q *Queue) Depth(ctx context.Context) (visible, inFlight *int, err error) {
 	}
 	return knownCount(out.Attributes, types.QueueAttributeNameApproximateNumberOfMessages),
 		knownCount(out.Attributes, types.QueueAttributeNameApproximateNumberOfMessagesNotVisible), nil
+}
+
+// Incarnation identifies this particular queue among every queue the run's
+// name has had: SQS's CreatedTimestamp. A re-create of a live queue returns
+// the same queue and so the same incarnation; a queue created after the
+// previous one was deleted (a failed `pool create`, retried) has a new one.
+// `pool create` derives its workers' RunInstances idempotency tokens from it
+// (#1448).
+func (q *Queue) Incarnation(ctx context.Context) (string, error) {
+	out, err := q.client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       aws.String(q.url),
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameCreatedTimestamp},
+	})
+	if err != nil {
+		return "", fmt.Errorf("creation time of queue %s: %w", q.name, err)
+	}
+	ts := out.Attributes[string(types.QueueAttributeNameCreatedTimestamp)]
+	if ts == "" {
+		return "", fmt.Errorf("creation time of queue %s: SQS did not return %s", q.name, types.QueueAttributeNameCreatedTimestamp)
+	}
+	return ts, nil
 }
 
 // knownCount is poolqueue.Count as a pointer: nil when the count is unknown.
