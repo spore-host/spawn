@@ -35,6 +35,14 @@ type stubProvider struct {
 	otherInstances int
 	reportVacated  bool
 	countCalls     int
+	// countSeq, when set, overrides otherInstances: call i returns countSeq[i]
+	// (the last entry repeats), e.g. {0, 1} for a relaunch during the settle.
+	// countHook, when set, runs inside each count call with its context; when
+	// it returns ok, its n is the count returned.
+	countSeq  []int
+	countHook func(ctx context.Context, call int) (n int, ok bool)
+	// onTerminate, when set, runs as Terminate is called.
+	onTerminate func()
 
 	// refreshConfigErr, when set, is returned by RefreshConfig — lets tests
 	// simulate a DescribeTags failure (spawn#505).
@@ -56,6 +64,9 @@ func (s *stubProvider) GetConfig(_ context.Context) (*provider.Config, error) {
 }
 func (s *stubProvider) RefreshConfig(_ context.Context) error { return s.refreshConfigErr }
 func (s *stubProvider) Terminate(_ context.Context, _ string) error {
+	if s.onTerminate != nil {
+		s.onTerminate()
+	}
 	if s.terminateErr != nil {
 		return s.terminateErr
 	}
@@ -92,8 +103,16 @@ func (s *stubProvider) MeasureCostFootprint(_ context.Context) (provider.CostFoo
 
 // otherInstances controls the region-vacated check; -1 (unknown) by default so
 // existing tests don't trigger the 60s settle path.
-func (s *stubProvider) CountOtherManagedInstances(_ context.Context) int {
+func (s *stubProvider) CountOtherManagedInstances(ctx context.Context) int {
 	s.countCalls++
+	if s.countHook != nil {
+		if n, ok := s.countHook(ctx, s.countCalls); ok {
+			return n
+		}
+	}
+	if len(s.countSeq) > 0 {
+		return s.countSeq[min(s.countCalls, len(s.countSeq))-1]
+	}
 	if s.otherInstances == 0 && !s.reportVacated {
 		return -1
 	}
@@ -913,53 +932,6 @@ func TestPreStopDetail(t *testing.T) {
 	if got := preStopDetail("exit 1", "  fatal: no creds\n"); got != "exit 1 — fatal: no creds" {
 		t.Errorf("with tail: got %q", got)
 	}
-}
-
-func TestCheckRegionVacated(t *testing.T) {
-	mkAgent := func(sp *stubProvider) *Agent {
-		return &Agent{
-			provider:            sp,
-			identity:            &provider.Identity{InstanceID: "i-test123", Region: "us-east-1"},
-			config:              &provider.Config{},
-			regionVacatedSettle: time.Millisecond, // keep the settle window tiny
-		}
-	}
-
-	t.Run("others remain: returns immediately, no settle re-check", func(t *testing.T) {
-		sp := &stubProvider{otherInstances: 2}
-		mkAgent(sp).checkRegionVacated(context.Background())
-		if sp.countCalls != 1 {
-			t.Errorf("expected 1 count call (early return), got %d", sp.countCalls)
-		}
-	})
-
-	t.Run("unknown count: returns immediately", func(t *testing.T) {
-		sp := &stubProvider{otherInstances: 0, reportVacated: false} // -1 unknown
-		mkAgent(sp).checkRegionVacated(context.Background())
-		if sp.countCalls != 1 {
-			t.Errorf("expected 1 count call (unknown → not vacated), got %d", sp.countCalls)
-		}
-	})
-
-	t.Run("vacated: settles then re-checks", func(t *testing.T) {
-		sp := &stubProvider{otherInstances: 0, reportVacated: true}
-		mkAgent(sp).checkRegionVacated(context.Background())
-		if sp.countCalls != 2 {
-			t.Errorf("expected 2 count calls (initial + settle re-check), got %d", sp.countCalls)
-		}
-	})
-
-	t.Run("cancelled context during settle: no re-check", func(t *testing.T) {
-		sp := &stubProvider{otherInstances: 0, reportVacated: true}
-		a := mkAgent(sp)
-		a.regionVacatedSettle = time.Hour // long, so cancellation wins
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		a.checkRegionVacated(ctx)
-		if sp.countCalls != 1 {
-			t.Errorf("expected 1 count call (cancelled before settle), got %d", sp.countCalls)
-		}
-	})
 }
 
 // TestTotalComputeSecondsCarriesBase asserts the invariant that makes an

@@ -31,7 +31,6 @@ func TestIdleActionHonoursTerminateOnIdle(t *testing.T) {
 				IdleTimeout: 30 * time.Minute, IdleCPUPercent: 5,
 				TerminateOnIdle: tc.terminate, HibernateOnIdle: tc.hibernate,
 			}, nil)
-			a.regionVacatedSettle = time.Millisecond
 			a.idleTimeoutReached(context.Background(), time.Now())
 			if sp.terminated != tc.wantTerminated || sp.stopped != tc.wantStopped || sp.hibernated != tc.wantHib {
 				t.Errorf("terminated=%v stopped=%v hibernated=%v, want %v/%v/%v",
@@ -56,7 +55,6 @@ func TestIdleTerminateIsAnnouncedOnceAccepted(t *testing.T) {
 			if fail {
 				sp.terminateErr = errors.New("api error: terminate refused")
 			}
-			a.regionVacatedSettle = time.Millisecond
 			a.idleTimeoutReached(context.Background(), time.Now())
 
 			want := 1

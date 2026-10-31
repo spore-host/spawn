@@ -209,10 +209,11 @@ type Agent struct {
 	// it take long enough that wall-clock bounds flake (#978's test on Windows).
 	graceSleep func(time.Duration)
 
-	// regionVacatedSettle is how long the last-instance check waits before
-	// re-confirming the region is empty (#260). Zero means the production default
-	// (60s); tests set it small.
-	regionVacatedSettle time.Duration
+	// vacatedProbe is the region-vacated check in flight for the termination
+	// being carried out (#260, #1456), started where the decision to terminate
+	// is made so its settle window overlaps the waits that precede Terminate.
+	// nil when none is running. Touched only by the monitor goroutine.
+	vacatedProbe *regionVacatedProbe
 
 	// The launch Elastic IP release on a Spot terminate notice (#661): a
 	// fire-once guard (the spot monitor re-enters every 5s), and seams for the
@@ -2148,6 +2149,11 @@ func (a *Agent) checkCompletion(ctx context.Context) bool {
 		// and cost-limit checks below.
 		if !a.completionAnnounced {
 			a.completionAnnounced = true
+			// The decision to terminate is made here, so the region-vacated
+			// settle starts here and runs through the grace period below (#1456).
+			if strings.EqualFold(a.config.OnComplete, "terminate") {
+				a.startRegionVacatedProbe(ctx)
+			}
 			a.announceCompletion(ctx)
 		}
 
@@ -2659,8 +2665,18 @@ func preStopDetail(summary, outputTail string) string {
 
 // terminate runs the pre-stop hook and cleanup, then asks the provider to
 // terminate the instance, returning the provider's error.
+//
+// The region-vacated check (#260) never delays Terminate (#1456): it is started
+// here, or earlier by the completion path, so its settle window is the pre-stop,
+// the cleanup and the grace period this function and its caller already wait
+// through, and it is cut at the user warning. Without a notifier it does not
+// run at all.
 func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.ExitReason) error {
 	log.Printf("Terminating instance (reason: %s)", reason)
+
+	a.startRegionVacatedProbe(ctx) // no-op if the completion path started one
+	probe := a.vacatedProbe
+	a.vacatedProbe = nil
 
 	a.runPreStop(time.Time{}, why)
 
@@ -2671,49 +2687,26 @@ func (a *Agent) terminate(ctx context.Context, reason string, why taskproto.Exit
 		"Reason": reason,
 	}))
 
+	// The settle window ends here: the re-count runs during the warning wait.
+	probe.endSettle()
+
 	// Wait a moment for users to see warning
 	time.Sleep(a.shutdownWarnDelay())
 
 	// Last-instance check: if no other spawn-managed instances remain running in
 	// this region, notify that the region is vacated (#260). Notify-only by
 	// default; auto-cleanup is a separate opt-in handled control-plane side.
-	a.checkRegionVacated(ctx)
+	if probe.vacated() {
+		region := a.identity.Region
+		log.Printf("region-vacated: no spawn-managed instances remain in %s", region)
+		a.notifier.Notify(ctx, "region_vacated", region)
+	}
 
 	err := a.provider.Terminate(ctx, reason)
 	if err != nil {
 		log.Printf("Failed to terminate: %v", err)
 	}
 	return err
-}
-
-// checkRegionVacated fires a region_vacated notification when this is the last
-// spawn-managed instance running in the region. It re-checks after 60s to avoid
-// a false alarm during a rapid relaunch (e.g. a job array rolling). Best-effort:
-// an unknown count (-1) is treated as "not vacated" so we never cry wolf (#260).
-func (a *Agent) checkRegionVacated(ctx context.Context) {
-	if n := a.provider.CountOtherManagedInstances(ctx); n != 0 {
-		return // others remain, or the count is unknown (-1)
-	}
-
-	// Confirm the region is still empty after a short settle window — a rapid
-	// relaunch (another instance coming up) means it isn't really vacated.
-	settle := a.regionVacatedSettle
-	if settle == 0 {
-		settle = 60 * time.Second
-	}
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(settle):
-	}
-	if n := a.provider.CountOtherManagedInstances(ctx); n != 0 {
-		log.Printf("region-vacated: re-check found %d other instance(s); not vacated", n)
-		return
-	}
-
-	region := a.identity.Region
-	log.Printf("region-vacated: no spawn-managed instances remain in %s", region)
-	a.notifier.Notify(ctx, "region_vacated", region)
 }
 
 // Reload re-reads configuration from provider without restarting the daemon.
