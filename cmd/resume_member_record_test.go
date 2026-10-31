@@ -647,6 +647,13 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 		b, err := json.Marshal(pf)
 		return string(b), err
 	}
+	// Flags read only at --detach, by a check that decides whether the sweep
+	// is launched at all rather than how its members launch. The members a
+	// detached resume relaunches are those of a launch that passed it; each
+	// claim is checked (the params must not differ).
+	consumedAtDetach := map[string]string{
+		"allow-missing-endpoints": "--no-public-ip's subnet check, run at --detach (#1437)",
+	}
 	carriedOnDetached := 0
 	for _, n := range carriedSweepFlags(t) {
 		t.Run(n, func(t *testing.T) {
@@ -680,6 +687,13 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 			after, err := pfOf(t)
 			if err != nil {
 				t.Skipf("a detached launch refuses --%s (%v), so there is nothing to resume", n, err)
+			}
+			if why, ok := consumedAtDetach[n]; ok {
+				if before != after {
+					t.Errorf("--%s is said to be read only at --detach (%s), but it changes the params uploaded for "+
+						"the orchestrator", n, why)
+				}
+				return
 			}
 			if before == after {
 				t.Errorf("--%s is carried to a sweep's members, but the params uploaded for the orchestrator are the same "+

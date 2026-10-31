@@ -371,10 +371,11 @@ var foregroundDispositions = map[string]foregroundDisposition{
 	"CustomUserData":     {userData: true},
 	"ClientToken":        {direct: whyDirect + " (RunInstances ClientToken); no sweep sets one"},
 	"EFAInterfaces":      {direct: whyDirect + " (the multi-card interfaces and their Elastic IP, #661)", prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
-	// --no-public-ip (#1433): Client.Launch checks the subnet, asks for no
-	// public IP and allocates no Elastic IP; the CLI pins and checks each
-	// member's subnet first (preflightSweepNoPublicIP).
-	"NoPublicIP": {direct: whyDirect + " (the subnet check, no public IP requested, no Elastic IP, #1433)", prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	// --no-public-ip (#1433): no public IP requested is a LaunchSettings
+	// field (#1437); Client.Launch also checks the subnet and allocates no
+	// Elastic IP. The CLI pins and checks each member's subnet first
+	// (preflightSweepNoPublicIP).
+	"NoPublicIP": {settings: true, direct: whyDirect + " (the subnet check, no Elastic IP, #1433)", prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
 	"AllowMissingEndpoints": {direct: whyDirect + " (--no-public-ip's subnet check launches past what is missing, #1433)", prereq: func(c *aws.LaunchConfig) {
 		c.NoPublicIP, c.SubnetID = true, "subnet-1"
 	}},

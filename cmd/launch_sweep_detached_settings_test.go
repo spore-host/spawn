@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,13 +77,15 @@ var detachedDispositions = map[string]detachedDisposition{
 	// Refused on its own (#1404): with EFAInterfaces 0 there is no secondary
 	// card, and with more the multi-card launch itself is refused.
 	"EFASecondaryType": {refused: true, prereq: func(c *aws.LaunchConfig) { c.EFAEnabled = true }},
-	// Refused, not carried (#1433): the subnet check runs at launch with the
-	// caller's VPC reads, which the orchestrator does not make.
-	"NoPublicIP":            {refused: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
-	"AllowMissingEndpoints": {refused: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
-	"EBSKMSKeyID":           {refused: true, settings: true},
-	"FSxLustreCreate":       {refused: true},
-	"FSxLustreRecall":       {refused: true},
+	// Carried (#1437): the subnet check runs at --detach with the caller's
+	// VPC reads (detachedBootstrap.privateNetOf), and the orchestrator asks
+	// for no public IP from the settings.
+	"NoPublicIP": {settings: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	"AllowMissingEndpoints": {why: "read only by --no-public-ip's subnet check, which runs at --detach (detachedBootstrap.privateNetOf)",
+		prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
+	"EBSKMSKeyID":     {refused: true, settings: true},
+	"FSxLustreCreate": {refused: true},
+	"FSxLustreRecall": {refused: true},
 
 	"PlacementGroupPrefix": {why: whyNotSweep + " (an MPI job array's per-AZ groups)"},
 	"DNSFunctionARN":       {why: whyNotSweep + " (the custom-DNS preflight, which a sweep does not run on either path)"},
@@ -329,15 +335,16 @@ func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 		want string
 		alt  string // the remedy the error offers
 	}{
-		"fsx-create":          {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
-		"fsx-recall":          {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
-		"no public ip":        {base: aws.LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1"}, want: "--no-public-ip", alt: "--no-detach"},
-		"multi-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, row: map[string]interface{}{"instance_type": "p5en.48xlarge"}, want: "--efa with 4 EFA interfaces", alt: "--no-detach"},
-		"every-card EFA":      {base: aws.LaunchConfig{EFAEnabled: true}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa with 2 EFA interfaces", alt: "--efa-interfaces 1"},
-		"efa secondary type":  {base: aws.LaunchConfig{EFAEnabled: true, EFASecondaryType: "efa"}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa-secondary-type efa", alt: "--no-detach"},
-		"customer KMS key":    {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key", alt: "--no-detach"},
-		"vpc without subnet":  {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet", alt: "Pass --subnet"},
-		"hibernation pattern": {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern", alt: "--no-detach"},
+		"fsx-create":              {base: aws.LaunchConfig{FSxLustreCreate: true, FSxLifecycle: "ephemeral", FSxS3Bucket: "b"}, want: "--fsx-create", alt: "--fsx-id"},
+		"fsx-recall":              {base: aws.LaunchConfig{FSxLustreRecall: "stack"}, want: "--fsx-recall", alt: "--fsx-id"},
+		"no public ip, no subnet": {base: aws.LaunchConfig{NoPublicIP: true}, want: "--no-public-ip needs a subnet", alt: "--az"},
+		"no public ip, row dns":   {base: aws.LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1"}, row: map[string]interface{}{"dns": "box"}, want: "--no-public-ip cannot register DNS", alt: "--no-dns"},
+		"multi-card EFA":          {base: aws.LaunchConfig{EFAEnabled: true, EFAInterfaces: 4}, row: map[string]interface{}{"instance_type": "p5en.48xlarge"}, want: "--efa with 4 EFA interfaces", alt: "--no-detach"},
+		"every-card EFA":          {base: aws.LaunchConfig{EFAEnabled: true}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa with 2 EFA interfaces", alt: "--efa-interfaces 1"},
+		"efa secondary type":      {base: aws.LaunchConfig{EFAEnabled: true, EFASecondaryType: "efa"}, row: map[string]interface{}{"instance_type": "c8gn.48xlarge"}, want: "--efa-secondary-type efa", alt: "--no-detach"},
+		"customer KMS key":        {base: aws.LaunchConfig{EBSKMSKeyID: "arn:aws:kms:us-east-1:1:key/k"}, want: "KMS key", alt: "--no-detach"},
+		"vpc without subnet":      {base: aws.LaunchConfig{VPCID: "vpc-1"}, want: "--vpc without --subnet", alt: "Pass --subnet"},
+		"hibernation pattern":     {row: map[string]interface{}{"instance_type": "m7i.large|m7i.xlarge", "hibernate": true}, want: "instance type pattern", alt: "--no-detach"},
 	}
 	for name, tc := range cases {
 		row := map[string]interface{}{"trial": "a"}
@@ -359,5 +366,83 @@ func TestDetachedSweepRefusesWhatTheOrchestratorCannotLaunch(t *testing.T) {
 		if _, shipped := pf.Params[0][detachedLaunchSettingsKey]; shipped {
 			t.Errorf("%s: settings were seeded for a refused member", name)
 		}
+	}
+}
+
+// TestDetachedNoPublicIPChecksEveryMembersSubnet is #1437's CLI gate. A
+// detached sweep's members are launched later by the orchestrator, which
+// cannot make --no-public-ip's subnet check (it needs VPC reads its role has
+// not got), so the CLI makes it at --detach for every member, in the subnet
+// that member lands in: a row's own az is checked, not the CLI's, and an
+// AZ-only member's subnet is pinned in its settings so EC2 cannot pick
+// another. A member whose subnet fails refuses the whole detach before
+// anything is uploaded.
+func TestDetachedNoPublicIPChecksEveryMembersSubnet(t *testing.T) {
+	base := aws.LaunchConfig{NoPublicIP: true, AvailabilityZone: "us-east-1a"}
+	newPF := func() *ParamFileFormat {
+		return &ParamFileFormat{
+			Defaults: map[string]interface{}{"instance_type": "m7i.large", "ami": "ami-1", "region": "us-east-1", "ttl": "1h"},
+			Params:   []map[string]interface{}{{"trial": "a"}, {"trial": "b", "az": "us-east-1c"}, {"trial": "c"}},
+		}
+	}
+	var checked []aws.LaunchConfig
+	boot := testDetachedBootstrap(t)
+	pin := boot.privateNetOf
+	boot.privateNetOf = func(cfg *aws.LaunchConfig) error {
+		checked = append(checked, *cfg)
+		return pin(cfg)
+	}
+	pf := newPF()
+	if err := seedDetachedBootstrap(pf, base, "sw-1", "sw", boot); err != nil {
+		t.Fatalf("seedDetachedBootstrap: %v", err)
+	}
+	wantAZ := []string{"us-east-1a", "us-east-1c", "us-east-1a"}
+	if len(checked) != len(wantAZ) {
+		t.Fatalf("the subnet check ran for %d members, want every one of %d", len(checked), len(wantAZ))
+	}
+	for i, az := range wantAZ {
+		if checked[i].AvailabilityZone != az || !checked[i].NoPublicIP {
+			t.Errorf("member %d: checked %+v, want its own AZ %s with NoPublicIP", i, checked[i], az)
+		}
+		s := shippedSettings(t, pf, i)
+		if !s.NoPublicIP || s.SubnetID != "subnet-in-"+az {
+			t.Errorf("member %d ships no_public_ip=%t subnet %q; want true and the subnet that was checked (subnet-in-%s)",
+				i, s.NoPublicIP, s.SubnetID, az)
+		}
+	}
+
+	// A member whose subnet fails the check refuses the detach.
+	boot.privateNetOf = func(cfg *aws.LaunchConfig) error {
+		if cfg.AvailabilityZone == "us-east-1c" {
+			return aws.ErrPrivateNetworkIncomplete
+		}
+		return pin(cfg)
+	}
+	pf = newPF()
+	err := seedDetachedBootstrap(pf, base, "sw-1", "sw", boot)
+	if !errors.Is(err, aws.ErrPrivateNetworkIncomplete) || !strings.Contains(err.Error(), "param set 1") {
+		t.Fatalf("err = %v; want member 1's subnet refusal", err)
+	}
+	for i := range pf.Params {
+		if _, shipped := pf.Params[i][detachedLaunchSettingsKey]; shipped {
+			t.Errorf("member %d's settings were seeded although the detach was refused", i)
+		}
+	}
+
+	// And the production check is aws.Client.PreflightNoPublicIP, through the
+	// seam the foreground paths use, wired into `spawn launch --detach`.
+	if !slices.Contains(funcCalls(t, "launch_sweep.go")["launchSweepDetached"], "detachedSubnetCheck") {
+		t.Error("launchSweepDetached does not give its detached bootstrap the subnet check")
+	}
+	var prodChecked int
+	prev := preflightNoPublicIPFor
+	preflightNoPublicIPFor = func(_ context.Context, _ *aws.Client, cfg *aws.LaunchConfig, _ []string, _ io.Writer) (aws.PrivateCheck, error) {
+		prodChecked++
+		return aws.PrivateCheck{}, aws.ErrPrivateNetworkIncomplete
+	}
+	t.Cleanup(func() { preflightNoPublicIPFor = prev })
+	cfg := base
+	if err := detachedSubnetCheck(context.Background(), nil)(&cfg); !errors.Is(err, aws.ErrPrivateNetworkIncomplete) || prodChecked != 1 {
+		t.Errorf("production subnet check: err %v after %d checks; want PreflightNoPublicIP's refusal, once", err, prodChecked)
 	}
 }

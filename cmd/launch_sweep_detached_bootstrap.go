@@ -80,6 +80,26 @@ type detachedBootstrap struct {
 	// member's (#1407), so detachedSettingsGuard refuses the count it would
 	// launch with: resolveSweepMemberEFA through memoEFACapacity in production.
 	efaOf func(cfg *aws.LaunchConfig) error
+	// privateNetOf is a --no-public-ip member's subnet check (#1437), run at
+	// --detach with the caller's credentials because the orchestrator cannot
+	// make it: with only an AZ it picks and pins the subnet, then refuses one
+	// that cannot reach what spored and the SSM agent need, unless
+	// --allow-missing-endpoints. aws.Client.PreflightNoPublicIP in production.
+	//
+	// Only `spawn launch --detach` sets it (detachedSubnetCheck). A schedule
+	// has none: its params are replayed for as long as it runs, so a check
+	// made at `spawn schedule create` would not hold, and no schedule config
+	// sets NoPublicIP.
+	privateNetOf func(cfg *aws.LaunchConfig) error
+}
+
+// detachedSubnetCheck is the production detachedBootstrap.privateNetOf:
+// aws.Client.PreflightNoPublicIP, through the seam the foreground paths use.
+func detachedSubnetCheck(ctx context.Context, client *aws.Client) func(cfg *aws.LaunchConfig) error {
+	return func(cfg *aws.LaunchConfig) error {
+		_, err := preflightNoPublicIPFor(ctx, client, cfg, nil, os.Stderr)
+		return err
+	}
 }
 
 // newDetachedBootstrap returns the production detachedBootstrap: the local
@@ -190,6 +210,18 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		}
 		if err := windowsPluginGuard(cfg.TargetOS, decls); err != nil {
 			return fmt.Errorf("param set %d: %w", i, err)
+		}
+		// --no-public-ip: the member's subnet, pinned and checked (#1437).
+		// After the target OS (a Windows bootstrap needs NAT for its AWS CLI
+		// installer) and before the settings, which carry the pinned subnet:
+		// an AZ-only row would otherwise let EC2 pick one nobody checked.
+		if cfg.NoPublicIP {
+			if b.privateNetOf == nil {
+				return fmt.Errorf("param set %d: no subnet check: --no-public-ip would launch in an unchecked subnet", i)
+			}
+			if err := b.privateNetOf(&cfg); err != nil {
+				return fmt.Errorf("param set %d: %w", i, err)
+			}
 		}
 		// Before the tags: the FSx mount name the lookup finds is one of them.
 		if b.storageOf == nil {

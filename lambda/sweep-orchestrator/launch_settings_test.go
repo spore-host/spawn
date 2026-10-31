@@ -2,6 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -174,4 +178,75 @@ func TestScheduleReplayedLegacyParamsMemberLaunches(t *testing.T) {
 		t.Fatalf("a schedule-replayed legacy member was refused: %v", err)
 	}
 	assertLegacyLaunch(t, in, true)
+}
+
+// TestPrivateMemberLaunchesWithNoPublicIP is #1437's Lambda half: a member the
+// CLI shipped with no_public_ip (its subnet checked and pinned at --detach)
+// asks RunInstances for no public IP on its interface, in that subnet, where
+// it would otherwise ask for one (#308). Settings saying no_public_ip with no
+// subnet were not written by the CLI and are refused: EC2 would pick a subnet
+// nobody checked.
+func TestPrivateMemberLaunchesWithNoPublicIP(t *testing.T) {
+	build := func(lc *spawnaws.LaunchConfig) (*ec2.RunInstancesInput, error) {
+		config := map[string]interface{}{userDataParam: "x", tagsParam: cliTags(nil), launchSettingsParam: cliSettings(t, lc)}
+		return buildRunInstancesInput(&SweepRecord{SweepID: "s"}, config, 0, "c8i.large", time.Now())
+	}
+	public, err := build(&spawnaws.LaunchConfig{SubnetID: "subnet-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(public.NetworkInterfaces) != 1 || !awssdk.ToBool(public.NetworkInterfaces[0].AssociatePublicIpAddress) {
+		t.Fatalf("a plain member's interfaces %+v do not ask for a public IP; the gate below proves nothing", public.NetworkInterfaces)
+	}
+	private, err := build(&spawnaws.LaunchConfig{SubnetID: "subnet-1", NoPublicIP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(private.NetworkInterfaces) != 1 {
+		t.Fatalf("NetworkInterfaces = %+v, want one", private.NetworkInterfaces)
+	}
+	ni := private.NetworkInterfaces[0]
+	if ni.AssociatePublicIpAddress == nil || *ni.AssociatePublicIpAddress || awssdk.ToString(ni.SubnetId) != "subnet-1" {
+		set := "unset"
+		if ni.AssociatePublicIpAddress != nil {
+			set = fmt.Sprint(*ni.AssociatePublicIpAddress)
+		}
+		t.Errorf("a --no-public-ip member's interface has AssociatePublicIpAddress %s in subnet %q; want an explicit false "+
+			"(a default subnet assigns one otherwise) in the checked subnet-1", set, awssdk.ToString(ni.SubnetId))
+	}
+	if in, err := build(&spawnaws.LaunchConfig{NoPublicIP: true, AvailabilityZone: "us-east-1a"}); err == nil || in != nil {
+		t.Errorf("a private-only member with no subnet was launched (input built: %t, err=%v)", in != nil, err)
+	}
+}
+
+// eipCall is an invocation of an EC2 Elastic IP operation.
+var eipCall = regexp.MustCompile(`\.(AllocateAddress|AssociateAddress|DisassociateAddress|ReleaseAddress)\(`)
+
+// TestOrchestratorNeverManagesElasticIPs: a member gets its public IP, if any,
+// from RunInstances alone; this Lambda allocates and associates no Elastic IP.
+// That is why multi-card EFA, which needs one, is refused at --detach (#1353),
+// and why a --no-public-ip member needs no more than its settings to have no
+// public address at all (#1437). Every non-test source file is read.
+func TestOrchestratorNeverManagesElasticIPs(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		read++
+		if m := eipCall.Find(src); m != nil {
+			t.Errorf("%s calls %s: the orchestrator does not manage Elastic IPs; a member's public IP is RunInstances'", f, m)
+		}
+	}
+	if read == 0 {
+		t.Fatal("no orchestrator source found")
+	}
 }

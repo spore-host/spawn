@@ -404,7 +404,8 @@ func init() {
 		"so the region's Elastic IP quota does not limit the fleet. Needs --subnet-id, or --az to let spawn pick a subnet. "+
 		"Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a NAT gateway route, "+
 		"or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the "+
-		"launch if not. spawn connect uses SSM. Refused with --dns and --wait-for-ssh; the DNS record --name implies is skipped")
+		"launch if not; a sweep checks each member's subnet, a detached one at --detach. spawn connect uses SSM. Refused with --dns and "+
+		"--wait-for-ssh; the DNS record --name implies is skipped")
 	launchCmd.Flags().BoolVar(&allowMissingEndpoints, "allow-missing-endpoints", false, "With --no-public-ip: launch even when the subnet lacks a VPC endpoint or NAT route it needs. "+
 		"What is missing is still listed; without it the bootstrap may not install spored, spored may not enforce --ttl or --cost-limit, "+
 		"and spawn connect may not reach the instance")

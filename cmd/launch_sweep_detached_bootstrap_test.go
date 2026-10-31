@@ -46,6 +46,14 @@ func testDetachedBootstrap(t *testing.T) detachedBootstrap {
 		efaOf: func(cfg *aws.LaunchConfig) error {
 			return resolveSweepMemberEFA(cfg, testEFACapacity(1))
 		},
+		// --no-public-ip's subnet check (#1437), passing, pinning a subnet
+		// for an AZ-only member as aws.Client.PreflightNoPublicIP does.
+		privateNetOf: func(cfg *aws.LaunchConfig) error {
+			if cfg.SubnetID == "" {
+				cfg.SubnetID = "subnet-in-" + cfg.AvailabilityZone
+			}
+			return nil
+		},
 	}
 }
 

@@ -345,6 +345,7 @@ field LaunchSettings.Hibernate bool
 field LaunchSettings.IMDSv2Enforced bool
 field LaunchSettings.IMDSv2HopLimit int
 field LaunchSettings.NestedVirtualization bool
+field LaunchSettings.NoPublicIP bool
 field LaunchSettings.PlacementGroup string
 field LaunchSettings.ReservationID string
 field LaunchSettings.RootDeviceName string
