@@ -270,10 +270,10 @@ var sweepLaunchFlags = map[string]sweepFlagRule{
 	"profile":       cliOnly("the CLI's AWS profile"),
 	"verbose":       cliOnly("CLI output"),
 
-	// --no-public-ip (#1433): each foreground member's subnet is checked for
-	// the endpoints or NAT route a private instance needs; a detached sweep
-	// refuses it (detachedSettingsGuard).
-	"no-public-ip":            viaConfig(whySweepEC2 + "; each member's subnet is checked, and a detached sweep refuses it (#1433)"),
+	// --no-public-ip (#1433): each member's subnet is checked for the
+	// endpoints or NAT route a private instance needs, by the CLI on both
+	// paths; a detached member carries it in its launch settings (#1437).
+	"no-public-ip":            viaConfig(whySweepEC2 + "; each member's subnet is checked, at --detach for a detached sweep (#1433, #1437)"),
 	"allow-missing-endpoints": viaConfig(whySweepConfig + "; read by --no-public-ip's subnet check (#1433)"),
 }
 

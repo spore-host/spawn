@@ -795,12 +795,9 @@ func (c *Client) prepareLaunch(ctx context.Context, launchConfig LaunchConfig) (
 	// network, placement, hibernation, Spot, capacity reservation, IMDS and CPU
 	// options. Shared with a detached sweep member's launch (LaunchSettings), so
 	// the Lambda that launches one composes these exactly as this does (#1353).
+	// With NoPublicIP, no public IP on any interface (#1433), the multi-card
+	// layout above included.
 	applyLaunchSettings(input, launchConfig, rootDeviceName, amiMinGiB, tags)
-	// No public IP on any interface (#1433). Here rather than in
-	// applyLaunchSettings, like the multi-card EFA layout above: it comes with
-	// a subnet check only Launch runs, and a detached sweep refuses it
-	// (cmd/launch_sweep_detached_settings.go).
-	applyNoPublicIP(input, launchConfig)
 	return &preparedLaunch{ec2: ec2Client, cfg: launchConfig, input: input, tags: tags, ami: ami}, nil
 }
 

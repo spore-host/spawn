@@ -27,9 +27,18 @@ import (
 // member's RunInstances is the foreground member's by construction.
 
 // LaunchSettingsSchema is the version of [LaunchSettings] this build writes and
-// understands. Bump it whenever a field is added or its meaning changes: an
-// orchestrator built before the bump refuses a newer CLI's settings instead of
-// launching without the new field.
+// understands. DecodeLaunchSettings accepts only this schema and refuses any
+// field it does not know, so an orchestrator from an older release refuses a
+// newer CLI's settings rather than launching without what it cannot apply.
+//
+// A new field is therefore added without a bump, as omitempty, with its zero
+// value meaning what the settings meant before it (NoPublicIP, #1437): settings
+// that do not use it decode on an older orchestrator unchanged, and settings
+// that do are refused there by the unknown-field check. Bump it only when an
+// existing field changes meaning. A bump makes every orchestrator from before
+// it refuse every detached member, and this build refuse the settings already
+// uploaded for running sweeps and schedules, so it must come with a decoder
+// that still reads the previous schema.
 const LaunchSettingsSchema = 1
 
 // LaunchSettings is the RunInstances-side part of a sweep member's launch,
@@ -46,6 +55,13 @@ type LaunchSettings struct {
 	// EFA is a single EFA interface. More than one (#661) needs an Elastic IP
 	// associated after launch, which only Client.Launch does.
 	EFA bool `json:"efa,omitempty"`
+	// NoPublicIP launches the member with private IPs only (#1437): its
+	// interface asks for no public IP, and nothing allocates an Elastic IP.
+	// The CLI checked the subnet's VPC endpoints or NAT route at --detach
+	// (PreflightNoPublicIP) and pinned it in SubnetID, so Apply refuses it with
+	// no subnet. An orchestrator older than this field refuses it as unknown
+	// rather than launching with a public IP.
+	NoPublicIP bool `json:"no_public_ip,omitempty"`
 
 	Spot          bool   `json:"spot,omitempty"`
 	SpotMaxPrice  string `json:"spot_max_price,omitempty"`
@@ -106,6 +122,7 @@ func resolveLaunchSettings(lc LaunchConfig, memoryMiB func() (int64, bool), root
 		SecurityGroupIDs:     append([]string(nil), lc.SecurityGroupIDs...),
 		PlacementGroup:       lc.PlacementGroup,
 		EFA:                  lc.EFAEnabled,
+		NoPublicIP:           lc.NoPublicIP,
 		Spot:                 lc.Spot,
 		SpotMaxPrice:         lc.SpotMaxPrice,
 		ReservationID:        lc.ReservationID,
@@ -133,6 +150,7 @@ func (s LaunchSettings) config() LaunchConfig {
 		SecurityGroupIDs:     append([]string(nil), s.SecurityGroupIDs...),
 		PlacementGroup:       s.PlacementGroup,
 		EFAEnabled:           s.EFA,
+		NoPublicIP:           s.NoPublicIP,
 		Spot:                 s.Spot,
 		SpotMaxPrice:         s.SpotMaxPrice,
 		ReservationID:        s.ReservationID,
@@ -161,34 +179,44 @@ func (s LaunchSettings) config() LaunchConfig {
 // without them is the silent drop #1353 was.
 func DecodeLaunchSettings(raw interface{}) (LaunchSettings, error) {
 	var s LaunchSettings
+	if err := decodeLaunchSettingsInto(raw, &s); err != nil {
+		return LaunchSettings{}, err
+	}
+	return s, nil
+}
+
+// decodeLaunchSettingsInto is DecodeLaunchSettings into dst, a pointer to a
+// struct of LaunchSettings' shape: the tests decode into the shape an older
+// release had, to see what its orchestrator does with this build's settings.
+func decodeLaunchSettingsInto(raw interface{}, dst interface{}) error {
 	if raw == nil {
-		return s, fmt.Errorf("no launch settings")
+		return fmt.Errorf("no launch settings")
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
-		return s, fmt.Errorf("launch settings: %w", err)
+		return fmt.Errorf("launch settings: %w", err)
 	}
 	var probe struct {
 		Schema *int `json:"schema"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return s, fmt.Errorf("launch settings are not a JSON object: %w", err)
+		return fmt.Errorf("launch settings are not a JSON object: %w", err)
 	}
 	if probe.Schema == nil {
-		return s, fmt.Errorf("launch settings carry no schema version")
+		return fmt.Errorf("launch settings carry no schema version")
 	}
 	if *probe.Schema != LaunchSettingsSchema {
-		return s, fmt.Errorf("launch settings are schema %d and this build understands only schema %d: "+
+		return fmt.Errorf("launch settings are schema %d and this build understands only schema %d: "+
 			"they were written by a different spawn release; deploy the orchestrator from the same release as the CLI",
 			*probe.Schema, LaunchSettingsSchema)
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&s); err != nil {
-		return LaunchSettings{}, fmt.Errorf("launch settings (schema %d) hold a field this build cannot apply: %w; "+
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("launch settings (schema %d) hold a field this build cannot apply: %w; "+
 			"deploy the orchestrator from the same release as the CLI", LaunchSettingsSchema, err)
 	}
-	return s, nil
+	return nil
 }
 
 // Apply sets on input every RunInstances field s carries, composed as
@@ -205,6 +233,13 @@ func (s LaunchSettings) Apply(input *ec2.RunInstancesInput) error {
 	if lc.Spot && spotIsPersistent(lc) {
 		return fmt.Errorf("a hibernating Spot member needs a persistent Spot request, which a detached sweep cannot launch")
 	}
+	// The subnet check ran at --detach, on the subnet the CLI pinned (#1437).
+	// Without one EC2 would pick a subnet nobody checked; the CLI never writes
+	// such settings, so whatever did is refused rather than launched.
+	if lc.NoPublicIP && lc.SubnetID == "" {
+		return fmt.Errorf("a private-only member (no_public_ip) names no subnet, so the subnet its VPC endpoints " +
+			"or NAT route were checked in is unknown")
+	}
 	applyLaunchSettings(input, lc, s.RootDeviceName, 0, nil)
 	return nil
 }
@@ -212,7 +247,8 @@ func (s LaunchSettings) Apply(input *ec2.RunInstancesInput) error {
 // applyLaunchSettings sets the RunInstances fields Client.Launch derives from
 // lc beyond the instance type, AMI, key, profile, client token, user data and
 // tags: block devices, CPU options, network interfaces (unless input already
-// has them, as multi-interface EFA does), placement, hibernation, Spot,
+// has them, as multi-interface EFA does; with lc.NoPublicIP, none asking for a
+// public IP), placement, hibernation, Spot,
 // capacity reservation and IMDS. tags are the instance's, which a persistent
 // Spot request also carries.
 func applyLaunchSettings(input *ec2.RunInstancesInput, lc LaunchConfig, rootDeviceName string, amiMinGiB int32, tags []types.Tag) {
@@ -253,6 +289,10 @@ func applyLaunchSettings(input *ec2.RunInstancesInput, lc LaunchConfig, rootDevi
 			input.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{ni}
 		}
 	}
+	// No public IP on any interface (#1433), over whichever layout the
+	// interfaces have, the multi-card EFA one included. Here, so a detached
+	// member's request (#1437) is a foreground one's by construction.
+	applyNoPublicIP(input, lc)
 
 	// Add placement (AZ, placement group, and reservation)
 	placement := &types.Placement{}
