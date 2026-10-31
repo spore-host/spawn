@@ -16,7 +16,6 @@ package mpicohort
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -317,21 +316,21 @@ func (Classifier) Classify(err error) cohort.Fault {
 	if err == nil {
 		return cohort.Fault{Class: cohort.FaultRetryableConsistency}
 	}
-	var le *aws.LaunchError
-	code := ""
-	if errors.As(err, &le) {
-		code = le.Code
-	}
+	// The code and AWS's own message, as taskcohort's Classifier takes them:
+	// a member's failure line prints the Fault (cmd/cohort_launch.go), and the
+	// whole error repeated the code three times around the SDK's RequestID
+	// (#1462).
+	code, msg := aws.LaunchErrorDetail(err)
 	switch {
 	case aws.IsCapacityErrorCode(code):
 		// ICE / no capacity → advance the fallback ladder, never retry in place.
 		// The list a single launch moves zone on, too (#1458).
-		return cohort.Fault{Class: cohort.FaultCapacityExhausted, Code: code, Message: err.Error()}
+		return cohort.Fault{Class: cohort.FaultCapacityExhausted, Code: code, Message: msg}
 	case code == "RequestLimitExceeded" || code == "Throttling":
-		return cohort.Fault{Class: cohort.FaultThrottle, Code: code, Message: err.Error()}
+		return cohort.Fault{Class: cohort.FaultThrottle, Code: code, Message: msg}
 	default:
 		// auth, quota, bad parameter, or an unclassified error → terminal.
-		return cohort.Fault{Class: cohort.FaultTerminal, Code: code, Message: err.Error()}
+		return cohort.Fault{Class: cohort.FaultTerminal, Code: code, Message: msg}
 	}
 }
 

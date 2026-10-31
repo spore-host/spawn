@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`aws.LaunchErrorDetail`** (#1462): a launch error's AWS code and AWS's own message, without the SDK's operation, status and RequestID wrapping, as both cohort classifiers now use it. It is taskcohort's unexported `launchErrorDetail`, moved.
+
+### Fixed
+
+- **A failed launch prints its error once** (#1470), as does any other command step that both shows and returns its error (several `spawn image` and sweep steps, SSH key and IAM role setup). The launch step's progress line printed the error, and the root command printed the same error again plain, so a pinned-AZ capacity error showed its whole block twice. The progress line now goes to stderr, where the root printer already wrote, and the root printer skips an error whose text a progress line already showed (`progress.Reported`). In `-o json` mode, where the progress display prints nothing, the root printer still prints it. An error a caller wraps in more text is still printed by both.
+- **The zone-fallback error's `"exceeded maximum number of attempts"` note prints only when the error shows that phrase** (#1470). It printed whenever the SDK had retried, but the error shows AWS's own message, which never contains the phrase, so the note explained text that was not there.
+- **A job-array or MPI member's failure line shows AWS's message, not the whole SDK error** (#1462). `mpicohort.Classifier` put the full error text in the fault, so the line repeated the AWS code three times around the SDK's RequestID; it now takes the code and message as the pool path (`taskcohort.Classifier`) does, through the same helper.
+
 ## [0.153.0] - 2026-10-31
 
 ### Added

@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	smithy "github.com/aws/smithy-go"
@@ -224,6 +223,10 @@ type ZoneFallbackError struct {
 
 func (e *ZoneFallbackError) Unwrap() error { return e.err }
 
+// sdkMaxAttemptsPhrase is how the AWS SDK's retry.MaxAttemptsError begins: the
+// SDK re-sent one request until its attempts ran out (#1458).
+const sdkMaxAttemptsPhrase = "exceeded maximum number of attempts"
+
 func (e *ZoneFallbackError) Error() string {
 	var b strings.Builder
 	last := e.Attempts[len(e.Attempts)-1]
@@ -260,9 +263,12 @@ func (e *ZoneFallbackError) Error() string {
 	b.Reset()
 	b.WriteString(msg)
 	if capacity {
-		var maxAttempts *retry.MaxAttemptsError
-		if errors.As(e.err, &maxAttempts) {
-			fmt.Fprintf(&b, "\n(\"exceeded maximum number of attempts\" is the AWS SDK re-sending the same request to the same zone; it never tries another.)")
+		// The note explains the SDK's phrase, so it goes only where the phrase
+		// is shown. The SDK retrying (a MaxAttemptsError in the chain) is not
+		// enough: the attempts above carry AWS's own message, which never has
+		// the phrase, so the note explained text nobody saw (#1470).
+		if strings.Contains(msg, sdkMaxAttemptsPhrase) {
+			fmt.Fprintf(&b, "\n(%q is the AWS SDK re-sending the same request to the same zone; it never tries another.)", sdkMaxAttemptsPhrase)
 		}
 		fmt.Fprintf(&b, "\nTo wait for capacity: lagotto watch %s --regions %s --action notify", e.InstanceType, e.Region)
 	}

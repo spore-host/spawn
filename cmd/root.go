@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/spore-host/spawn/pkg/buildinfo"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/launcher"
+	"github.com/spore-host/spawn/pkg/progress"
 )
 
 // Version is the release version, injected at build time by GoReleaser
@@ -75,7 +77,7 @@ func Execute() {
 	updateCh := startUpdateCheck(version())
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCommandError(os.Stderr, err)
 		// A declined prompt exits with its own code, so a caller can tell
 		// "you said no" from "it failed" without parsing text (#737).
 		os.Exit(exitForError(err))
@@ -89,6 +91,16 @@ func Execute() {
 		}
 	default:
 	}
+}
+
+// printCommandError prints the error a command returned, unless the progress
+// display already printed that very text: a launch step's failure is both
+// shown by its step (progress.Error) and returned, and printed twice (#1470).
+func printCommandError(w io.Writer, err error) {
+	if progress.Reported(err) {
+		return
+	}
+	_, _ = fmt.Fprintln(w, err)
 }
 
 // startUpdateCheck kicks off the background release check for the resolved

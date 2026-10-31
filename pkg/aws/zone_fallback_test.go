@@ -304,10 +304,58 @@ func TestLaunchWithZoneFallback_PinnedZoneIsNotMovedAndHintsTheOthers(t *testing
 	if err == nil {
 		t.Fatal("launched; the pinned zone was out of capacity")
 	}
-	for _, want := range []string{"--az", "also offered in us-west-2b, us-west-2c", "lagotto watch", "re-sending the same request to the same zone"} {
+	for _, want := range []string{"--az", "also offered in us-west-2b, us-west-2c", "lagotto watch"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not say %q:\n%v", want, err)
 		}
+	}
+	// The live #1470 case: the SDK did retry (its MaxAttemptsError is in the
+	// chain), but the error shows AWS's own message, which has no
+	// "exceeded maximum number of attempts", so the note explaining that
+	// phrase has nothing to explain.
+	var maxAttempts *retry.MaxAttemptsError
+	if !errors.As(err, &maxAttempts) {
+		t.Fatalf("err = %v, want the SDK's MaxAttemptsError in its chain (the SDK retried the 500)", err)
+	}
+	if strings.Contains(err.Error(), "re-sending the same request") {
+		t.Errorf("error explains the SDK's \"exceeded maximum number of attempts\", which it does not show (#1470):\n%v", err)
+	}
+}
+
+// The SDK note goes exactly where the error shows the SDK's phrase (#1470):
+// an attempt whose message is the SDK's text (an AWS error with no message of
+// its own) gets it; one with AWS's message does not, retried or not.
+func TestZoneFallbackError_SDKNoteOnlyWhereThePhraseIsShown(t *testing.T) {
+	// The phrase is the SDK's own: if the SDK rewords it, the note would
+	// never print again.
+	sdkText := (&retry.MaxAttemptsError{Attempt: 3, Err: errors.New("x")}).Error()
+	if !strings.HasPrefix(sdkText, sdkMaxAttemptsPhrase) {
+		t.Fatalf("the SDK's MaxAttemptsError reads %q, which does not begin with %q", sdkText, sdkMaxAttemptsPhrase)
+	}
+	retried := &retry.MaxAttemptsError{Attempt: 3, Err: &smithy.GenericAPIError{Code: ice}}
+	for name, tc := range map[string]struct {
+		message string
+		want    bool
+	}{
+		"AWS's message":  {"We currently do not have sufficient g7e.8xlarge capacity in the Availability Zone you requested (us-west-2a).", false},
+		"the SDK's text": {"operation error EC2: RunInstances, " + retried.Error(), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, blocker := range []string{"the launch is pinned to us-west-2a (--az)", ""} {
+				attempts := []ZoneAttempt{{Zone: "us-west-2a", Code: ice, Message: tc.message}}
+				if blocker == "" {
+					attempts = append(attempts, ZoneAttempt{Zone: "us-west-2b", Code: ice, Message: tc.message})
+				}
+				e := &ZoneFallbackError{InstanceType: "g7e.8xlarge", Region: "us-west-2", Attempts: attempts, Blocker: blocker, err: newLaunchError(retried)}
+				msg := e.Error()
+				if got := strings.Contains(msg, "re-sending the same request to the same zone"); got != tc.want {
+					t.Errorf("blocker %q: SDK note shown = %v, want %v:\n%s", blocker, got, tc.want, msg)
+				}
+				if n := strings.Count(msg, "lagotto watch"); n != 1 {
+					t.Errorf("blocker %q: lagotto hint %d times, want once:\n%s", blocker, n, msg)
+				}
+			}
+		})
 	}
 }
 

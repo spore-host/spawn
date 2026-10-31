@@ -194,6 +194,14 @@ func TestLaunchWithProgressDefersFinishLaunchOverRunInstances(t *testing.T) {
 					launchPos = x.Pos()
 				}
 			}
+			// Or step 6, launchInstanceStep, called with the launch (#1470).
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "launchInstanceStep" && len(x.Args) > 1 {
+				if sel, ok := x.Args[1].(*ast.SelectorExpr); ok && sel.Sel.Name == "LaunchWithZoneFallback" {
+					if c, ok := sel.X.(*ast.Ident); ok && c.Name == "awsClient" {
+						launchPos = x.Pos()
+					}
+				}
+			}
 		case *ast.AssignStmt:
 			if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
 				if l, ok := x.Lhs[0].(*ast.Ident); ok && l.Name == "launchedID" {
@@ -209,7 +217,7 @@ func TestLaunchWithProgressDefersFinishLaunchOverRunInstances(t *testing.T) {
 	case deferPos == token.NoPos:
 		t.Fatal("launchWithProgress does not defer `err = finishLaunch(..., launchedID, ..., keepOnError, err)`: a failure after RunInstances would leave the instance running (#1298)")
 	case launchPos == token.NoPos:
-		t.Fatal("awsClient.Launch / LaunchWithZoneFallback call not found in launchWithProgress")
+		t.Fatal("awsClient.Launch / LaunchWithZoneFallback call (or launchInstanceStep with it) not found in launchWithProgress")
 	case deferPos > launchPos:
 		t.Error("finishLaunch is deferred after RunInstances; failures between the two are not covered")
 	case assignPos == token.NoPos || assignPos < launchPos:

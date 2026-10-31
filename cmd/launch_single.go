@@ -809,18 +809,8 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	}
 
 	// Step 6: Launch instance
-	prog.Start("Launching instance")
-	auditLog.LogOperationWithData("launch_instance", "single", "initiated",
-		map[string]interface{}{
-			"instance_type": config.InstanceType,
-			"region":        config.Region,
-		}, nil)
-	// A capacity error with no zone named tries the other zones that offer
-	// the type (#1458); the progress lines and any error name each zone tried.
-	result, err := awsClient.LaunchWithZoneFallback(ctx, *config, os.Stderr)
+	result, err := launchInstanceStep(ctx, awsClient.LaunchWithZoneFallback, config, prog, auditLog, os.Stderr)
 	if err != nil {
-		prog.Error("Launching instance", err)
-		auditLog.LogOperationWithRegion("launch_instance", "single", config.Region, "failed", err)
 		// No ephemeral-FSx teardown needed here (#213): the ephemeral FSx is now
 		// created AFTER this launch succeeds (below), so a failed launch never
 		// created one. A capacity failure leaves no billable resource by
@@ -828,12 +818,6 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 		return err
 	}
 	launchedID = result.InstanceID
-	auditLog.LogOperationWithData("launch_instance", result.InstanceID, "success",
-		map[string]interface{}{
-			"instance_type": config.InstanceType,
-			"region":        config.Region,
-		}, nil)
-	prog.Complete("Launching instance")
 
 	// Step 6.5: Now that the instance launched, create the ephemeral FSx and tag
 	// the instance spawn:fsx-pending so spored waits → DRA → mounts once AVAILABLE
@@ -1017,6 +1001,36 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	prog.DisplaySuccess(summary, config)
 
 	return nil
+}
+
+// launchFunc is aws.Client.LaunchWithZoneFallback: a launch whose progress
+// lines go to out.
+type launchFunc func(ctx context.Context, cfg aws.LaunchConfig, out io.Writer) (*aws.LaunchResult, error)
+
+// launchInstanceStep is step 6, the RunInstances of a single launch. A
+// capacity error with no zone named tries the other zones that offer the type
+// (#1458); the progress lines and any error name each zone tried. A failure is
+// shown by the step and returned; the root printer does not repeat it (#1470).
+func launchInstanceStep(ctx context.Context, launch launchFunc, config *aws.LaunchConfig, prog *progress.Progress, auditLog *audit.AuditLogger, out io.Writer) (*aws.LaunchResult, error) {
+	prog.Start("Launching instance")
+	auditLog.LogOperationWithData("launch_instance", "single", "initiated",
+		map[string]interface{}{
+			"instance_type": config.InstanceType,
+			"region":        config.Region,
+		}, nil)
+	result, err := launch(ctx, *config, out)
+	if err != nil {
+		prog.Error("Launching instance", err)
+		auditLog.LogOperationWithRegion("launch_instance", "single", config.Region, "failed", err)
+		return nil, err
+	}
+	auditLog.LogOperationWithData("launch_instance", result.InstanceID, "success",
+		map[string]interface{}{
+			"instance_type": config.InstanceType,
+			"region":        config.Region,
+		}, nil)
+	prog.Complete("Launching instance")
+	return result, nil
 }
 
 // launchedPublicIP is step 9, the launched instance's public IP. A

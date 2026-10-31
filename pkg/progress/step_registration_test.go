@@ -75,9 +75,11 @@ func TestNonTTYAnnouncesARunningStep(t *testing.T) {
 // swallowed the error text as well as the step line.
 func TestErrorPrintsForAnUnregisteredStep(t *testing.T) {
 	p := nonTTYProgress()
+	var errOut strings.Builder // the error line goes to stderr (#1470)
+	p.SetErrorOutput(&errOut)
 	out := captureStdout(t, func() { p.Error("Recalling FSx filesystem", os.ErrDeadlineExceeded) })
-	if !strings.Contains(out, os.ErrDeadlineExceeded.Error()) {
-		t.Errorf("error text missing from %q — a failure reported nowhere at all", out)
+	if !strings.Contains(errOut.String(), os.ErrDeadlineExceeded.Error()) {
+		t.Errorf("error text missing from %q — a failure reported nowhere at all", errOut.String())
 	}
 	if !strings.Contains(out, "Recalling FSx filesystem") {
 		t.Errorf("step name missing from %q", out)
