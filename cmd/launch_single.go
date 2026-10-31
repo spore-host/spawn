@@ -815,7 +815,9 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 			"instance_type": config.InstanceType,
 			"region":        config.Region,
 		}, nil)
-	result, err := awsClient.Launch(ctx, *config)
+	// A capacity error with no zone named tries the other zones that offer
+	// the type (#1458); the progress lines and any error name each zone tried.
+	result, err := awsClient.LaunchWithZoneFallback(ctx, *config, os.Stderr)
 	if err != nil {
 		prog.Error("Launching instance", err)
 		auditLog.LogOperationWithRegion("launch_instance", "single", config.Region, "failed", err)
@@ -839,6 +841,16 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 	// If the create-or-tag fails, the FSx is torn down rather than leaked (#210
 	// backstop); the reaper ephemeral-orphan net is the outer safety net.
 	if pendingFSxConfig != nil {
+		// In the instance's zone (#1458): one that named none landed where EC2
+		// or the zone fallback put it, and the FSx subnet otherwise falls back
+		// to the VPC's first subnet, in whatever zone that is.
+		if pendingFSxConfig.SubnetID == "" && result.AvailabilityZone != "" {
+			if subnet, serr := awsClient.GetSubnetForAZ(ctx, config.Region, result.AvailabilityZone, config.VPCID); serr == nil {
+				pendingFSxConfig.SubnetID = subnet
+			} else {
+				fmt.Fprintf(os.Stderr, "⚠️  no subnet found in %s for the FSx (%v); creating it in the VPC's first subnet\n", result.AvailabilityZone, serr)
+			}
+		}
 		prog.Start("Creating FSx Lustre filesystem (async)")
 		fsID, cerr := awsClient.CreateFSxLustreFilesystemAsync(ctx, *pendingFSxConfig)
 		if cerr != nil {
@@ -953,7 +965,12 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 				"dns":                  dnsRecord,
 				"iam_instance_profile": config.IamInstanceProfile,
 				"spored_verified":      sporedVerified,
+				"availability_zone":    result.AvailabilityZone,
 			},
+		}
+		// The zones that had no capacity before this one launched (#1458).
+		if len(result.ZoneAttempts) > 0 {
+			out[0]["zone_attempts"] = result.ZoneAttempts
 		}
 		jsonBytes, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {

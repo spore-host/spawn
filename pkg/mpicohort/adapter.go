@@ -322,12 +322,12 @@ func (Classifier) Classify(err error) cohort.Fault {
 	if errors.As(err, &le) {
 		code = le.Code
 	}
-	switch code {
-	case "InsufficientInstanceCapacity", "InsufficientHostCapacity",
-		"MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow":
+	switch {
+	case aws.IsCapacityErrorCode(code):
 		// ICE / no capacity → advance the fallback ladder, never retry in place.
+		// The list a single launch moves zone on, too (#1458).
 		return cohort.Fault{Class: cohort.FaultCapacityExhausted, Code: code, Message: err.Error()}
-	case "RequestLimitExceeded", "Throttling":
+	case code == "RequestLimitExceeded" || code == "Throttling":
 		return cohort.Fault{Class: cohort.FaultThrottle, Code: code, Message: err.Error()}
 	default:
 		// auth, quota, bad parameter, or an unclassified error → terminal.

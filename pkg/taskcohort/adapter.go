@@ -195,11 +195,12 @@ func (Classifier) Classify(err error) cohort.Fault {
 		return cohort.Fault{Class: cohort.FaultRetryableConsistency}
 	}
 	code, msg := launchErrorDetail(err)
-	switch code {
-	case "InsufficientInstanceCapacity", "InsufficientHostCapacity",
-		"MaxSpotInstanceCountExceeded", "SpotMaxPriceTooLow":
+	// The capacity codes are the ones a single launch moves zone on, too
+	// (aws.LaunchWithZoneFallback, #1458): one list, so the two agree.
+	switch {
+	case aws.IsCapacityErrorCode(code):
 		return cohort.Fault{Class: cohort.FaultCapacityExhausted, Code: code, Message: msg}
-	case "RequestLimitExceeded", "Throttling":
+	case code == "RequestLimitExceeded" || code == "Throttling":
 		return cohort.Fault{Class: cohort.FaultThrottle, Code: code, Message: msg}
 	default:
 		return cohort.Fault{Class: cohort.FaultTerminal, Code: code, Message: msg}

@@ -422,6 +422,10 @@ type LaunchResult struct {
 	State            string    // Initial instance state — typically "pending"
 	KeyName          string    // EC2 key pair name used for SSH access
 	LaunchTime       time.Time // Server-authoritative launch time from RunInstances; zero if the API omitted it
+	// ZoneAttempts are the RunInstances attempts that failed on capacity
+	// before this one launched, in other zones (LaunchWithZoneFallback,
+	// #1458). Empty when the first attempt launched.
+	ZoneAttempts []ZoneAttempt
 }
 
 // LaunchError wraps a RunInstances failure with the verbatim AWS error code
@@ -591,6 +595,38 @@ func retryStopped(ctxErr error, attempts int, rejected error) error {
 // If LaunchConfig.PricePerHour is 0, Launch resolves the on-demand rate through
 // truffle, the suite's pricing authority (#533). See [resolvePricePerHour].
 func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error) {
+	p, err := c.prepareLaunch(ctx, launchConfig)
+	if err != nil {
+		return nil, err
+	}
+	// Launch instance. runInstancesWithRetry retries only the narrow #572
+	// transient (a freshly-created scoped instance profile that's visible on
+	// the IAM control plane but hasn't yet propagated to EC2's consumption
+	// path) — any other error, including other InvalidParameterValue causes,
+	// fails immediately.
+	result, err := runInstancesWithRetry(ctx, p.ec2, p.input)
+	if err != nil {
+		return nil, newLaunchError(err)
+	}
+	return c.completeLaunch(ctx, p, result)
+}
+
+// preparedLaunch is everything Launch builds and creates before RunInstances:
+// the regional client, the resolved config, the RunInstancesInput (tags, user
+// data, profile, groups, key, block devices), and the AMI facts the spot price
+// record needs. One preparedLaunch can be sent to RunInstances more than once
+// (the zone fallback, #1458) without anything before it being redone.
+type preparedLaunch struct {
+	ec2   *ec2.Client
+	cfg   LaunchConfig
+	input *ec2.RunInstancesInput
+	tags  []types.Tag
+	ami   amiLaunchInfo
+}
+
+// prepareLaunch is Launch up to RunInstances: validation, the private-network
+// pre-flight, tags, the launch config object, and the RunInstancesInput.
+func (c *Client) prepareLaunch(ctx context.Context, launchConfig LaunchConfig) (*preparedLaunch, error) {
 	// Reject an unparseable TTL or lifecycle duration before any AWS call, so a
 	// value nothing could enforce never reaches a running instance (#990).
 	if err := launchConfig.ValidateDurations(); err != nil {
@@ -765,17 +801,13 @@ func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*Launch
 	// a subnet check only Launch runs, and a detached sweep refuses it
 	// (cmd/launch_sweep_detached_settings.go).
 	applyNoPublicIP(input, launchConfig)
+	return &preparedLaunch{ec2: ec2Client, cfg: launchConfig, input: input, tags: tags, ami: ami}, nil
+}
 
-	// Launch instance. runInstancesWithRetry retries only the narrow #572
-	// transient (a freshly-created scoped instance profile that's visible on
-	// the IAM control plane but hasn't yet propagated to EC2's consumption
-	// path) — any other error, including other InvalidParameterValue causes,
-	// fails immediately.
-	result, err := runInstancesWithRetry(ctx, ec2Client, input)
-	if err != nil {
-		return nil, newLaunchError(err)
-	}
-
+// completeLaunch is Launch after RunInstances succeeded: the per-instance
+// tags, the spot price record, and any Elastic IP.
+func (c *Client) completeLaunch(ctx context.Context, p *preparedLaunch, result *ec2.RunInstancesOutput) (*LaunchResult, error) {
+	ec2Client, launchConfig, input, tags, ami := p.ec2, p.cfg, p.input, p.tags, p.ami
 	if len(result.Instances) == 0 {
 		return nil, fmt.Errorf("no instances returned")
 	}

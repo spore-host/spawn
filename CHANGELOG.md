@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A single `spawn launch` with no `--az` or `--subnet-id` tries the other zones that offer the instance type on a capacity error** (#1458).
+  Before, one `InsufficientInstanceCapacity` (or `InsufficientHostCapacity` or `SpotMaxPriceTooLow`) in whatever zone EC2 picked ended the launch.
+  - **Not on the Spot limit:** `MaxSpotInstanceCountExceeded` is the region's Spot instance limit, which every zone hits alike, so it is not retried in another zone. It fails in one attempt, with an error that says the limit is regional and names no other zone. Job arrays and pools still treat it as capacity-exhausted, as before.
+  - **Which zones:** after the first attempt (still EC2's choice, unchanged), the zones `DescribeInstanceTypeOfferings` lists for the type that also have a default subnet, in order. A zone that does not offer the type is never tried.
+  - **Reused, not redone:** the key, security groups, instance profile, tags, launch config object, AMI lookup and spot price record are made once. Only `RunInstances` is repeated, each attempt with its own `ClientToken`, so the SDK's retry of one attempt stays idempotent and no attempt can return another's instance. A capacity error launches nothing, so a failed attempt leaves nothing behind.
+  - **When it stays put:** `--az` (or a zone piped from truffle), `--subnet-id`, `--reservation-id`/`--capacity-block`, `--placement-group`, an existing FSx for Lustre (`--fsx-id`, `--fsx-recall`, durable `--fsx-create`), `--no-public-ip` and multi-card `--efa` are bound to one zone or subnet, so the launch is not moved. Its error says why and names the other zones that offer the type. Any error that is not about capacity fails as before, in one attempt.
+  - **Output:** each zone tried and its error code, in the progress output and in the final error, which also suggests `lagotto watch` and says that "exceeded maximum number of attempts" is the SDK resending the same request to the same zone. `-o json` gains `availability_zone` and, after a fallback, `zone_attempts`.
+  - An ephemeral `--fsx-create` is now created in a subnet of the zone the instance landed in. It used to take the VPC's first subnet, in whatever zone that was.
+  - **Job arrays and MPI cohorts:** their AZ-fallback chain now comes from the same lookup (zones offering the type with a default subnet) instead of every zone in the region, so a rung is no longer placed in a zone without the type. An `--az` they were given stays first. `spawn launch` and `spawn array retry` call `ec2:DescribeInstanceTypeOfferings` instead of `ec2:DescribeAvailabilityZones`; both are already granted to the nested-spawn role.
+
 - **The region-vacated check no longer delays termination** (#1456).
   Before, spored ran it after every other wait and, when no other `spawn:managed` instance was running in the region, blocked 60 s before `Terminate`, with or without a notifier configured.
   The last spawn instance in a region was billed an extra idle minute on every TTL, cost-limit, idle or on-complete termination.
