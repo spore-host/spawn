@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The bootstrap fetches spored and its body from the regional S3 name, so an S3 interface endpoint serves a `--no-public-ip` instance** (#1436).
+  Every install path used the global-style `https://spawn-binaries-<region>.s3.amazonaws.com`, which an S3 interface endpoint's private DNS does not answer: in a VPC whose only S3 path is an interface endpoint, the instance could not get spored and retired itself.
+  - **Now `https://spawn-binaries-<region>.s3.<region>.amazonaws.com`**, then the us-east-1 fallback by its own regional name, in the release stub, the bootstrap body, the SSM `spawn upgrade-spored` script, the app/DCV user data and the pipeline stage script. The Windows bootstrap's SSM agent download (when the AMI lacks one) moves from `s3.amazonaws.com/ec2-downloads-windows` to the region's `amazon-ssm-<region>` bucket; its spored download already used `aws s3 cp --region`. The app user data's TLS cert copy now passes `--region`. Regional names work through an S3 gateway endpoint, an interface endpoint with private DNS, NAT and the public internet alike.
+  - **The `--no-public-ip` pre-flight counts an S3 interface endpoint with private DNS**, as it does for the other services. It does not count one set to private DNS only for inbound Resolver endpoints (the VPC's own instances resolve S3 to the gateway endpoint then). It now refuses a region with no `spawn-binaries-<region>` bucket of its own (the release publishes to 11), where the bootstrap's only source is the us-east-1 fallback, which no VPC endpoint in that region serves; NAT, or `--allow-missing-endpoints`, still passes it.
+  - **The published bootstrap body changes** (its two bucket URLs), so this release's body sha256 differs from v0.152.0's. The stub carries the sha of the body its own build renders, as every release does, so nothing else changes. Signed content (spored, its `.sha256` and `.sig`) is untouched.
+  - **API:** `aws.PrivateService.GatewayOnly` is removed (no service needs it now) and `aws.PrivateEndpoint.InboundResolverOnly` added.
+
 - **A single `spawn launch` with no `--az` or `--subnet-id` tries the other zones that offer the instance type on a capacity error** (#1458).
   Before, one `InsufficientInstanceCapacity` (or `InsufficientHostCapacity` or `SpotMaxPriceTooLow`) in whatever zone EC2 picked ended the launch.
   - **Not on the Spot limit:** `MaxSpotInstanceCountExceeded` is the region's Spot instance limit, which every zone hits alike, so it is not retried in another zone. It fails in one attempt, with an error that says the limit is regional and names no other zone. Job arrays and pools still treat it as capacity-exhausted, as before.

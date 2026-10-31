@@ -380,6 +380,7 @@ field PrivateCheck.Network PrivateNetwork
 field PrivateCheck.Warnings []string
 field PrivateEndpoint.AvailabilityZones []string
 field PrivateEndpoint.ID string
+field PrivateEndpoint.InboundResolverOnly bool
 field PrivateEndpoint.PrivateDNS bool
 field PrivateEndpoint.RouteTableIDs []string
 field PrivateEndpoint.Service string
@@ -395,7 +396,6 @@ field PrivateNetwork.SubnetID string
 field PrivateNetwork.VPCID string
 field PrivateService.Endpoint string
 field PrivateService.Gateway bool
-field PrivateService.GatewayOnly bool
 field PrivateService.IAMPrefixes []string
 field PrivateService.When string
 field PrivateService.Why string

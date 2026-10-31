@@ -675,22 +675,18 @@ try {
   Write-Output "spawn windows ssh bootstrap warning: $_"
 }
 
+# Region first: both downloads below use regional S3 names (#1436).
+try {
+  $token = Invoke-RestMethod -Method Put -Uri 'http://169.254.169.254/latest/api/token' -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='21600'} -TimeoutSec 5
+  $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers @{'X-aws-ec2-metadata-token'=$token} -TimeoutSec 5
+} catch {}
+if (-not $region) { $region = 'us-east-1' }
+
 # Ensure the SSM agent is installed, set to auto-start, and running (#95).
 # Stock Windows *Server* AMIs ship it running, but an imported Windows 11
 # *client* AMI (spawn image import) bakes the agent without it auto-starting
 # after Sysprep, so SSM never registers and SSH-over-SSM / RDP-over-SSM fail.
 # Don't assume the AMI did it — same posture as the AWS CLI install below.
-# The region first: the agent download below and spored's install both use it.
-# Regional S3 names only (#1436), which an S3 gateway or interface endpoint
-# serves; the global s3.amazonaws.com does not resolve to this region.
-try {
-  $token = Invoke-RestMethod -Method Put -Uri 'http://169.254.169.254/latest/api/token' -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='21600'} -TimeoutSec 5
-  $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers @{'X-aws-ec2-metadata-token'=$token} -TimeoutSec 5
-} catch {
-  Write-Output "spawn region lookup warning: $_"
-}
-if (-not $region) { $region = 'us-east-1' }
-
 try {
   $svc = Get-Service -Name AmazonSSMAgent -ErrorAction SilentlyContinue
   if (-not $svc) {

@@ -666,7 +666,7 @@ func TestDeploySweepOrchestratorDeploysOnlyAPublishedRelease(t *testing.T) {
 		"refuse a version that is not X.Y.Z":            `(?m)^if ! \[\[ "\$SPAWN_VERSION" =~ \^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$ \]\]; then\n\s+echo[^\n]*\n\s+exit 1`,
 		"refuse a dirty tree":                           `(?m)^if \[ -n "\$\(git status --porcelain\)" \]; then\n\s+echo[^\n]*\n\s+exit 1`,
 		"hash the body this release compiles in":        `(?m)^if ! WANT_BODY_SHA=\$\( \(cd \.\./\.\. && [^\n]*go run \. bootstrap-body\)`,
-		"fetch the body published for the version":      `(?m)^BODY_URL="https://spawn-binaries-us-east-1\.s3\.amazonaws\.com/spawn/versions/\$\{SPAWN_VERSION\}/bootstrap\.sh"`,
+		"fetch the body published for the version":      `(?m)^BODY_URL="https://spawn-binaries-us-east-1\.s3\.us-east-1\.amazonaws\.com/spawn/versions/\$\{SPAWN_VERSION\}/bootstrap\.sh"`,
 		"refuse a body that differs":                    `(?m)^if \[ "\$GOT_BODY_SHA" != "\$WANT_BODY_SHA" \]; then\n\s+echo[^\n]*\n\s+exit 1`,
 		"inject the version into the build":             `(?m)^GOOS=linux [^\n]*go build [^\n]*-ldflags "-X main\.Version=\$\{SPAWN_VERSION\}"`,
 		"stamp the version it built, not a re-describe": `--tags "[^"]*spawn:version=\$SPAWN_VERSION"`,
