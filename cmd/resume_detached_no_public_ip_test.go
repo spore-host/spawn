@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"regexp"
 	"slices"
@@ -13,6 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/sweep"
 )
@@ -146,18 +150,71 @@ func TestDetachedResumeRechecksEveryPinnedSubnet(t *testing.T) {
 	// anything is re-created or the orchestrator re-invoked.
 	calls := funcCalls(t, "resume.go")["resumeSweepDetached"]
 	at := func(name string) int { return slices.Index(calls, name) }
-	if r := at("recheckDetachedNoPublicIP"); r < 0 || r > at("ensureDetachedResumeProfile") || r > at("InvokeSweepOrchestrator") {
-		t.Errorf("resumeSweepDetached calls %v: want recheckDetachedNoPublicIP before ensureDetachedResumeProfile and InvokeSweepOrchestrator", calls)
-	}
-	if d := at("downloadDetachedParams"); d < 0 || d > at("recheckDetachedNoPublicIP") {
-		t.Errorf("resumeSweepDetached calls %v: want the uploaded params read, then checked", calls)
+	if r := at("detachedResumeRecheck"); r < 0 || r > at("ensureDetachedResumeProfile") || r > at("InvokeSweepOrchestrator") {
+		t.Errorf("resumeSweepDetached calls %v: want detachedResumeRecheck before ensureDetachedResumeProfile and InvokeSweepOrchestrator", calls)
 	}
 	src, err := os.ReadFile("resume.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`recheckDetachedNoPublicIP\(ctx, state, pf, resumeAllowMissingEndpoints, aws\.NewClient, `).Match(src) {
+	if !regexp.MustCompile(`detachedResumeRecheck\(ctx, cfg, state, resumeAllowMissingEndpoints, aws\.NewClient, `).Match(src) {
 		t.Error("resumeSweepDetached does not check with the user's credentials (aws.NewClient) and resume's --allow-missing-endpoints")
+	}
+	// And detachedResumeRecheck checks the params it reads.
+	stubDetachedParams(t, pf, nil)
+	var c countedRecheck
+	c.install(t, nil)
+	if err := detachedResumeRecheck(context.Background(), awssdk.Config{}, &sweep.SweepRecord{TotalParams: 5}, false, c.newClient, io.Discard); err != nil ||
+		len(c.checked) != 3 {
+		t.Errorf("detachedResumeRecheck on readable params: err %v, %d checks; want the 3 pinned subnets checked", err, len(c.checked))
+	}
+}
+
+// stubDetachedParams makes downloadDetachedParams return pf or err.
+func stubDetachedParams(t *testing.T, pf *ParamFileFormat, err error) {
+	t.Helper()
+	prev := downloadDetachedParams
+	downloadDetachedParams = func(context.Context, awssdk.Config, *sweep.SweepRecord) (*ParamFileFormat, error) { return pf, err }
+	t.Cleanup(func() { downloadDetachedParams = prev })
+}
+
+// TestDetachedResumeProceedsWhenParamsUnreadable: the params read is
+// best-effort. No user policy spore.host provisions grants s3:GetObject on
+// spawn-sweeps-*, so a resume whose read is denied (or finds no object, or
+// fails otherwise) warns that the re-check was skipped, naming the object and,
+// when denied, the missing permission, and proceeds: no subnet check, no
+// client, no error.
+func TestDetachedResumeProceedsWhenParamsUnreadable(t *testing.T) {
+	const key = "s3://spawn-sweeps-us-east-1/sweeps/sw-1/params.json"
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"access denied": {&smithy.GenericAPIError{Code: "AccessDenied", Message: "Access Denied"}, "lack s3:GetObject"},
+		"forbidden":     {&smithyhttp.ResponseError{Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 403}}, Err: errors.New("forbidden")}, "lack s3:GetObject"},
+		"no such key":   {&smithy.GenericAPIError{Code: "NoSuchKey"}, "was not found"},
+		"other":         {errors.New("connection reset"), "could not be read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubDetachedParams(t, nil, tc.err)
+			var c countedRecheck
+			c.install(t, nil)
+			var out bytes.Buffer
+			for _, allow := range []bool{false, true} {
+				err := detachedResumeRecheck(context.Background(), awssdk.Config{}, &sweep.SweepRecord{TotalParams: 5, S3ParamsKey: key}, allow, c.newClient, &out)
+				if err != nil {
+					t.Errorf("allow=%t: err = %v; want the resume to proceed", allow, err)
+				}
+			}
+			if len(c.checked) != 0 || c.clients != 0 {
+				t.Errorf("%d checks, %d clients; want none", len(c.checked), c.clients)
+			}
+			for _, w := range []string{"skipped re-checking", key, tc.want, "Resuming anyway"} {
+				if !strings.Contains(out.String(), w) {
+					t.Errorf("warning %q does not say %q", out.String(), w)
+				}
+			}
+		})
 	}
 }
 

@@ -545,12 +545,8 @@ func resumeSweepDetached(ctx context.Context, sweepID string) error {
 
 	// --no-public-ip (#1468): the pinned subnets the orchestrator will launch
 	// into are re-checked, as at --detach, before anything is re-created or
-	// re-invoked. The params are read, not rewritten.
-	pf, err := downloadDetachedParams(ctx, cfg, state)
-	if err != nil {
-		return fmt.Errorf("read the sweep's uploaded params to re-check its --no-public-ip subnets: %w", err)
-	}
-	if err := recheckDetachedNoPublicIP(ctx, state, pf, resumeAllowMissingEndpoints, aws.NewClient, os.Stderr); err != nil {
+	// re-invoked. The params are read (best-effort), not rewritten.
+	if err := detachedResumeRecheck(ctx, cfg, state, resumeAllowMissingEndpoints, aws.NewClient, os.Stderr); err != nil {
 		return err
 	}
 

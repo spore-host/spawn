@@ -8,6 +8,8 @@ import (
 	"sort"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/sweep"
 )
@@ -40,6 +42,51 @@ var downloadDetachedParams = func(ctx context.Context, infra awssdk.Config, rec 
 		return nil, err
 	}
 	return &ParamFileFormat{Defaults: pf.Defaults, Params: pf.Params}, nil
+}
+
+// detachedResumeRecheck reads a detached sweep's uploaded params and re-runs
+// recheckDetachedNoPublicIP on them. The read is best-effort: no policy
+// spore.host provisions for users grants s3:GetObject on spawn-sweeps-*
+// (only the orchestrator's and scheduler's roles have it), and the launch
+// needed only PutObject, so a resume must not depend on it. When the params
+// cannot be read, for any reason, the re-check is skipped with a warning and
+// the resume proceeds. That fails open safely: a --no-public-ip member whose
+// subnet has lost its endpoints or NAT route cannot write spawn:last-heartbeat
+// (no route to EC2), and the orchestrator terminates every member whose spored
+// is not heard from within its budget (5 min Linux, 10 min Windows):
+// terminateUnverifiedMembers / sporedOverdue in
+// lambda/sweep-orchestrator/spored.go (#1313), run on each poll of both the
+// single- and multi-region paths. A missing object (NoSuchKey) is the
+// orchestrator's to report: it re-reads the params on every invocation.
+func detachedResumeRecheck(ctx context.Context, infra awssdk.Config, rec *sweep.SweepRecord, allow bool,
+	newClient func(context.Context) (*aws.Client, error), out io.Writer) error {
+	pf, err := downloadDetachedParams(ctx, infra, rec)
+	if err != nil {
+		why := "could not be read"
+		var apiErr smithy.APIError
+		var respErr *smithyhttp.ResponseError
+		switch {
+		case errors.As(err, &apiErr) && (apiErr.ErrorCode() == "AccessDenied" || apiErr.ErrorCode() == "Forbidden"),
+			errors.As(err, &respErr) && respErr.HTTPStatusCode() == 403:
+			why = "could not be read: your credentials lack s3:GetObject on it"
+		case errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchKey",
+			errors.As(err, &respErr) && respErr.HTTPStatusCode() == 404:
+			why = "was not found (the orchestrator, which reads it on every invocation, will report it)"
+		}
+		fmt.Fprintf(out, "⚠️  --no-public-ip: skipped re-checking this sweep's private subnets: its uploaded params %s %s (%v).\n"+
+			"   Resuming anyway. If the sweep used --no-public-ip and a subnet has lost its VPC endpoints or NAT route, "+
+			"its new members' spored cannot report in, and the orchestrator terminates them after its spored budget (5-10 min).\n",
+			orUnknown(rec.S3ParamsKey), why, err)
+		return nil
+	}
+	return recheckDetachedNoPublicIP(ctx, rec, pf, allow, newClient, out)
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "(no params key recorded)"
+	}
+	return s
 }
 
 // detachedSubnetRecheck is one subnet check a detached resume makes: the
