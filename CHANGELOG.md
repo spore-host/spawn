@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.153.0] - 2026-10-31
+
 ### Added
 
 - **`aws.PlacementGroupAvailableWait`** (#1454): how long `CreatePlacementGroup` can wait for a new group to become available, for a caller sizing a deadline around it.
@@ -13174,7 +13176,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.152.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.153.0...HEAD
+[0.153.0]: https://github.com/spore-host/spawn/compare/v0.152.0...v0.153.0
 [0.152.0]: https://github.com/spore-host/spawn/compare/v0.151.0...v0.152.0
 [0.151.0]: https://github.com/spore-host/spawn/compare/v0.150.0...v0.151.0
 [0.150.0]: https://github.com/spore-host/spawn/compare/v0.149.0...v0.150.0
