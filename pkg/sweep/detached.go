@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -198,6 +199,27 @@ func UploadParamsToS3(ctx context.Context, cfg aws.Config, paramFormat *ParamFil
 	}
 
 	return ParamsURI(bucket, key), nil
+}
+
+// DownloadParamsFromS3 reads the params a detached sweep staged, from
+// SweepRecord.S3ParamsKey (an s3://bucket/key URI, ParamsURI), as the
+// orchestrator reads them. Read-only: `spawn sweep resume --detach` uses it to
+// re-check what the orchestrator will launch (#1468) without changing it.
+func DownloadParamsFromS3(ctx context.Context, cfg aws.Config, paramsURI string) (*ParamFileFormat, error) {
+	bucket, key, ok := strings.Cut(strings.TrimPrefix(paramsURI, "s3://"), "/")
+	if !strings.HasPrefix(paramsURI, "s3://") || !ok || bucket == "" || key == "" {
+		return nil, fmt.Errorf("invalid params URI %q: want s3://bucket/key", paramsURI)
+	}
+	out, err := s3.NewFromConfig(cfg).GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", paramsURI, err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	var pf ParamFileFormat
+	if err := json.NewDecoder(out.Body).Decode(&pf); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", paramsURI, err)
+	}
+	return &pf, nil
 }
 
 // CreateSweepRecord creates a new DynamoDB record for the sweep

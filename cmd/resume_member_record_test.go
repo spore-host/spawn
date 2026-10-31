@@ -641,6 +641,12 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 		}
 		boot := testDetachedBootstrap(t)
 		boot.plat = testSweepPlat(t) // holds the --key-name key, as the launching machine does
+		// The tags' timestamps re-based on the launch time, so two builds
+		// compare equal across a second boundary (launchClockFree).
+		boot.tagsOf = func(cfg aws.LaunchConfig) (map[string]string, error) {
+			tags, err := testMemberTags(cfg)
+			return launchClockFree(tags), err
+		}
 		if err := seedDetachedBootstrap(pf, *base, "sw-1", "sw", boot); err != nil {
 			return "", err
 		}
@@ -652,7 +658,9 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 	// detached resume relaunches are those of a launch that passed it; each
 	// claim is checked (the params must not differ).
 	consumedAtDetach := map[string]string{
-		"allow-missing-endpoints": "--no-public-ip's subnet check, run at --detach (#1437)",
+		// A detached resume re-runs the check (#1468) and takes the override
+		// as its own --allow-missing-endpoints.
+		"allow-missing-endpoints": "--no-public-ip's subnet check, run at --detach (#1437) and again on resume (#1468)",
 	}
 	carriedOnDetached := 0
 	for _, n := range carriedSweepFlags(t) {

@@ -44,6 +44,7 @@ spawn resume [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--allow-missing-endpoints` |  | bool |  | With --detach, for a sweep launched with --no-public-ip: resume even when a pinned subnet no longer has a VPC endpoint or NAT route its members need. The resume re-checks each pending member's subnet first, and refuses if one fails. A foreground resume uses the sweep's own --allow-missing-endpoints |
 | `--completion-webhook-url` |  | string |  | The sweep's --completion-webhook-url, passed again: the checkpoint does not store it, since it may carry a token. Required when the sweep was launched with it. Not supported with --detach |
 | `--cost-limit` |  | float64 |  | Cost limit in USD for each relaunched member, replacing the sweep's --cost-limit; may not be higher than it. A row's own cost_limit: still wins. Not supported with --detach |
 | `--detach` |  | bool |  | Run sweep orchestration in Lambda |
