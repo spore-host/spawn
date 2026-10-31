@@ -307,7 +307,7 @@ cp -f /usr/local/bin/spored "$BACKUP" 2>/dev/null || true
 # compute-seconds to the tag (#234) so the compute clock survives the swap. The
 # installer does that stop itself, then installs by atomic rename.
 # Only spawn/versions/${TARGET_VERSION}/, regional then us-east-1 (#1412).
-if ! spore_install_spored_from_buckets "$BIN" "https://spawn-binaries-${REGION}.s3.amazonaws.com" "https://spawn-binaries-us-east-1.s3.amazonaws.com"; then
+if ! spore_install_spored_from_buckets "$BIN" "https://spawn-binaries-${REGION}.s3.${REGION}.amazonaws.com" "https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com"; then
   echo "Failed to install a verified spored v${TARGET_VERSION} (${BIN})" >&2
   rm -f "$BACKUP"
   exit 1

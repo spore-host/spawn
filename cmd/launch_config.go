@@ -675,6 +675,13 @@ try {
   Write-Output "spawn windows ssh bootstrap warning: $_"
 }
 
+# Region first: both downloads below use regional S3 names (#1436).
+try {
+  $token = Invoke-RestMethod -Method Put -Uri 'http://169.254.169.254/latest/api/token' -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='21600'} -TimeoutSec 5
+  $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers @{'X-aws-ec2-metadata-token'=$token} -TimeoutSec 5
+} catch {}
+if (-not $region) { $region = 'us-east-1' }
+
 # Ensure the SSM agent is installed, set to auto-start, and running (#95).
 # Stock Windows *Server* AMIs ship it running, but an imported Windows 11
 # *client* AMI (spawn image import) bakes the agent without it auto-starting
@@ -684,7 +691,7 @@ try {
   $svc = Get-Service -Name AmazonSSMAgent -ErrorAction SilentlyContinue
   if (-not $svc) {
     $msi = "$env:TEMP\SSMAgent_latest.exe"
-    Invoke-WebRequest -Uri 'https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/windows_amd64/AmazonSSMAgentSetup.exe' -OutFile $msi -UseBasicParsing
+    Invoke-WebRequest -Uri "https://amazon-ssm-${region}.s3.${region}.amazonaws.com/latest/windows_amd64/AmazonSSMAgentSetup.exe" -OutFile $msi -UseBasicParsing
     Start-Process $msi -ArgumentList '/S' -Wait
   }
   Set-Service -Name AmazonSSMAgent -StartupType Automatic -ErrorAction SilentlyContinue
@@ -695,10 +702,6 @@ try {
 
 # Install spored as a Windows Service from the regional S3 bucket (#77).
 try {
-  $token = Invoke-RestMethod -Method Put -Uri 'http://169.254.169.254/latest/api/token' -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='21600'} -TimeoutSec 5
-  $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers @{'X-aws-ec2-metadata-token'=$token} -TimeoutSec 5
-  if (-not $region) { $region = 'us-east-1' }
-
   # The stock Windows Server AMI has no AWS CLI (unlike AL2023), so install it
   # before pulling spored from S3. aws.exe lands in Program Files; call it by
   # full path since the current session PATH won't yet include it.

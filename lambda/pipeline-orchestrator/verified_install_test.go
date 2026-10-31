@@ -193,7 +193,7 @@ func TestUserData_InstallsThisReleasesSpored(t *testing.T) {
 			t.Fatal("recorded no spored download; the harness has broken")
 		}
 		for _, u := range urls {
-			if !strings.HasPrefix(u, "https://spawn-binaries-eu-west-1.s3.amazonaws.com/spawn/versions/9.9.9/spored-linux-amd64") {
+			if !strings.HasPrefix(u, "https://spawn-binaries-eu-west-1.s3.eu-west-1.amazonaws.com/spawn/versions/9.9.9/spored-linux-amd64") {
 				t.Errorf("a 9.9.9 orchestrator's stage fetched %s, which is not its own regional spored (#1412)", u)
 			}
 		}
@@ -205,7 +205,7 @@ func TestUserData_InstallsThisReleasesSpored(t *testing.T) {
 			t.Fatalf("%v; calls:\n%s", err, calls)
 		}
 		// A dev build installs spawn/current/ first (#1419).
-		if urls := sporedURLs(calls); len(urls) == 0 || urls[0] != "https://spawn-binaries-eu-west-1.s3.amazonaws.com/spawn/current/spored-linux-amd64.sig" {
+		if urls := sporedURLs(calls); len(urls) == 0 || urls[0] != "https://spawn-binaries-eu-west-1.s3.eu-west-1.amazonaws.com/spawn/current/spored-linux-amd64.sig" {
 			t.Errorf("a dev build did not try the current regional spored first: %v", urls)
 		}
 	})

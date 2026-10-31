@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -36,8 +37,8 @@ type PrivateService struct {
 	// agent's services, which spored does not call.
 	IAMPrefixes []string
 	// Gateway: a gateway endpoint associated with the subnet's route table
-	// serves it. GatewayOnly: an interface endpoint does not.
-	Gateway, GatewayOnly bool
+	// serves it, as well as an interface endpoint.
+	Gateway bool
 	// Why is what fails without it.
 	Why string
 	// When is the condition under which a launch needs it; "" for every
@@ -58,10 +59,12 @@ func privateNever(LaunchConfig) bool { return false }
 // TestPrivateServicesCoverEverySporedService.
 var privateServices = []PrivateService{
 	{
-		Endpoint: "s3", IAMPrefixes: []string{"s3"}, Gateway: true, GatewayOnly: true,
-		Why: "the bootstrap downloads spored from https://spawn-binaries-<region>.s3.amazonaws.com, and spored reads its " +
-			"launch config object and stages data. That download uses the global-style S3 name, which an S3 interface " +
-			"endpoint's private DNS does not serve, so only a gateway endpoint (or NAT) counts",
+		// Every S3 name the bootstrap uses is the regional one (#1436,
+		// TestEveryBootstrapS3HostIsRegional), which both a gateway endpoint
+		// and an interface endpoint's private DNS serve.
+		Endpoint: "s3", IAMPrefixes: []string{"s3"}, Gateway: true,
+		Why: "the bootstrap downloads spored from https://spawn-binaries-<region>.s3.<region>.amazonaws.com, and spored " +
+			"reads its launch config object and stages data",
 	},
 	{
 		Endpoint: "ec2", IAMPrefixes: []string{"ec2"},
@@ -198,6 +201,10 @@ type PrivateEndpoint struct {
 	Type       string
 	State      string
 	PrivateDNS bool
+	// InboundResolverOnly is an interface endpoint's "private DNS only for
+	// inbound Resolver endpoints" (S3's, beside a gateway endpoint): the
+	// VPC's own instances do not resolve to it, but to the gateway endpoint.
+	InboundResolverOnly bool
 	// RouteTableIDs are a gateway endpoint's route tables.
 	RouteTableIDs []string
 	// AvailabilityZones are an interface endpoint's subnets' AZs.
@@ -237,6 +244,12 @@ func CheckPrivateNetwork(n PrivateNetwork, cfg LaunchConfig, internet []string) 
 			continue
 		}
 		met, why, warn := endpointFor(n, s)
+		if met != "" && s.Endpoint == "s3" && !sporedinstall.Published(n.Region) {
+			out.Missing = append(out.Missing, fmt.Sprintf("s3: spawn publishes spored to no bucket in %s, so the bootstrap "+
+				"falls back to spawn-binaries-%s, in another region, which %s does not serve, and %s. Needed because %s",
+				n.Region, sporedinstall.FallbackRegion, met, noNAT, s.Why))
+			continue
+		}
 		if met != "" {
 			out.Met = append(out.Met, s.Endpoint+": "+met)
 			if warn != "" {
@@ -283,13 +296,14 @@ func endpointFor(n PrivateNetwork, s PrivateService) (met, why, warn string) {
 			}
 			return "gateway endpoint " + e.ID, "", ""
 		case strings.EqualFold(e.Type, "Interface"):
-			if s.GatewayOnly {
-				reasons = append(reasons, fmt.Sprintf("interface endpoint %s does not count (only a gateway endpoint does)", e.ID))
-				continue
-			}
 			if !e.PrivateDNS {
 				reasons = append(reasons, fmt.Sprintf("interface endpoint %s has private DNS disabled, so the default %s.%s.amazonaws.com "+
 					"name still resolves to the public endpoint; enable private DNS on it", e.ID, s.Endpoint, n.Region))
+				continue
+			}
+			if e.InboundResolverOnly {
+				reasons = append(reasons, fmt.Sprintf("interface endpoint %s has private DNS only for inbound Resolver endpoints, "+
+					"so this VPC's instances resolve %s.%s.amazonaws.com to the gateway endpoint, not to it", e.ID, s.Endpoint, n.Region))
 				continue
 			}
 			if len(e.AvailabilityZones) == 0 {
@@ -304,9 +318,7 @@ func endpointFor(n PrivateNetwork, s PrivateService) (met, why, warn string) {
 		}
 	}
 	kind := "interface endpoint"
-	if s.GatewayOnly {
-		kind = "gateway endpoint"
-	} else if s.Gateway {
+	if s.Gateway {
 		kind = "gateway or interface endpoint"
 	}
 	why = fmt.Sprintf("no %s (%s)", kind, name)
@@ -409,6 +421,9 @@ func describePrivateNetwork(ctx context.Context, api privateNetworkAPI, region, 
 				State:         string(e.State),
 				PrivateDNS:    aws.ToBool(e.PrivateDnsEnabled),
 				RouteTableIDs: e.RouteTableIds,
+			}
+			if e.DnsOptions != nil {
+				pe.InboundResolverOnly = aws.ToBool(e.DnsOptions.PrivateDnsOnlyForInboundResolverEndpoint)
 			}
 			seen := map[string]bool{}
 			for _, s := range e.SubnetIds {

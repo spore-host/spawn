@@ -440,7 +440,11 @@ func (sb *bootSandbox) run(script string) (string, error) {
 		"/usr/local/bin/spored", filepath.Join(sb.dir, "spored"),
 		"http://169.254.169.254", sb.srv.srv.URL+"/imds",
 		"https://spawn-binaries-", sb.srv.srv.URL+"/b/",
-		".s3.amazonaws.com", "",
+		// The regional names the stub and the body use (#1436); a global
+		// .s3.amazonaws.com name is left alone, so it 404s here.
+		".s3.${SPAWN_BS_REGION:-us-east-1}.amazonaws.com", "",
+		".s3.${REGION}.amazonaws.com", "",
+		".s3.us-east-1.amazonaws.com", "",
 	)
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.Command(filepath.Join(sb.dir, "bin", "bash"), "-c", rw.Replace(script)) //nolint:gosec // this package's own generated script

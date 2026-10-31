@@ -61,7 +61,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	dryRun := fs.Bool("dry-run", true, "pre-flight, build and save only; change nothing")
 	recordMD := fs.String("record-md", "", "write the deploy record as markdown here")
 	recordJSON := fs.String("record-json", "", "write the deploy record as JSON here")
-	bodyURL := fs.String("body-url", "https://spawn-binaries-us-east-1.s3.amazonaws.com/spawn/versions/%s/bootstrap.sh", "published bootstrap body, %s is the version")
+	bodyURL := fs.String("body-url", "https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com/spawn/versions/%s/bootstrap.sh", "published bootstrap body, %s is the version")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

@@ -732,7 +732,7 @@ SPAWN_BS_TOKEN=$(curl -sf --connect-timeout 5 -X PUT http://169.254.169.254/late
 SPAWN_BS_REGION=$(curl -sf --connect-timeout 5 -H "X-aws-ec2-metadata-token: $SPAWN_BS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
 SPAWN_BS_OK=0
 mkdir -p /etc/spawn
-for SPAWN_BS_BASE in "https://spawn-binaries-${SPAWN_BS_REGION:-us-east-1}.s3.amazonaws.com" "https://spawn-binaries-us-east-1.s3.amazonaws.com"; do
+for SPAWN_BS_BASE in "https://spawn-binaries-${SPAWN_BS_REGION:-us-east-1}.s3.${SPAWN_BS_REGION:-us-east-1}.amazonaws.com" "https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com"; do
     SPAWN_BS_URL="$SPAWN_BS_BASE/spawn/versions/$SPAWN_BS_VERSION/bootstrap.sh"
     for SPAWN_BS_TRY in 1 2 3 4; do
         rm -f %[3]s %[3]s.sig %[3]s.der
@@ -932,8 +932,8 @@ case "$ARCH" in
 esac
 
 # Download from S3 (public buckets, regional for low latency)
-S3_BASE_URL="https://spawn-binaries-${REGION}.s3.amazonaws.com"
-FALLBACK_URL="https://spawn-binaries-us-east-1.s3.amazonaws.com"
+S3_BASE_URL="https://spawn-binaries-${REGION}.s3.${REGION}.amazonaws.com"
+FALLBACK_URL="https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com"
 
 echo "Downloading spored binary..."
 

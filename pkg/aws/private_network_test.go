@@ -71,6 +71,11 @@ func TestCheckPrivateNetwork(t *testing.T) {
 	s3Interface := without(fullPrivateNetwork(), "s3")
 	s3Interface.Endpoints = append(s3Interface.Endpoints, PrivateEndpoint{ID: "vpce-s3i", Service: "s3", Type: "Interface",
 		State: "available", PrivateDNS: true, AvailabilityZones: []string{"us-west-2a"}})
+	s3InboundOnly := without(fullPrivateNetwork(), "s3")
+	s3InboundOnly.Endpoints = append(s3InboundOnly.Endpoints, PrivateEndpoint{ID: "vpce-s3i", Service: "s3", Type: "Interface",
+		State: "available", PrivateDNS: true, InboundResolverOnly: true, AvailabilityZones: []string{"us-west-2a"}})
+	unpublished := fullPrivateNetwork()
+	unpublished.Region = "ap-south-1"
 	pending := fullPrivateNetwork()
 	pending.Endpoints[1].State = "pending"
 	otherAZ := fullPrivateNetwork()
@@ -97,7 +102,13 @@ func TestCheckPrivateNetwork(t *testing.T) {
 		{name: "no ec2messages endpoint", n: without(fullPrivateNetwork(), "ec2messages"), missing: []string{"ec2messages"}},
 		{name: "interface endpoint with private DNS disabled", n: noDNS, missing: []string{"ssm"}, mentions: "private DNS disabled"},
 		{name: "gateway endpoint not on the subnet's route table", n: unassociated, missing: []string{"s3"}, mentions: "not associated with the subnet's route table rtb-1"},
-		{name: "an S3 interface endpoint does not serve the bootstrap download", n: s3Interface, missing: []string{"s3"}, mentions: "only a gateway endpoint"},
+		// The bootstrap uses only regional S3 names (#1436), which an
+		// interface endpoint's private DNS serves.
+		{name: "an S3 interface endpoint with private DNS serves the bootstrap download", n: s3Interface},
+		{name: "an S3 interface endpoint with private DNS only for inbound Resolver endpoints does not", n: s3InboundOnly, missing: []string{"s3"}, mentions: "only for inbound Resolver endpoints"},
+		// No spawn-binaries bucket in the region: the bootstrap's only source
+		// is the us-east-1 fallback, which no endpoint in this VPC reaches.
+		{name: "a region spawn does not publish spored to needs NAT", n: unpublished, missing: []string{"s3"}, mentions: "falls back to spawn-binaries-us-east-1"},
 		{name: "an endpoint that is not available", n: pending, missing: []string{"ec2"}, mentions: "pending"},
 		{name: "an interface endpoint in another AZ works, with a warning", n: otherAZ, warns: true},
 		{name: "burst needs dynamodb", n: fullPrivateNetwork(), cfg: LaunchConfig{Tags: map[string]string{"spawn:burst": "true"}}, missing: []string{"dynamodb"}},
@@ -396,7 +407,12 @@ func TestPreflightNoPublicIPIsCachedPerSubnet(t *testing.T) {
 
 // What DescribePrivateNetwork reads off the wire is what the check decides on.
 func TestDescribePrivateNetworkReadsTheWire(t *testing.T) {
-	f := privateFake(allEndpointsXML()+gatewayEndpointXML("vpce-ddb", "dynamodb"), natRouteXML)
+	// An S3 interface endpoint beside the gateway one, with private DNS only
+	// for inbound Resolver endpoints: the VPC's own instances do not use it.
+	s3i := strings.Replace(interfaceEndpointXML("vpce-s3i", "s3", true), `</privateDnsEnabled>`,
+		`</privateDnsEnabled><dnsOptions><dnsRecordIpType>ipv4</dnsRecordIpType>`+
+			`<privateDnsOnlyForInboundResolverEndpoint>true</privateDnsOnlyForInboundResolverEndpoint></dnsOptions>`, 1)
+	f := privateFake(allEndpointsXML()+gatewayEndpointXML("vpce-ddb", "dynamodb")+s3i, natRouteXML)
 	c := newFakeEC2Client(t, f)
 	n, err := c.DescribePrivateNetwork(context.Background(), pnRegion, "subnet-1")
 	if err != nil {
@@ -407,6 +423,15 @@ func TestDescribePrivateNetworkReadsTheWire(t *testing.T) {
 	}
 	got := map[string]PrivateEndpoint{}
 	for _, e := range n.Endpoints {
+		if e.ID == "vpce-s3i" {
+			if e.Type != "Interface" || !e.PrivateDNS || !e.InboundResolverOnly {
+				t.Errorf("s3 interface endpoint = %+v, want private DNS only for inbound Resolver endpoints", e)
+			}
+			continue
+		}
+		if e.InboundResolverOnly {
+			t.Errorf("%s endpoint = %+v: InboundResolverOnly with no dnsOptions saying so", e.Service, e)
+		}
 		got[e.Service] = e
 	}
 	if e := got["s3"]; e.Type != "Gateway" || !reflect.DeepEqual(e.RouteTableIDs, []string{"rtb-1"}) {
