@@ -652,7 +652,9 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 	// detached resume relaunches are those of a launch that passed it; each
 	// claim is checked (the params must not differ).
 	consumedAtDetach := map[string]string{
-		"allow-missing-endpoints": "--no-public-ip's subnet check, run at --detach (#1437)",
+		// A detached resume re-runs the check (#1468) and takes the override
+		// as its own --allow-missing-endpoints.
+		"allow-missing-endpoints": "--no-public-ip's subnet check, run at --detach (#1437) and again on resume (#1468)",
 	}
 	carriedOnDetached := 0
 	for _, n := range carriedSweepFlags(t) {
