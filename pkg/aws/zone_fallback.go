@@ -227,7 +227,7 @@ func (e *ZoneFallbackError) Error() string {
 		}
 	default:
 		if capacity {
-			fmt.Fprintf(&b, "failed to launch instance: no capacity for %s in %s in any of the %d zones tried:\n", e.InstanceType, e.Region, len(e.Attempts))
+			fmt.Fprintf(&b, "failed to launch instance: no capacity for %s in %s in any zone tried (%d attempts):\n", e.InstanceType, e.Region, len(e.Attempts))
 		} else {
 			fmt.Fprintf(&b, "failed to launch instance: %s in %s, after capacity errors elsewhere; not trying further zones:\n", last.Code, last.label())
 		}
@@ -235,6 +235,9 @@ func (e *ZoneFallbackError) Error() string {
 			fmt.Fprintf(&b, "  - %s: %s: %s\n", a.label(), a.Code, a.Message)
 		}
 	}
+	msg := strings.TrimRight(b.String(), "\n")
+	b.Reset()
+	b.WriteString(msg)
 	if capacity {
 		var maxAttempts *retry.MaxAttemptsError
 		if errors.As(e.err, &maxAttempts) {

@@ -276,7 +276,7 @@ func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 	// list a single launch falls back across too. All zones, as this used to
 	// take, put rungs in zones without the type, where the cohort's launch
 	// fails as terminal (Unsupported) and the chain stops there.
-	offerings, err := chainZonesFor(ctx, awsClient, baseConfig.Region, baseConfig.InstanceType)
+	offerings, err := awsClient.InstanceTypeZones(ctx, baseConfig.Region, baseConfig.InstanceType)
 	zones := offerings.Launchable
 	if err != nil || len(zones) == 0 {
 		// AZ discovery failed — degrade to single-rung rather than fail the launch.
@@ -310,12 +310,6 @@ func buildAZChain(ctx context.Context, awsClient *aws.Client, baseConfig *aws.La
 		fmt.Fprintf(os.Stderr, "   AZ fallback enabled across %d zones: %s\n", len(chain), strings.Join(ordered, ", "))
 	}
 	return chain[0], chain
-}
-
-// chainZonesFor lists the zones buildAZChain may chain across. A
-// package-level seam so tests need no AWS.
-var chainZonesFor = func(ctx context.Context, awsClient *aws.Client, region, instanceType string) (aws.ZoneOfferings, error) {
-	return awsClient.InstanceTypeZones(ctx, region, instanceType)
 }
 
 // orderAZs returns zones with preferred first (when non-empty and present),
