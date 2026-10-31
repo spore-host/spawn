@@ -449,6 +449,41 @@ func (e *LaunchError) Error() string {
 
 func (e *LaunchError) Unwrap() error { return e.err }
 
+// LaunchErrorDetail returns a launch error's AWS error code and a message for
+// a person: AWS's own message when there is one, not the SDK's operation,
+// status and RequestID wrapping around it nor the LaunchError's "failed to
+// launch instance: CODE:" prefix, plus a note when the launch's deadline cut a
+// retry short, since that is why a transient error ended the launch. The code
+// is the LaunchError's, or the AWS error's when Launch failed before
+// RunInstances. An error with no AWS error in it is returned whole.
+//
+// Both cohort classifiers (taskcohort for pools, mpicohort for job arrays and
+// MPI) put it in the Fault a member's failure line prints (#1448, #1462), so
+// the two paths read alike.
+func LaunchErrorDetail(err error) (code, msg string) {
+	var le *LaunchError
+	if errors.As(err, &le) {
+		code = le.Code
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return code, err.Error()
+	}
+	if code == "" {
+		code = apiErr.ErrorCode()
+	}
+	msg = apiErr.ErrorMessage()
+	if msg == "" {
+		msg = err.Error()
+	}
+	for _, ctxErr := range []error{context.DeadlineExceeded, context.Canceled} {
+		if errors.Is(err, ctxErr) {
+			msg += " (still failing when the launch was stopped: " + ctxErr.Error() + ")"
+		}
+	}
+	return code, msg
+}
+
 // newLaunchError builds a LaunchError, extracting the verbatim AWS error code
 // from the smithy.APIError in the chain if present.
 func newLaunchError(err error) error {

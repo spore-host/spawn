@@ -31,7 +31,6 @@ import (
 	"errors"
 	"fmt"
 
-	smithy "github.com/aws/smithy-go"
 	"github.com/spore-host/cohort"
 	"github.com/spore-host/spawn/pkg/aws"
 )
@@ -194,7 +193,7 @@ func (Classifier) Classify(err error) cohort.Fault {
 	if err == nil {
 		return cohort.Fault{Class: cohort.FaultRetryableConsistency}
 	}
-	code, msg := launchErrorDetail(err)
+	code, msg := aws.LaunchErrorDetail(err)
 	// The capacity codes are the ones a single launch moves zone on, too
 	// (aws.LaunchWithZoneFallback, #1458): one list, so the two agree.
 	switch {
@@ -205,34 +204,6 @@ func (Classifier) Classify(err error) cohort.Fault {
 	default:
 		return cohort.Fault{Class: cohort.FaultTerminal, Code: code, Message: msg}
 	}
-}
-
-// launchErrorDetail returns err's AWS error code and a message for a person:
-// AWS's own message when there is one (not the SDK's operation/RequestID
-// wrapping), plus a note when the launch's deadline cut a retry short, since
-// that is why a transient error ended the launch.
-func launchErrorDetail(err error) (code, msg string) {
-	var le *aws.LaunchError
-	if errors.As(err, &le) {
-		code = le.Code
-	}
-	var apiErr smithy.APIError
-	if !errors.As(err, &apiErr) {
-		return code, err.Error()
-	}
-	if code == "" {
-		code = apiErr.ErrorCode()
-	}
-	msg = apiErr.ErrorMessage()
-	if msg == "" {
-		msg = err.Error()
-	}
-	for _, ctxErr := range []error{context.DeadlineExceeded, context.Canceled} {
-		if errors.Is(err, ctxErr) {
-			msg += " (still failing when the launch was stopped: " + ctxErr.Error() + ")"
-		}
-	}
-	return code, msg
 }
 
 // rungOf pulls the current Rung from a RungPlacement intent (zero Rung otherwise).
