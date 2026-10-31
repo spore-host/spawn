@@ -484,12 +484,25 @@ func applyNoPublicIP(input *ec2.RunInstancesInput, lc LaunchConfig) {
 	}
 }
 
+// reportPreflightOnce writes a PreflightNoPublicIP line to out unless this
+// client has already written the same line (#1443).
+func (c *Client) reportPreflightOnce(out io.Writer, format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	if _, seen := c.privateNetReported.LoadOrStore(line, true); seen {
+		return
+	}
+	_, _ = io.WriteString(out, line)
+}
+
 // PreflightNoPublicIP settles a private-only launch's network before anything
 // is created (#1433): with only an AZ, the subnet SubnetInAZ picks is pinned
 // on cfg (and printed to out), so the instance launches in the subnet that was
 // checked; then the subnet is checked. It refuses, listing what is missing,
 // unless cfg.AllowMissingEndpoints, which prints the list instead. internet
 // are needs only NAT meets beyond those cfg names. A no-op without NoPublicIP.
+// A line this client has already written is not written again, so the check
+// Launch repeats after the CLI's, or once per job array member, adds nothing
+// to out (#1443).
 func (c *Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, internet []string, out io.Writer) (PrivateCheck, error) {
 	if !cfg.NoPublicIP {
 		return PrivateCheck{}, nil
@@ -502,13 +515,13 @@ func (c *Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, int
 		if err != nil {
 			return PrivateCheck{}, fmt.Errorf("--no-public-ip: subnet in %s: %w", cfg.AvailabilityZone, err)
 		}
-		fmt.Fprintf(out, "using subnet %s (%s, %d free IPs) in %s\n", choice.SubnetID, choice.AvailabilityZone, choice.FreeIPs, choice.VPCID)
+		c.reportPreflightOnce(out, "using subnet %s (%s, %d free IPs) in %s\n", choice.SubnetID, choice.AvailabilityZone, choice.FreeIPs, choice.VPCID)
 		cfg.SubnetID = choice.SubnetID
 	}
 	n, err := c.DescribePrivateNetwork(ctx, cfg.Region, cfg.SubnetID)
 	if err != nil {
 		if cfg.AllowMissingEndpoints {
-			fmt.Fprintf(out, "⚠️  --no-public-ip: could not check subnet %s (%v); launching anyway (--allow-missing-endpoints)\n", cfg.SubnetID, err)
+			c.reportPreflightOnce(out, "⚠️  --no-public-ip: could not check subnet %s (%v); launching anyway (--allow-missing-endpoints)\n", cfg.SubnetID, err)
 			return PrivateCheck{}, nil
 		}
 		return PrivateCheck{}, fmt.Errorf("--no-public-ip: could not check that subnet %s can serve a private-only instance "+
@@ -517,14 +530,14 @@ func (c *Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, int
 	}
 	check := CheckPrivateNetwork(n, *cfg, internet)
 	for _, w := range check.Warnings {
-		fmt.Fprintf(out, "⚠️  --no-public-ip: %s\n", w)
+		c.reportPreflightOnce(out, "⚠️  --no-public-ip: %s\n", w)
 	}
 	if check.OK() {
 		return check, nil
 	}
 	list := "  - " + strings.Join(check.Missing, "\n  - ")
 	if cfg.AllowMissingEndpoints {
-		fmt.Fprintf(out, "⚠️  --no-public-ip: subnet %s (%s, %s) cannot reach:\n%s\nLaunching anyway (--allow-missing-endpoints): "+
+		c.reportPreflightOnce(out, "⚠️  --no-public-ip: subnet %s (%s, %s) cannot reach:\n%s\nLaunching anyway (--allow-missing-endpoints): "+
 			"what needs these will fail on the instance, and spored's TTL and cost limit may not be enforced; the TTL reaper is the backstop.\n",
 			n.SubnetID, n.VPCID, n.AvailabilityZone, list)
 		return check, nil

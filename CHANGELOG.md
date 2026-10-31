@@ -56,6 +56,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A spot launch now records its spot price** (#1442).
   `spawn:spot-price-per-hour` was almost never written: the RunInstances response has no `platformDetails`, so spawn re-described the instance it had just launched, and EC2 answers that with `InvalidInstanceID.NotFound` for a moment after launch. spawn did not retry, so spored costed the instance at the on-demand rate. 99 of 99 recent launches in one `~/.spawn/spawn.log` failed this way.
   The billing platform now comes from the AMI, from the `DescribeImages` call the launch already makes, and the zone from the response or the request, so there is no re-describe. When one is still needed, a NotFound is retried up to three times within the existing 10s budget.
+- **`--no-public-ip` launch output** (#1443).
+  - **Each pre-flight warning now prints once.** The CLI checks the subnet before it creates anything, then `Launch` checks it again, and each pass printed every cross-AZ endpoint warning. The repeat check, which hits the client's cache, now prints only lines this client has not already printed. A job array's members, which `Launch` checks one at a time, no longer repeat them either.
+  - **The ready box reads `Public IP    none (private only)`**, the same as the dry run, instead of leaving the row blank. A `--no-public-ip` launch also skips the "Getting public IP" step.
+
+- **`spawn launch --help` no longer shows a bogus `spawn connect` value on `--no-public-ip`, `--allow-missing-endpoints` and `--wait-for-ssh`** (#1441).
+  pflag reads the first back-quoted span in a flag's usage text as that flag's value name, so these bool flags looked as if they took an argument.
+  A test now walks every command and fails if any bool flag's usage has a value name.
 
 ## [0.151.0] - 2026-10-30
 

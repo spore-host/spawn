@@ -312,13 +312,19 @@ func stepDuration(step Step) string {
 // SuccessSummary is what the launch summary shows. Empty optional fields are
 // omitted.
 type SuccessSummary struct {
-	InstanceID      string
+	InstanceID string
+	// PublicIP is the instance's public address; empty means it has none and
+	// is shown as NoPublicIP (#1443).
 	PublicIP        string
 	InstanceProfile string // the resolved IAM instance profile (#550)
 	ConnectCommand  string
 	DNSRecord       string // the FQDN spored registered, if any
 	DNSConnect      string // how to connect by that name
 }
+
+// NoPublicIP is the launch summary's Public IP for an instance that has none
+// (--no-public-ip, or a subnet that assigns none), as the dry run shows it.
+const NoPublicIP = "none (private only)"
 
 // sectionRule closes each section of the launch summary.
 const sectionRule = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -353,11 +359,15 @@ func renderSuccess(w io.Writer, s SuccessSummary, config interface{}) {
 	_, _ = fmt.Fprintln(w, boxBottom)
 	_, _ = fmt.Fprintln(w)
 
+	publicIP := s.PublicIP
+	if publicIP == "" {
+		publicIP = NoPublicIP
+	}
 	details := []string{
 		i18n.T("spawn.progress.success.details"),
 		"",
 		fmt.Sprintf("  %s  %s", i18n.T("spawn.progress.success.label.instance_id"), s.InstanceID),
-		fmt.Sprintf("  %s    %s", i18n.T("spawn.progress.success.label.public_ip"), s.PublicIP),
+		fmt.Sprintf("  %s    %s", i18n.T("spawn.progress.success.label.public_ip"), publicIP),
 		fmt.Sprintf("  %s       %s", i18n.T("spawn.progress.success.label.status"), i18n.T("spawn.progress.success.status_running")),
 	}
 	if s.InstanceProfile != "" {

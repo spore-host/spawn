@@ -31,7 +31,7 @@ spawn launch <name> [flags]
 | `--active-processes` |  | string |  | Process names to monitor, prevents the idle stop while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple) |
 | `--allow-cidr` |  | string |  | CIDR allowed to reach the managed Windows security group (RDP 3389 + SSH 22); default 0.0.0.0/0 |
 | `--allow-cost-limit-overrun` |  | bool |  | Proceed even when the storage this launch creates exceeds --cost-limit on its own. You are committing to a bill the cap cannot bound. |
-| `--allow-missing-endpoints` |  | bool |  | With --no-public-ip: launch even when the subnet lacks a VPC endpoint or NAT route it needs. What is missing is still listed; without it the bootstrap may not install spored, spored may not enforce --ttl or --cost-limit, and `spawn connect` may not reach the instance |
+| `--allow-missing-endpoints` |  | bool |  | With --no-public-ip: launch even when the subnet lacks a VPC endpoint or NAT route it needs. What is missing is still listed; without it the bootstrap may not install spored, spored may not enforce --ttl or --cost-limit, and spawn connect may not reach the instance |
 | `--ami` |  | string |  | AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023 |
 | `--attach-volume` |  | stringArray |  | Attach an EBS volume from a snapshot, mounted at a path: snap-xxx:/mount/point[:ro]. Repeatable. Read-only is the common case for shared reference data. |
 | `--auto-placement-group` |  | bool | `true` | Automatically create placement group for MPI job arrays (default: true) |
@@ -111,7 +111,7 @@ spawn launch <name> [flags]
 | `--nist-800-53` |  | string |  | Enable NIST 800-53 compliance (low, moderate, high) |
 | `--no-detach` |  | bool |  | Disable auto-detach for parameter sweeps (requires --ttl or --idle-timeout) |
 | `--no-dns` |  | bool |  | Do not register DNS for this instance (by default spored registers the --name/--dns name). Overrides dns.enabled in ~/.spawn/config.yaml for this launch (#549) |
-| `--no-public-ip` |  | bool |  | Launch with private IPs only: no public IP on any interface, and no Elastic IP for a multi-card --efa launch, so the region's Elastic IP quota does not limit the fleet. Needs --subnet-id, or --az to let spawn pick a subnet. Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a NAT gateway route, or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the launch if not. `spawn connect` uses SSM. Refused with --dns and --wait-for-ssh; the DNS record --name implies is skipped |
+| `--no-public-ip` |  | bool |  | Launch with private IPs only: no public IP on any interface, and no Elastic IP for a multi-card --efa launch, so the region's Elastic IP quota does not limit the fleet. Needs --subnet-id, or --az to let spawn pick a subnet. Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a NAT gateway route, or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the launch if not. spawn connect uses SSM. Refused with --dns and --wait-for-ssh; the DNS record --name implies is skipped |
 | `--no-timeout` |  | bool |  | Disable automatic timeout (NOT RECOMMENDED: creates zombie risk) |
 | `--notify-platform` |  | string |  | Chat platform for lifecycle notifications: slack (default), teams, or discord |
 | `--on-complete` |  | string |  | Action when workload signals completion: terminate, stop, hibernate. Use 'terminate' for batch/headless workloads — 'stop' leaves EBS (and any attached EIP) billing indefinitely, which is easy to forget in accounts without a hosted reaper |
@@ -159,7 +159,7 @@ spawn launch <name> [flags]
 | `--volume-size` |  | int32 |  | Root EBS volume size in GiB (0 = use AMI default) |
 | `--vpc` |  | string |  | VPC ID |
 | `--wait-for-running` |  | bool | `true` | Wait until running |
-| `--wait-for-ssh` |  | bool |  | Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: `spawn connect` uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait) |
+| `--wait-for-ssh` |  | bool |  | Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: spawn connect uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait) |
 | `--wait-timeout` |  | string |  | Timeout for --wait (e.g., 2h, 30m, 0=no timeout) |
 | `--wait` |  | bool |  | Wait for sweep/launch to complete (requires --detach) |
 | `--webhook-correlation` |  | string |  | Opaque blob echoed verbatim in the spot-webhook/completion-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn) |

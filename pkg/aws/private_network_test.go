@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -416,5 +417,32 @@ func TestDescribePrivateNetworkReadsTheWire(t *testing.T) {
 	}
 	if len(got) != 6 {
 		t.Errorf("endpoints = %v, want 6", got)
+	}
+}
+
+// #1443: the CLI checks the subnet, then Launch checks it again (and a job
+// array once per member). The repeat must print nothing the first printed: on
+// a live launch every cross-AZ warning appeared twice.
+func TestPreflightNoPublicIPRepeatPrintsNothingNew(t *testing.T) {
+	// The interface endpoints sit only in subnet-2 (us-west-2b), so subnet-1
+	// (us-west-2a) gets a cross-AZ warning for each.
+	endpoints := strings.ReplaceAll(allEndpointsXML(), "<subnetIdSet><item>subnet-1</item>", "<subnetIdSet><item>subnet-2</item>")
+	f := privateFake(endpoints, "")
+	f.subnets = append(f.subnets, fakeSubnet{id: "subnet-2", vpc: "vpc-1", az: "us-west-2b", free: 200})
+	c := newFakeEC2Client(t, f)
+
+	var first, second bytes.Buffer
+	for _, out := range []*bytes.Buffer{&first, &second} {
+		cfg := privateCfg
+		cfg.AllowMissingEndpoints = true
+		if _, err := c.PreflightNoPublicIP(context.Background(), &cfg, nil, out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(first.String(), "crosses AZs"); n != 4 {
+		t.Fatalf("first check printed %d cross-AZ warnings, want 4 (one per interface endpoint):\n%s", n, first.String())
+	}
+	if second.Len() != 0 {
+		t.Errorf("the repeated check printed again:\n%s", second.String())
 	}
 }

@@ -203,7 +203,8 @@ type launchPlan struct {
 }
 
 // noPublicIPPlan is the dry-run's Public IP for a --no-public-ip launch.
-const noPublicIPPlan = "none (private only)"
+// The launch summary shows the same words (progress.NoPublicIP, #1443).
+const noPublicIPPlan = progress.NoPublicIP
 
 // describeLaunchPlan projects a resolved LaunchConfig into the dry-run's
 // display shape. Pure — no AWS, no I/O — so it's directly unit-testable.
