@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`aws.PlacementGroupAvailableWait`** (#1454): how long `CreatePlacementGroup` can wait for a new group to become available, for a caller sizing a deadline around it.
+
 ### Changed
 
 - **A single `spawn launch` with no `--az` or `--subnet-id` tries the other zones that offer the instance type on a capacity error** (#1458).
@@ -34,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`lambda/dashboard-api/scripts/setup-all.sh` runs from any directory** (#1447).
   It ran step 1 as `./scripts/setup-dashboard-lambda-role.sh` (correct only from `lambda/dashboard-api`) and step 2 as `cd ..; ./deploy.sh` (correct only from `lambda/dashboard-api/scripts`), so it could not complete from either. It now changes to its own directory first. `lambda/dashboard-api/deploy.sh` does the same, so its `go build .` builds the dashboard API wherever it is started from; run from another directory it used to build whatever package was there. What the scripts deploy, and their account checks, are unchanged.
+- **Job-array and MPI members lost to the instance-profile race** (#1454, the job-array side of #1448). A member's launch had 30 seconds, shorter than the minute `Launch` retries EC2's "Invalid IAM Instance Profile name" for a just-created profile (#572), so the deadline cut the retry off and the member failed. The launch budget is now derived from that retry window plus `Launch`'s own calls for every zone in the AZ-fallback chain (a member that places on its own walks the whole chain under one deadline), plus the per-zone placement-group wait when an MPI cohort creates one. A member gets 2 minutes on a one-zone chain and 5 on a four-zone chain, or 2.5 and 7 with a per-zone placement group. The budget is a backstop: a launch that returns sooner is not slowed.
+- **A job-array or MPI member's failure has a reason** (#1454). `terminal/InvalidParameterValue at phase=launch-acked` now carries the AWS message, for the failed member and for the members cancelled around it, as `spawn pool create` does since #1448.
 
 ## [0.152.0] - 2026-10-30
 
