@@ -6,6 +6,11 @@ set -e
 
 PROFILE=${1:-default}
 
+# Run from this script's own directory, so every path below resolves wherever
+# it is started from. It used to assume two different starting directories at
+# once and could not complete from either (#1447).
+cd "$(dirname "$0")"
+
 echo "╔════════════════════════════════════════════════════════╗"
 echo "║   Dashboard API Complete Infrastructure Setup         ║"
 echo "╚════════════════════════════════════════════════════════╝"
@@ -31,16 +36,14 @@ echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "  Step 1/4: Creating IAM Role"
 echo "═══════════════════════════════════════════════════════"
-./scripts/setup-dashboard-lambda-role.sh "$PROFILE"
+./setup-dashboard-lambda-role.sh "$PROFILE"
 
 # Step 2: Deploy Lambda
 echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "  Step 2/4: Deploying Lambda Function"
 echo "═══════════════════════════════════════════════════════"
-cd ..
-./deploy.sh "$PROFILE"
-cd scripts
+../deploy.sh "$PROFILE"
 
 # Step 3: Set up API Gateway
 echo ""

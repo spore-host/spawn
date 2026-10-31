@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Time from the completion file to the `Terminate` call is now 35-95 s with the defaults (1-minute poll + 30 s `--completion-delay` + 5 s warning), down from 95-155 s for the last instance in a region.
   - Reaches instances launched by a CLI with this release; running instances keep the old spored until `spawn upgrade-spored`.
 
+### Fixed
+
+- **`lambda/dashboard-api/scripts/setup-all.sh` runs from any directory** (#1447).
+  It ran step 1 as `./scripts/setup-dashboard-lambda-role.sh` (correct only from `lambda/dashboard-api`) and step 2 as `cd ..; ./deploy.sh` (correct only from `lambda/dashboard-api/scripts`), so it could not complete from either. It now changes to its own directory first. `lambda/dashboard-api/deploy.sh` does the same, so its `go build .` builds the dashboard API wherever it is started from; run from another directory it used to build whatever package was there. What the scripts deploy, and their account checks, are unchanged.
+
 ## [0.152.0] - 2026-10-30
 
 ### Added

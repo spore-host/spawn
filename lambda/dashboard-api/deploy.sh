@@ -9,6 +9,11 @@ FUNCTION_NAME="spawn-dashboard-api"
 ROLE_NAME="SpawnDashboardLambdaRole"
 REGION="us-east-1"
 
+# Build from this script's own directory: `go build .` and the function.zip it
+# uploads are relative paths, so run from anywhere else this built the wrong
+# package (or none) (#1447).
+cd "$(dirname "$0")"
+
 # Assert the target account. Credentials are whatever happens to be ambient, so
 # without this the script will happily build a parallel copy of production in a
 # sandbox — or, worse, a half-copy that nothing then invokes. Added when the
