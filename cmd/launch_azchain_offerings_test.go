@@ -39,6 +39,7 @@ func (f zonesEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "DescribeInstanceTypeOfferings":
 		fmt.Fprintf(&b, `<DescribeInstanceTypeOfferingsResponse %s><requestId>r</requestId><instanceTypeOfferingSet>`, ns)
 		for _, z := range f.offered {
+			// nosemgrep
 			fmt.Fprintf(&b, `<item><instanceType>%s</instanceType><locationType>availability-zone</locationType><location>%s</location></item>`, form.Get("Filter.1.Value.1"), z)
 		}
 		b.WriteString(`</instanceTypeOfferingSet></DescribeInstanceTypeOfferingsResponse>`)

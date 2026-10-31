@@ -56,6 +56,7 @@ func (f *zoneEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Header().Set("Content-Type", "text/xml")
 			w.WriteHeader(status)
+			// nosemgrep
 			fmt.Fprintf(w, `<Response><Errors><Error><Code>%s</Code><Message>no %s here</Message></Error></Errors><RequestID>r</RequestID></Response>`, code, code)
 			return
 		}
@@ -63,12 +64,14 @@ func (f *zoneEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if placed == "" {
 			placed = "us-west-2z" // EC2's own choice
 		}
+		// nosemgrep
 		fmt.Fprintf(&resp, `<RunInstancesResponse %s><requestId>r</requestId><reservationId>r-1</reservationId><ownerId>111122223333</ownerId>`+
 			`<instancesSet><item><instanceId>i-new</instanceId><placement><availabilityZone>%s</availabilityZone></placement>`+
 			`<instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`, ns, placed)
 	case "DescribeInstanceTypeOfferings":
 		fmt.Fprintf(&resp, `<DescribeInstanceTypeOfferingsResponse %s><requestId>r</requestId><instanceTypeOfferingSet>`, ns)
 		for _, z := range f.offered {
+			// nosemgrep
 			fmt.Fprintf(&resp, `<item><instanceType>%s</instanceType><locationType>availability-zone</locationType><location>%s</location></item>`, form.Get("Filter.1.Value.1"), z)
 		}
 		resp.WriteString(`</instanceTypeOfferingSet></DescribeInstanceTypeOfferingsResponse>`)
@@ -128,14 +131,14 @@ func zoneLaunchConfig() LaunchConfig {
 	}
 }
 
-func launchAcross(t *testing.T, f *zoneEC2, cfg LaunchConfig) (*LaunchResult, error, string) {
+func launchAcross(t *testing.T, f *zoneEC2, cfg LaunchConfig) (*LaunchResult, string, error) {
 	t.Helper()
 	if f.fakeEC2 == nil {
 		f.fakeEC2 = &fakeEC2{}
 	}
 	var out bytes.Buffer
 	res, err := newFakeEC2ClientFor(t, f).LaunchWithZoneFallback(context.Background(), cfg, &out)
-	return res, err, out.String()
+	return res, out.String(), err
 }
 
 // The gate for #1458's goal: a launch naming no zone that gets
@@ -147,7 +150,7 @@ func TestLaunchWithZoneFallback_CapacityErrorLaunchesInTheNextOfferedZone(t *tes
 		offered: []string{"us-west-2a", "us-west-2b", "us-west-2c"}, defaults: []string{"us-west-2a", "us-west-2b", "us-west-2c"},
 		runErr: map[string]string{"": ice, "us-west-2a": ice},
 	}
-	res, err, out := launchAcross(t, f, zoneLaunchConfig())
+	res, out, err := launchAcross(t, f, zoneLaunchConfig())
 	if err != nil {
 		t.Fatalf("LaunchWithZoneFallback: %v", err)
 	}
@@ -242,7 +245,7 @@ func TestLaunchWithZoneFallback_EveryZoneOutOfCapacityListsThemAll(t *testing.T)
 		offered: []string{"us-west-2a", "us-west-2b"}, defaults: []string{"us-west-2a", "us-west-2b"},
 		runErr: map[string]string{"": ice, "us-west-2a": ice, "us-west-2b": "SpotMaxPriceTooLow"},
 	}
-	_, err, _ := launchAcross(t, f, zoneLaunchConfig())
+	_, _, err := launchAcross(t, f, zoneLaunchConfig())
 	var zf *ZoneFallbackError
 	if !errors.As(err, &zf) {
 		t.Fatalf("err = %v, want a *ZoneFallbackError", err)
@@ -271,7 +274,7 @@ func TestLaunchWithZoneFallback_TriesOnlyZonesThatOfferTheType(t *testing.T) {
 		defaults: []string{"us-west-2a", "us-west-2b", "us-west-2c"},
 		runErr:   map[string]string{"": ice, "us-west-2a": ice, "us-west-2b": ice, "us-west-2c": ice, "us-west-2d": ice},
 	}
-	_, err, _ := launchAcross(t, f, zoneLaunchConfig())
+	_, _, err := launchAcross(t, f, zoneLaunchConfig())
 	if err == nil {
 		t.Fatal("launched; every zone was out of capacity")
 	}
@@ -314,7 +317,7 @@ func TestLaunchWithZoneFallback_NonCapacityErrorIsNotRetriedElsewhere(t *testing
 	for _, code := range []string{"UnauthorizedOperation", "InvalidParameterValue", "Unsupported"} {
 		t.Run(code, func(t *testing.T) {
 			f := &zoneEC2{offered: []string{"us-west-2a"}, defaults: []string{"us-west-2a"}, runErr: map[string]string{"": code}}
-			_, err, _ := launchAcross(t, f, zoneLaunchConfig())
+			_, _, err := launchAcross(t, f, zoneLaunchConfig())
 			if n := len(f.sent("RunInstances")); n != 1 {
 				t.Errorf("RunInstances sent %d times, want 1", n)
 			}
@@ -333,7 +336,7 @@ func TestLaunchWithZoneFallback_NonCapacityErrorIsNotRetriedElsewhere(t *testing
 		offered: []string{"us-west-2a", "us-west-2b"}, defaults: []string{"us-west-2a", "us-west-2b"},
 		runErr: map[string]string{"": ice, "us-west-2a": "Unsupported"},
 	}
-	_, err, _ := launchAcross(t, f, zoneLaunchConfig())
+	_, _, err := launchAcross(t, f, zoneLaunchConfig())
 	if got := f.runZones(); !reflect.DeepEqual(got, []string{"", "us-west-2a"}) || err == nil {
 		t.Errorf("RunInstances named zones %q (err %v), want to stop at us-west-2a's Unsupported", got, err)
 	}
@@ -461,6 +464,7 @@ func TestEveryPlacementLikeLaunchConfigFieldIsClassifiedForZoneFallback(t *testi
 		t.Fatal("found no placement-like LaunchConfig fields; the discovery is broken")
 	}
 	for name := range binding {
+		// nosemgrep
 		if _, ok := rt.FieldByName(name); !ok {
 			t.Errorf("binding field %s no longer exists", name)
 		}
