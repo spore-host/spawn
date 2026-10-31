@@ -176,37 +176,82 @@ func TestDashboardStreamTablesAgreeAndExist(t *testing.T) {
 // #772 (#1434). CHANGELOG.md keeps the history.
 func TestNothingNamesTheRemovedAutoscaleTable(t *testing.T) {
 	name := "spawn-autoscale" + "-groups"
-	var hits []string
-	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if treewalk.Vanished(".", path, err) {
-				return nil
-			}
-			return err
-		}
-		if d.IsDir() && skipWalkDir(d.Name()) {
-			return filepath.SkipDir
-		}
-		if !d.Type().IsRegular() || path == "CHANGELOG.md" {
-			return nil
-		}
-		b, err := os.ReadFile(path) //nolint:gosec // walking this repo
-		if err != nil {
-			if treewalk.Vanished(".", path, err) {
-				return nil
-			}
-			return err
-		}
-		if strings.Contains(string(b), name) {
-			hits = append(hits, path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hits) > 0 {
+	if hits := trackedFilesNaming(t, ".", name, "CHANGELOG.md"); len(hits) > 0 {
 		t.Errorf("these still name the removed %s table: %v", name, hits)
+	}
+}
+
+// trackedFilesNaming returns the files git tracks under root that contain
+// needle, except those in skip. Tracked only, as TestNoTrackedCompiledBinaries
+// does: a tree walk also read gitignored build output, and a stale
+// dashboard-websocket-processor binary from an earlier build failed the gate
+// locally while CI, checking out clean, passed (#1439).
+func trackedFilesNaming(t *testing.T, root, needle string, skip ...string) []string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+	files := strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
+	if len(files) == 0 || files[0] == "" {
+		t.Fatal("git tracks no files; the discovery has broken, not the tree clean")
+	}
+	var hits []string
+	for _, rel := range files {
+		if slices.Contains(skip, rel) {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+			continue // deleted but still in the index, or a symlink
+		}
+		b, err := os.ReadFile(path) //nolint:gosec // a file git tracks in this repo
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), needle) {
+			hits = append(hits, rel)
+		}
+	}
+	return hits
+}
+
+// TestTrackedFilesNamingReadsOnlyTrackedFiles: build output git ignores does
+// not count, and a tracked file still does (#1439).
+func TestTrackedFilesNamingReadsOnlyTrackedFiles(t *testing.T) {
+	root := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const needle = "removed-thing"
+	git("init", "-q")
+	write(".gitignore", "bin/\nlambda/fn/fn\n")
+	write("src.go", "package x\n")
+	write("CHANGELOG.md", needle+"\n")
+	git("add", ".gitignore", "src.go", "CHANGELOG.md")
+	write("bin/spawn", "\x7fELF "+needle)
+	write("lambda/fn/fn", "\x7fELF "+needle)
+	if hits := trackedFilesNaming(t, root, needle, "CHANGELOG.md"); len(hits) != 0 {
+		t.Errorf("gitignored build output counted: %v", hits)
+	}
+
+	write("lambda/fn/main.go", "package main // "+needle+"\n")
+	git("add", "lambda/fn/main.go")
+	if hits := trackedFilesNaming(t, root, needle, "CHANGELOG.md"); !slices.Equal(hits, []string{"lambda/fn/main.go"}) {
+		t.Errorf("tracked files naming it: got %v, want [lambda/fn/main.go]", hits)
 	}
 }
 
