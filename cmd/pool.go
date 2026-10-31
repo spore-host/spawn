@@ -477,21 +477,15 @@ func provisionPoolWorkers(ctx context.Context, awsClient *aws.Client, region, sp
 	return poolProvisionResult(poolRunID, members, outcome, poolMinViableFor(poolWorkers))
 }
 
-// poolLaunchPreworkAllowance is the part of a worker's launch budget for what
-// aws.Client.Launch does before its first RunInstances: caller identity, the
-// account name, the price through truffle, the launch config object in S3, the
-// AMI's root device. Generous: the budget is a backstop, not a pace.
-const poolLaunchPreworkAllowance = time.Minute
-
 // poolCohortBudget is the pool's per-phase budget. cohort's default gives a
 // launch 15s, which ended the #572 retry (aws.Client.Launch) mid-schedule: in
 // #1448 four workers were rejected for a profile created moments earlier,
 // three were launched 7s later and the fourth was cut off by the deadline
-// with no reason recorded. The launch budget is the whole retry window plus
-// Launch's own calls.
+// with no reason recorded. A worker has one rung and nothing before its
+// Launch, so its launch budget holds one Launch (cohortLaunch).
 func poolCohortBudget() cohort.PhaseBudget {
 	b := cohort.DefaultBudget()
-	b.LaunchAcked = aws.InstanceProfilePropagationRetryWindow() + poolLaunchPreworkAllowance
+	b.LaunchAcked = cohortLaunch{attempts: 1}.budget()
 	return b
 }
 
@@ -560,7 +554,7 @@ func poolProvisionResult(runID string, members []cohort.EntityIntent, outcome co
 	var missing []string
 	for _, m := range members {
 		if rec := outcome.Records[m.ID]; !rec.Succeeded() {
-			missing = append(missing, fmt.Sprintf("  %s: %s", m.ID, poolMemberReason(rec)))
+			missing = append(missing, fmt.Sprintf("  %s: %s", m.ID, cohortMemberReason(rec)))
 		}
 	}
 	up := len(members) - len(missing)
@@ -574,34 +568,6 @@ func poolProvisionResult(runID string, members []cohort.EntityIntent, outcome co
 		fmt.Fprintf(&b, "⚠️  %d worker(s) did not come up; the pool runs with %d:\n%s\n", len(missing), up, strings.Join(missing, "\n"))
 	}
 	return b.String(), nil
-}
-
-// poolMemberReason is cohort's Record.Summary with the fault's AWS error code
-// and message, which Summary leaves out ("terminal/ at phase=launch-acked",
-// #1448).
-func poolMemberReason(rec cohort.Record) string {
-	switch {
-	case rec.Terminal != nil:
-		return fmt.Sprintf("%s at phase=%s after %d rung(s)", poolFaultText(*rec.Terminal), rec.ReachedPhase, len(rec.Attempts))
-	case rec.CohortCancelled != nil:
-		cc := rec.CohortCancelled
-		return fmt.Sprintf("cohort-cancelled at phase=%s — culprit=%s %s at phase=%s",
-			cc.SurvivorPhase, cc.CulpritID, poolFaultText(cc.CulpritFault), cc.CulpritPhase)
-	default:
-		return rec.Summary()
-	}
-}
-
-func poolFaultText(f cohort.Fault) string {
-	code := f.Code
-	if code == "" {
-		code = "unknown"
-	}
-	s := fmt.Sprintf("%s/%s", f.Class, code)
-	if f.Message != "" {
-		s += ": " + f.Message
-	}
-	return s
 }
 
 // poolWorkerGeneration scopes the workers' RunInstances idempotency tokens to

@@ -203,9 +203,15 @@ func buildJobArrayMemberConfig(baseConfig *aws.LaunchConfig, mp memberParams, jo
 // cohortBudget maps the legacy job-array timeouts onto cohort's per-phase budget.
 // Running matches the legacy flat 2-minute running-wait; every field is set
 // explicitly so cohort doesn't inject its larger defaults.
-func cohortBudget(spec cohortSpec) cohort.PhaseBudget {
+//
+// LaunchAcked comes from launch, what one member's launch context has to hold
+// (arrayCohortLaunch). It was a flat 30s, shorter than the #572
+// instance-profile retry inside aws.Client.Launch (#1454, the job-array side of
+// #1448): a member still being rejected for a just-created profile was cut off
+// by the deadline and reported failed.
+func cohortBudget(spec cohortSpec, launch cohortLaunch) cohort.PhaseBudget {
 	b := cohort.PhaseBudget{
-		LaunchAcked:    30 * time.Second, // RunInstances ack
+		LaunchAcked:    launch.budget(),  // Launch, with its #572 retry
 		Running:        2 * time.Minute,  // matches legacy maxWaitTime
 		Enrolled:       2 * time.Second,  // nil Enroller → trivially enrolled
 		CohortBarrier:  30 * time.Second, // straggler wait
@@ -218,6 +224,26 @@ func cohortBudget(spec cohortSpec) cohort.PhaseBudget {
 		b.CohortAssembly = 5 * time.Minute
 	}
 	return b
+}
+
+// arrayCohortLaunch is what one job-array member's launch context holds: a
+// Launch per rung of chain, each after the Actuator's wait for that zone's
+// placement group when the cohort creates one per zone
+// (baseConfig.PlacementGroupPrefix).
+//
+// A member that places on its own walks the whole chain in one context. A
+// cohort that places as a unit (every member required, so an MPI cluster of
+// two or more, or a plain array with --min-viable equal to --count) gives each
+// rung its own round and context, and needs only one attempt's worth. Which
+// one a cohort is is cohort's rule, not ours, so the budget holds the walk in
+// both: a longer backstop costs nothing unless a launch hangs, a shorter one
+// fails members the retry would have launched.
+func arrayCohortLaunch(chain []cohort.Rung, baseConfig *aws.LaunchConfig) cohortLaunch {
+	l := cohortLaunch{attempts: len(chain)}
+	if baseConfig.PlacementGroupPrefix != "" {
+		l.beforeEach = aws.PlacementGroupAvailableWait()
+	}
+	return l
 }
 
 // maxAZFallbackRungs caps the AZ-fallback chain length. Each capacity-exhausted
@@ -630,6 +656,7 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 		capacity = cohort.CapacitySpot
 	}
 	rung, chain := buildAZChain(ctx, awsClient, baseConfig, capacity)
+	budget := cohortBudget(spec, arrayCohortLaunch(chain, baseConfig))
 
 	cfgs := make(map[cohort.EntityID]aws.LaunchConfig, n)
 	members := make([]cohort.EntityIntent, 0, n)
@@ -681,7 +708,7 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 			Timeout:        ssmPushTimeout,
 		}
 		asm = mpicohort.NewSSMAssembler(awsClient, baseConfig.Region, accountBase36,
-			cohortBudget(spec).CohortAssembly, ssmPushTimeout)
+			budget.CohortAssembly, ssmPushTimeout)
 	}
 	r := cohort.NewReconciler(act, obs, mpicohort.Classifier{}, enr, asm, nil)
 
@@ -692,7 +719,7 @@ func reconcileArrayMembers(ctx context.Context, awsClient *aws.Client, baseConfi
 	var keepAZ string
 	defer cleanupAbandonedPGs(ctx, awsClient, act, &keepAZ)
 
-	c, err := buildCohort(spec, jobArrayID, members, minViableCount)
+	c, err := buildCohort(spec, jobArrayID, members, minViableCount, budget)
 	if err != nil {
 		return fmt.Errorf("build cohort: %w", err)
 	}
@@ -823,7 +850,7 @@ func runArrayCohort(ctx context.Context, api arrayFleetAPI, guard *fleetGuard, r
 				successCount++
 			} else {
 				failureCount++
-				details = append(details, fmt.Sprintf("%s: %s", id, rec.Summary()))
+				details = append(details, fmt.Sprintf("%s: %s", id, cohortMemberReason(rec)))
 			}
 		}
 		a.prog.Error(fmt.Sprintf("Reconciling %d-instance cohort", n),
@@ -922,10 +949,10 @@ func runArrayCohort(ctx context.Context, api arrayFleetAPI, guard *fleetGuard, r
 
 // buildCohort constructs the right cohort for the spec: an all-or-nothing MPI
 // cohort, or a partial (independent) array whose minViable members must come up.
-// minViable is clamped to [1, len(members)].
-func buildCohort(spec cohortSpec, jobArrayID string, members []cohort.EntityIntent, minViable int) (cohort.Cohort, error) {
+// minViable is clamped to [1, len(members)]. budget is cohortBudget's.
+func buildCohort(spec cohortSpec, jobArrayID string, members []cohort.EntityIntent, minViable int, budget cohort.PhaseBudget) (cohort.Cohort, error) {
 	if spec.mpi {
-		return cohort.NewMPICohort(cohort.CohortID(jobArrayID), members, cohortBudget(spec))
+		return cohort.NewMPICohort(cohort.CohortID(jobArrayID), members, budget)
 	}
 	mv := minViable
 	if mv < 1 {
@@ -936,7 +963,7 @@ func buildCohort(spec cohortSpec, jobArrayID string, members []cohort.EntityInte
 	}
 	// nil Assembler: a plain array has no collective assembly phase, so a partial
 	// cohort is legal (NewPartialCohort rejects a non-nil Assembler).
-	return cohort.NewPartialCohort(cohort.CohortID(jobArrayID), members, cohortBudget(spec), mv, nil)
+	return cohort.NewPartialCohort(cohort.CohortID(jobArrayID), members, budget, mv, nil)
 }
 
 // renderJobArrayResult writes the job-array ID to the output-id file and emits

@@ -13,6 +13,15 @@ import (
 	smithy "github.com/aws/smithy-go"
 )
 
+// placementGroupAvailableWait is how long CreatePlacementGroup waits for a new
+// group to become available.
+const placementGroupAvailableWait = 30 * time.Second
+
+// PlacementGroupAvailableWait is how long CreatePlacementGroup can block
+// waiting for the group to become available, for a caller sizing a deadline
+// around it (a job array's cohort launch budget, #1454).
+func PlacementGroupAvailableWait() time.Duration { return placementGroupAvailableWait }
+
 // CreatePlacementGroup creates a cluster placement group for MPI and waits
 // until it reaches the "available" state before returning. EC2's CreatePlacementGroup
 // is eventually consistent — passing a group in "pending" state to RunInstances
@@ -44,7 +53,7 @@ func (c *Client) CreatePlacementGroup(ctx context.Context, name, region string) 
 	}
 
 	// Poll until the placement group reaches "available". Typically takes <5s.
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(placementGroupAvailableWait)
 	for time.Now().Before(deadline) {
 		out, err := ec2Client.DescribePlacementGroups(ctx, &ec2.DescribePlacementGroupsInput{
 			GroupNames: []string{name},
@@ -59,7 +68,7 @@ func (c *Client) CreatePlacementGroup(ctx context.Context, name, region string) 
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("placement group %q did not become available within 30s", name)
+	return fmt.Errorf("placement group %q did not become available within %s", name, placementGroupAvailableWait)
 }
 
 // DeletePlacementGroup removes a placement group in region. An empty region
