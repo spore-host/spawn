@@ -641,6 +641,12 @@ func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 		}
 		boot := testDetachedBootstrap(t)
 		boot.plat = testSweepPlat(t) // holds the --key-name key, as the launching machine does
+		// The tags' timestamps re-based on the launch time, so two builds
+		// compare equal across a second boundary (launchClockFree).
+		boot.tagsOf = func(cfg aws.LaunchConfig) (map[string]string, error) {
+			tags, err := testMemberTags(cfg)
+			return launchClockFree(tags), err
+		}
 		if err := seedDetachedBootstrap(pf, *base, "sw-1", "sw", boot); err != nil {
 			return "", err
 		}

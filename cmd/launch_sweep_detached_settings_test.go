@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
 )
@@ -182,7 +183,29 @@ func gateTags(t *testing.T, cfg aws.LaunchConfig) map[string]string {
 	if err != nil {
 		t.Fatalf("BuildLaunchTags: %v", err)
 	}
-	return tagsAsMap(tags)
+	return launchClockFree(tagsAsMap(tags))
+}
+
+// launchClockFree is tags with every timestamp re-based on spawn:launch-time:
+// "launch+1h0m0s" for a TTL deadline an hour after it. buildTags reads the
+// wall clock (tagClock) at second precision, so two builds of the same config
+// differ whenever a second boundary falls between them, and a gate comparing
+// two builds (does this flag change the tags?) then fails, or passes, on
+// timing (#1471's CI). Re-basing keeps every duration a flag can change (a
+// TTL's deadline, a Spot request's ValidUntil) and drops only the instant.
+func launchClockFree(tags map[string]string) map[string]string {
+	t0, err := time.Parse(time.RFC3339, tags["spawn:launch-time"])
+	if err != nil {
+		return tags
+	}
+	out := make(map[string]string, len(tags))
+	for k, v := range tags {
+		if at, err := time.Parse(time.RFC3339, v); err == nil {
+			v = "launch+" + at.Sub(t0).String()
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // TestDetachedSweepCarriesOrRefusesEveryLaunchSetting is #1353's discovery
