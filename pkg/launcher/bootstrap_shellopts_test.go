@@ -177,9 +177,15 @@ func TestCommandAnnouncementDoesNotTee(t *testing.T) {
 
 	// The outer invocation must still capture it, or the announcement never
 	// reaches the log the user actually reads.
-	if !strings.Contains(script, `su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' 2>&1 | tee -a /var/log/spawn-command.log`) {
-		t.Error("the caller no longer pipes the command script through tee, so the " +
-			"announcement would not reach /var/log/spawn-command.log")
+	// Since #1459 that is a tee reading a FIFO the command writes to, not a pipe.
+	for _, want := range []string{
+		`tee -a /var/log/spawn-command.log <$F &`,
+		`su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' >$F 2>&1`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the caller no longer sends the command script's output through tee (%q missing), so the "+
+				"announcement would not reach /var/log/spawn-command.log", want)
+		}
 	}
 }
 

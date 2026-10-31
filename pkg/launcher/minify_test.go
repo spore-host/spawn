@@ -150,7 +150,12 @@ func TestMinifyShellKeepsData(t *testing.T) {
 // EC2 counts it. It was 12.8 KB of the 16 KiB limit before #1246, leaving a
 // task about 1.6 KB. Raising this is a decision about how much room tasks
 // lose, so make it in review, not by accident.
-const bootstrapGzipBudget = 8 * 1024
+//
+// Raised by 256 for #1459, in review: the bounded --command drain is about
+// 230 gzipped bytes, and the bare bootstrap had 30 to spare above the margin.
+// It lands in the published body; a release launch carries the stub, whose
+// size it does not change, so the room lost is a dev build's.
+const bootstrapGzipBudget = 8*1024 + 256
 
 // bootstrapGzipMargin is the headroom under bootstrapGzipBudget the bare
 // bootstrap must keep (#1422). It reached 10 bytes before anything flagged
