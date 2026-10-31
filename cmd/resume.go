@@ -112,6 +112,9 @@ func registerResumeFlags(c *cobra.Command) {
 	c.Flags().StringVar(&resumeTTL, "ttl", "", "Time to live for each relaunched member (e.g. 4h, 1d), replacing the sweep's --ttl; may not be longer than it. A row's own ttl: still wins. Not supported with --detach")
 	c.Flags().StringVar(&resumeIdleTimeout, "idle-timeout", "", "Idle timeout for each relaunched member, replacing the sweep's --idle-timeout; may not be longer than it. A row's own idle_timeout: still wins. Not supported with --detach")
 	c.Flags().Float64Var(&resumeCostLimit, "cost-limit", 0, "Cost limit in USD for each relaunched member, replacing the sweep's --cost-limit; may not be higher than it. A row's own cost_limit: still wins. Not supported with --detach")
+	c.Flags().BoolVar(&resumeAllowMissingEndpoints, "allow-missing-endpoints", false, "With --detach, for a sweep launched with --no-public-ip: "+
+		"resume even when a pinned subnet no longer has a VPC endpoint or NAT route its members need. The resume re-checks each "+
+		"pending member's subnet first, and refuses if one fails. A foreground resume uses the sweep's own --allow-missing-endpoints")
 	for _, w := range sweepWithheldSettings {
 		c.Flags().StringVar(resumeWithheld[w.flag], w.flag, "", fmt.Sprintf("The sweep's --%s, passed again: the checkpoint does not store it, since it may carry a token. Required when the sweep was launched with it. Not supported with --detach", w.flag))
 	}
@@ -144,6 +147,12 @@ func runResume(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		return resumeSweepDetached(ctx, resumeSweepID)
+	}
+	// A foreground resume rebuilds each member from the recorded config,
+	// which carries the launch's own --allow-missing-endpoints.
+	if resumeAllowMissingEndpoints {
+		return errors.New("--allow-missing-endpoints on resume applies only with --detach: a foreground resume uses the " +
+			"value the sweep was launched with")
 	}
 
 	// Load sweep state (for locally-orchestrated sweeps)
@@ -532,6 +541,17 @@ func resumeSweepDetached(ctx context.Context, sweepID string) error {
 		}
 		fmt.Fprintf(os.Stderr, "ℹ️  All parameters launched, but %d instances still running\n", activeCount)
 		fmt.Fprintf(os.Stderr, "   Re-invoking Lambda to monitor completion...\n\n")
+	}
+
+	// --no-public-ip (#1468): the pinned subnets the orchestrator will launch
+	// into are re-checked, as at --detach, before anything is re-created or
+	// re-invoked. The params are read, not rewritten.
+	pf, err := downloadDetachedParams(ctx, cfg, state)
+	if err != nil {
+		return fmt.Errorf("read the sweep's uploaded params to re-check its --no-public-ip subnets: %w", err)
+	}
+	if err := recheckDetachedNoPublicIP(ctx, state, pf, resumeAllowMissingEndpoints, aws.NewClient, os.Stderr); err != nil {
+		return err
 	}
 
 	// The CLI IAM flags' profile may have been deleted as idle since the sweep
