@@ -1,9 +1,12 @@
 package progress
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -201,11 +204,13 @@ func (p *Progress) Complete(stepName string) {
 
 // Error marks a step as errored and prints err, on stderr.
 //
-// A caller usually returns err as well, and the root command prints what is
-// returned, so a launch failure printed twice: once here, then again plain
-// (#1470). Error records the text it printed and [Reported] tells the root
-// printer it has been shown. A quiet tracker (-o json) prints nothing and
-// records nothing, so the root printer still shows the error there.
+// A caller usually returns err as well, often wrapped in more context
+// ("failed to create FSx filesystem: %w"), and the root command prints what
+// is returned, so the error's text printed twice: once here, then again in
+// the returned error (#1470, #1473). Error records the error it printed, by
+// identity, and [Unshown] gives the root printer what the returned error adds
+// to it. A quiet tracker (-o json) prints nothing and records nothing, so the
+// root printer still shows the whole error there.
 func (p *Progress) Error(stepName string, err error) {
 	i := p.stepIndex(stepName)
 	p.steps[i].Status = "error"
@@ -221,7 +226,7 @@ func (p *Progress) Error(stepName string, err error) {
 		}
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintf(w, "%s %s: %v\n", i18n.Symbol("error"), i18n.T("spawn.progress.error"), err)
-		reported.add(err.Error())
+		reported.add(err)
 	}
 }
 
@@ -229,31 +234,65 @@ func (p *Progress) Error(stepName string, err error) {
 // of stderr.
 func (p *Progress) SetErrorOutput(w io.Writer) { p.errOut = w }
 
-// reported is the text of every error a Progress has printed in this process.
-var reported = reportedErrors{texts: map[string]bool{}}
+// reported is every error a Progress has printed in this process.
+var reported reportedErrors
 
 type reportedErrors struct {
-	mu    sync.Mutex
-	texts map[string]bool
+	mu   sync.Mutex
+	errs []shownError
 }
 
-func (r *reportedErrors) add(text string) {
+// shownError is an error [Progress.Error] printed and the text it printed.
+type shownError struct {
+	err  error
+	text string
+}
+
+func (r *reportedErrors) add(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.texts[text] = true
+	r.errs = append(r.errs, shownError{err: err, text: err.Error()})
 }
 
-// Reported reports whether a Progress has already printed err's text, so a
-// caller about to print the error a command returned need not repeat it
-// (#1470). An error that wraps the printed one in more text is not reported:
-// the added text has not been shown.
-func Reported(err error) bool {
+// ShownRef stands in, in the text [Unshown] returns, for an error a progress
+// line already printed.
+const ShownRef = "the error above"
+
+// Unshown returns the part of err's text that no progress line has printed:
+// err's text with the text of each printed error it carries replaced by
+// [ShownRef], or "" when err is a printed error and adds nothing to it. The
+// root printer prints that instead of err, so a step that shows an error and
+// returns it, or returns it wrapped in context, or whose caller wraps it
+// again (finishLaunch's "terminating it failed ... STILL RUNNING: %w"),
+// prints the error's text once and every added context once (#1470, #1473).
+//
+// A printed error is matched by identity (errors.Is), not by text: an
+// unrelated error that happens to read the same, or to contain the same
+// words, is printed whole. One whose text err does not contain verbatim (a
+// wrapper that formats it some other way) leaves err printed whole as well:
+// shown twice, but nothing lost.
+func Unshown(err error) string {
 	if err == nil {
-		return false
+		return ""
 	}
+	text := err.Error()
 	reported.mu.Lock()
-	defer reported.mu.Unlock()
-	return reported.texts[err.Error()]
+	shown := make([]shownError, len(reported.errs))
+	copy(shown, reported.errs)
+	reported.mu.Unlock()
+	// Longest first: a printed error that wraps another printed one is
+	// replaced whole, not around the inner one's text.
+	sort.SliceStable(shown, func(i, j int) bool { return len(shown[i].text) > len(shown[j].text) })
+	for _, s := range shown {
+		if s.text == "" || !errors.Is(err, s.err) {
+			continue
+		}
+		if text == s.text {
+			return ""
+		}
+		text = strings.ReplaceAll(text, s.text, ShownRef)
+	}
+	return text
 }
 
 // Skip marks a step as skipped

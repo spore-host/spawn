@@ -93,14 +93,17 @@ func Execute() {
 	}
 }
 
-// printCommandError prints the error a command returned, unless the progress
-// display already printed that very text: a launch step's failure is both
-// shown by its step (progress.Error) and returned, and printed twice (#1470).
+// printCommandError prints the error a command returned, less what a
+// progress line already printed: a step shows its failure (progress.Error)
+// and returns it, often wrapped in more context, so the error's text printed
+// twice (#1470, #1473). An error printed whole is skipped; a wrapped one
+// prints only its context, with the printed part as progress.ShownRef.
 func printCommandError(w io.Writer, err error) {
-	if progress.Reported(err) {
+	text := progress.Unshown(err)
+	if text == "" {
 		return
 	}
-	_, _ = fmt.Fprintln(w, err)
+	_, _ = fmt.Fprintln(w, text)
 }
 
 // startUpdateCheck kicks off the background release check for the resolved
