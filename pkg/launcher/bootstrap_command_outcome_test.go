@@ -1,7 +1,9 @@
 package launcher
 
 import (
+	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -31,11 +33,12 @@ func commandBootstrap(t *testing.T) string {
 func TestCommandOutcomeIsCaptured(t *testing.T) {
 	s := commandBootstrap(t)
 
-	// PIPESTATUS, not $?. After `cmd | tee`, $? is TEE's status (0 even when the
-	// command failed), so $? would report every failure as a success. Verified
-	// under bash: $? = 0 while ${PIPESTATUS[0]} = 7 for a command exiting 7.
-	if !strings.Contains(s, "${PIPESTATUS[0]}") {
-		t.Error("the command's exit code must come from ${PIPESTATUS[0]}; $? after the tee pipe is tee's status")
+	// The command's own status, not tee's. It was ${PIPESTATUS[0]} of a
+	// `cmd | tee` pipeline, where $? is tee's status (0 even when the command
+	// failed); since #1459 tee reads a FIFO in the background and su's own $?
+	// is the code. bootstrap_command_drain_test.go executes both outcomes.
+	if !strings.Contains(s, `-c '/tmp/spawn-command.sh' >$F 2>&1 || CMD_RC=$?`) {
+		t.Error("the command's exit code must be su's own $? (#1459); a `| tee` pipeline's $? is tee's status")
 	}
 	if !strings.Contains(s, "/tmp/SPAWN_EXITCODE") {
 		t.Error("the exit code must be recorded to /tmp/SPAWN_EXITCODE")
@@ -123,5 +126,27 @@ func TestBootstrapWithCommandIsValidBash(t *testing.T) {
 				t.Errorf("generated bootstrap is not valid bash: %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+// TestCommandDrainMatchesConstant ties the #1459 drain's shell literals to
+// commandDrainPolls and commandDrainPoll: linuxBootstrapBody is a const with no
+// interpolation, so nothing else links them, and the straggler notice states
+// the bound in seconds.
+func TestCommandDrainMatchesConstant(t *testing.T) {
+	poll, err := strconv.ParseFloat(commandDrainPoll, 64)
+	if err != nil {
+		t.Fatalf("commandDrainPoll %q: %v", commandDrainPoll, err)
+	}
+	secs := int(float64(commandDrainPolls)*poll + 0.5)
+	for _, want := range []string{
+		fmt.Sprintf("if [ $N -ge %d ]; then\n", commandDrainPolls),
+		"sleep " + commandDrainPoll + "\n",
+		fmt.Sprintf("--command's output after %ds", secs),
+	} {
+		if strings.Count(linuxBootstrapBody, want) != 1 {
+			t.Errorf("the bootstrap body has %d of %q, want 1: the drain's literals and commandDrainPolls/commandDrainPoll have drifted",
+				strings.Count(linuxBootstrapBody, want), want)
+		}
 	}
 }

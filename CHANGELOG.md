@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`aws.LaunchErrorDetail`** (#1462): a launch error's AWS code and AWS's own message, without the SDK's operation, status and RequestID wrapping, as both cohort classifiers now use it. It is taskcohort's unexported `launchErrorDetail`, moved.
 
+### Changed
+
+- **A `--command` launch completes when the command's own process exits, not when the last process holding its output does** (#1459).
+  The bootstrap ran the command as `su ... 2>&1 | tee -a /var/log/spawn-command.log` and read `${PIPESTATUS[0]}`. A pipeline ends only when `tee` sees EOF, so any descendant still holding the command's stdout or stderr (an `aws s3 sync ... &` the script never waited for, a daemon that kept its fds) held back `/tmp/SPAWN_EXITCODE`, the completion file and so `--on-complete` for as long as it lived. Nothing bounded that but the TTL.
+  - **Now** `tee` reads a FIFO in the background and the exit code is `su`'s own, unchanged in meaning (128+n for a signal). After the command exits, the log gets up to 10 s to drain, so the command's last lines stay ahead of what the bootstrap appends; with nothing holding the output there is no wait at all.
+  - **Past 10 s** the bootstrap stops waiting, logs `spawn: not waiting for processes still holding --command's output after 10s; they run on:` with their PIDs and command lines (to the command log and the console), and records completion. Those processes keep running, and logging, until `--on-complete` acts: terminate and stop shut them down with the instance (a stopped instance does not restart them), and a hibernated one resumes them when it starts. **A forgotten background upload that used to finish before on-complete terminated the instance is now cut off:** `wait` for any background job the result depends on.
+  - **The published bootstrap body changes**, so this release's body sha256 differs from v0.153.0's; deploy the sweep orchestrator from this release, as the deploy checklist says. The release stub's size is unchanged; the inline (dev-build) bootstrap grows by about 230 gzipped bytes, and its test budget is raised by 256 bytes, in review.
+
 ### Fixed
 
 - **A failed launch prints its error once** (#1470), as does any other command step that both shows and returns its error (several `spawn image` and sweep steps, SSH key and IAM role setup). The launch step's progress line printed the error, and the root command printed the same error again plain, so a pinned-AZ capacity error showed its whole block twice. The progress line now goes to stderr, where the root printer already wrote, and the root printer skips an error whose text a progress line already showed (`progress.Reported`). In `-o json` mode, where the progress display prints nothing, the root printer still prints it. An error a caller wraps in more text is still printed by both.

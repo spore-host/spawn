@@ -398,7 +398,7 @@ func newBootSandbox(t *testing.T, srv *stubServer, aws awsMode, standIns map[str
 			t.Fatal(err)
 		}
 	}
-	for _, tool := range []string{"bash", "curl", "openssl", "base64", "cut", "rm", "mkdir", "cat", "uname", "mktemp", "awk", "chmod", "mv", "dirname", "tr", "sed", "grep", "head", "cp", "shasum", "perl", "env", "tee", "touch", "date"} {
+	for _, tool := range []string{"bash", "curl", "openssl", "base64", "cut", "rm", "mkdir", "cat", "uname", "mktemp", "awk", "chmod", "mv", "dirname", "tr", "sed", "grep", "head", "cp", "shasum", "perl", "env", "tee", "touch", "date", "mkfifo"} {
 		if p, err := exec.LookPath(tool); err == nil {
 			if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
 				t.Fatal(err)

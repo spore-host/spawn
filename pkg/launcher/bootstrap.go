@@ -255,6 +255,19 @@ const (
 	ReadyGateTimeoutSecs = 600
 )
 
+// commandDrainPolls bounds how long the --command block waits, after the
+// command's own process exits, for the tee writing /var/log/spawn-command.log
+// to finish: this many polls of commandDrainPoll, 10 s in all (#1459). The tee
+// ends at EOF, which a descendant still holding the command's stdout (an
+// un-waited `cmd &`) postpones for as long as it lives; past this bound the
+// block stops waiting, names the holders and records completion with the
+// command's exit code. linuxBootstrapBody is a const with no interpolation, so
+// TestCommandDrainMatchesConstant ties the shell literals to these.
+const (
+	commandDrainPolls = 100
+	commandDrainPoll  = "0.1"
+)
+
 // BuildLinuxBootstrap returns the cloud-init user-data script that installs
 // spored and configures the instance. It is the single source of truth for the
 // Linux bootstrap, shared by the `spawn launch` CLI and headless SDK callers.
@@ -1416,10 +1429,40 @@ JSONEOF
             fi
         fi
 
-        su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' 2>&1 | tee -a /var/log/spawn-command.log
-        # PIPESTATUS[0], not $? — $? here is tee's status, which is 0 even when the
-        # command failed. That alone would have reported every failure as a success.
-        CMD_RC=${PIPESTATUS[0]}
+        # Completion is the COMMAND's exit, not the end of its output (#1459).
+        # It used to be 'su ... 2>&1 | tee -a LOG' with CMD_RC=${PIPESTATUS[0]}:
+        # a pipeline ends only when tee sees EOF, so any descendant still holding
+        # the command's stdout (an un-waited 'aws s3 sync ... &') held back
+        # SPAWN_EXITCODE and --on-complete for as long as it lived, bounded only
+        # by the TTL. Now tee reads a FIFO in the background and CMD_RC is su's
+        # own status (128+n for a signal, as before). After the command exits,
+        # tee gets commandDrainPolls polls (10 s) to reach EOF, so the log keeps
+        # the command's last lines; then the block names whatever still holds
+        # the FIFO and stops waiting. Those processes keep running, and logging,
+        # until the instance terminates (or stops). '|| CMD_RC=$?' because the
+        # subshell runs under set -e. If mkfifo fails the output is lost but
+        # completion is still recorded: a missing record bills to the TTL.
+        F=/tmp/spawn-command.fifo
+        rm -f $F
+        mkfifo -m 600 $F || F=/dev/null
+        tee -a /var/log/spawn-command.log <$F &
+        T=$! CMD_RC=0 N=0
+        su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh' >$F 2>&1 || CMD_RC=$?
+        while kill -0 $T 2>/dev/null; do
+            if [ $N -ge 100 ]; then
+                S=
+                for P in /proc/[0-9]*/fd/*; do
+                    [ $P -ef $F ] || continue
+                    P=${P#/proc/} P=${P%%/*}
+                    [ $P = $T ] || S=$S,$P
+                done
+                echo "⚠️  spawn: not waiting for processes still holding --command's output after 10s; they run on:$(ps -o pid= -o args= -p "${S#,}" 2>/dev/null | tr -s ' \n' ' ')" | tee -a /var/log/spawn-command.log
+                break
+            fi
+            sleep 0.1
+            N=$((N + 1))
+        done
+        rm -f /tmp/spawn-command.fifo
         echo "$CMD_RC" > /tmp/SPAWN_EXITCODE
 
         if [ "$CMD_RC" -eq 0 ]; then
