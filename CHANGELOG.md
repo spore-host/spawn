@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.154.0] - 2026-11-01
+
 ### Added
 
 - **`aws.LaunchErrorDetail`** (#1462): a launch error's AWS code and AWS's own message, without the SDK's operation, status and RequestID wrapping, as both cohort classifiers now use it. It is taskcohort's unexported `launchErrorDetail`, moved.
@@ -13202,7 +13204,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.153.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.154.0...HEAD
+[0.154.0]: https://github.com/spore-host/spawn/compare/v0.153.0...v0.154.0
 [0.153.0]: https://github.com/spore-host/spawn/compare/v0.152.0...v0.153.0
 [0.152.0]: https://github.com/spore-host/spawn/compare/v0.151.0...v0.152.0
 [0.151.0]: https://github.com/spore-host/spawn/compare/v0.150.0...v0.151.0
