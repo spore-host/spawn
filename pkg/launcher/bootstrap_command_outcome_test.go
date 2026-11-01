@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/userdata"
 )
 
 func commandBootstrap(t *testing.T) string {
@@ -147,6 +149,39 @@ func TestCommandDrainMatchesConstant(t *testing.T) {
 		if strings.Count(linuxBootstrapBody, want) != 1 {
 			t.Errorf("the bootstrap body has %d of %q, want 1: the drain's literals and commandDrainPolls/commandDrainPoll have drifted",
 				strings.Count(linuxBootstrapBody, want), want)
+		}
+	}
+}
+
+// TestMPIRankDrainMatchesCommandDrain: the --mpi-command rank wrapper (#1479)
+// drains a rank's output for the same bound as --command (#1459), so a rank's
+// straggler is released on the same terms. pkg/userdata cannot import these
+// constants (this package imports it), so the tie lives here, on the rendered
+// wrapper.
+func TestMPIRankDrainMatchesCommandDrain(t *testing.T) {
+	script, err := userdata.GenerateMPIUserData(userdata.MPIConfig{
+		Region: "us-east-1", JobArrayID: "arr-1", JobArraySize: 2, MPICommand: "./sim",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.Index(script, "<<'EOFMPIRANK'\n")
+	j := strings.Index(script, "\nEOFMPIRANK\n")
+	if i < 0 || j < i {
+		t.Fatalf("no rank wrapper here-doc in the MPI user data:\n%s", script)
+	}
+	wrapper := script[i:j]
+	poll, err := strconv.ParseFloat(commandDrainPoll, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("[ $N -lt %d ]; do\n", commandDrainPolls),
+		"sleep " + commandDrainPoll + "\n",
+		fmt.Sprintf("--mpi-command's output after %ds", int(float64(commandDrainPolls)*poll+0.5)),
+	} {
+		if n := strings.Count(wrapper, want); n != 1 {
+			t.Errorf("the rank wrapper has %d of %q, want 1: its drain and --command's (commandDrainPolls/commandDrainPoll) have drifted", n, want)
 		}
 	}
 }

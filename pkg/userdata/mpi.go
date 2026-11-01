@@ -200,6 +200,39 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 // quoted for the peer's shell (RemoteCompletionWrite), so the path is quoted at
 // both shells and the record is never re-parsed by either.
 //
+// Rank stragglers (spawn#1479, the MPI twin of #1459). mpirun ran each rank as
+// 'bash /etc/spawn/mpi-command', and Open MPI keeps a rank, and so the job,
+// alive until the I/O-forwarding channels it gave the rank (a pty for stdout,
+// a pipe for stderr, held by mpirun or orted) close. A background job the
+// command never waited for ('sleep 600 &', an un-waited 'aws s3 sync ... &')
+// inherits them, so mpirun, SPAWN_EXITCODE and every member's --on-complete
+// waited out its whole lifetime: 600 s live on 2x c7g.medium, bounded only by
+// the TTL. The outer '| tee' was never the holder.
+//
+// Now mpirun runs /etc/spawn/mpi-rank on every rank. It runs the command with
+// stdout and stderr on a per-rank FIFO that a 'cat' copies to the rank's real
+// stdout, so the forwarded channels are held only by the wrapper and that cat.
+// When the command's own process exits, the cat gets the same bounded drain as
+// --command (pkg/launcher commandDrainPolls polls of commandDrainPoll, 10 s;
+// TestMPIRankDrainMatchesCommandDrain ties them), so the last lines are
+// forwarded; past it the wrapper names whatever still holds the FIFO, kills
+// the cat and exits with the command's status. mpirun then sees the rank end.
+// A straggler is left holding only the FIFO with no reader (SIGPIPE if it
+// writes again) and dies with the instance at --on-complete; the owner's
+// decision, as for #1459, is that completion follows the command's own process.
+//
+//   - The exit code is the command's: a rank that exits n still exits n, and a
+//     rank whose shell is killed by signal n exits 128+n, which is also what
+//     mpirun reported for the signal before. Open MPI still aborts the job on
+//     a failing rank, now after that rank's drain.
+//   - stderr is merged into stdout at the rank rather than at rank 0's tee;
+//     the log was already one merged stream.
+//   - If mkfifo fails the wrapper execs the command directly: output and exit
+//     code are kept, and only the straggler bound is lost.
+//   - Verified against real mpirun (Open MPI 4.1.2 from the AL2023 package,
+//     and 5.0) with 'mpirun -np 2' on one host; mpi_rank_wrapper_test.go runs
+//     it when mpirun is installed.
+//
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
@@ -314,6 +347,32 @@ cat > /etc/spawn/mpi-command <<'EOFMPICMD'
 {{.MPICommand}}
 EOFMPICMD
 chmod 600 /etc/spawn/mpi-command
+# mpirun runs this per-rank wrapper, not the command (#1479): see mpi.go.
+cat > /etc/spawn/mpi-rank <<'EOFMPIRANK'
+#!/bin/bash
+F=/tmp/spawn-mpi-rank.$$.fifo
+mkfifo -m 600 $F || exec bash /etc/spawn/mpi-command
+cat <$F &
+C=$! N=0
+bash /etc/spawn/mpi-command >$F 2>&1
+R=$?
+while kill -0 $C 2>/dev/null && [ $N -lt 100 ]; do
+  sleep 0.1
+  N=$((N + 1))
+done
+if kill -0 $C 2>/dev/null; then
+  S=
+  for P in /proc/[0-9]*/fd/*; do
+    [ $P -ef $F ] || continue
+    P=${P#/proc/} P=${P%%/*}
+    [ $P = $C ] || S=$S,$P
+  done
+  kill $C
+  echo "spawn: rank $OMPI_COMM_WORLD_RANK: not waiting for processes still holding --mpi-command's output after 10s; they run on:$(ps -o pid= -o args= -p "${S#,}" 2>/dev/null | tr -s ' \n' ' ')" >&2
+fi
+rm -f $F
+exit $R
+EOFMPIRANK
 {{end}}
 # shellcheck disable=SC2050  # the rank is fixed at render time: one script per member
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
@@ -378,7 +437,7 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   echo "${SPAWN_PEERS_READY_WAITED}" > /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null || true
 {{if .MPICommand}}
   set +e
-  mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-command 2>&1 | tee -a /var/log/spawn-command.log
+  mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-rank 2>&1 | tee -a /var/log/spawn-command.log
   spawn_mpi_done "${PIPESTATUS[0]}"
 {{end}}
 fi

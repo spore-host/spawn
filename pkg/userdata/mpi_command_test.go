@@ -120,10 +120,15 @@ func TestMPICommandRunsViaBash(t *testing.T) {
 	if !strings.Contains(script, "cat > /etc/spawn/mpi-command") {
 		t.Fatalf("expected the command to be written to a file:\n%s", relevant(script))
 	}
+	// mpirun runs the per-rank wrapper (#1479), which runs the command file
+	// through bash; mpi_rank_wrapper_test.go executes both.
 	line := mpirunLine(t, script)
-	if !strings.Contains(line, "bash /etc/spawn/mpi-command") {
-		t.Errorf("mpirun must run the command through bash so the user's arguments, "+
-			"quoting and redirection are parsed by a shell; got:\n%s", line)
+	if !strings.Contains(line, "bash "+mpiRankWrapper+" ") {
+		t.Errorf("mpirun must run the per-rank wrapper through bash; got:\n%s", line)
+	}
+	if !strings.Contains(rankWrapperBody(t, script), "\nbash /etc/spawn/mpi-command >$F 2>&1\n") {
+		t.Errorf("the rank wrapper must run the command through bash so the user's arguments, "+
+			"quoting and redirection are parsed by a shell:\n%s", rankWrapperBody(t, script))
 	}
 }
 
