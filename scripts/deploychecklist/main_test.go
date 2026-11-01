@@ -103,7 +103,16 @@ func TestV0151IsTheReleaseThatMotivatedThis(t *testing.T) {
 			t.Skipf("tag %s not in this checkout (shallow clone?); TestSyntheticRelease covers the same cases", tag)
 		}
 	}
+	// The old refs need the dependencies they pinned (libs v0.51.3 at v0.151.0),
+	// which main no longer requires once it moves on, so they may be absent from
+	// the module cache. Never fetch them: a unit test must not reach the network
+	// (the hermetic gate, #968, blocks proxy.golang.org). Skip instead, as for a
+	// checkout without the tags.
+	t.Setenv("GOPROXY", "off")
 	r, err := checklist(root, "v0.150.0", "v0.151.0", goListCompile)
+	if err != nil && strings.Contains(err.Error(), "GOPROXY=off") {
+		t.Skipf("v0.150.0..v0.151.0 needs dependencies that are not in the module cache; TestSyntheticRelease covers the same cases: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
