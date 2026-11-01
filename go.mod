@@ -43,7 +43,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spore-host/cohort v0.2.0
-	github.com/spore-host/libs v0.51.3
+	github.com/spore-host/libs v0.51.4
 	github.com/spore-host/truffle v0.59.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
 	go.opentelemetry.io/otel v1.46.0
