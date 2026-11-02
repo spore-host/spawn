@@ -109,13 +109,11 @@ var (
 	// pipeline's single security and placement group: its own region.
 	legacyNetworkRegion = func() string { return awsCfg.Region }
 	// priceFn is the on-demand rate of instanceType in region, from truffle
-	// via pkg/aws (live Price List, or its static table).
-	priceFn = func(ctx context.Context, instanceType, region string) (float64, string, error) {
-		p, err := spawnaws.ResolveDisplayPrice(ctx, awsCfg, instanceType, region)
-		if err != nil {
-			return 0, "", err
-		}
-		return p.PricePerHour, p.SourceLabel(), nil
+	// via pkg/aws (live Price List, or its static table), with its origin: for
+	// a static rate, why the live Price List was not used and when the table
+	// was collected (#1502).
+	priceFn = func(ctx context.Context, instanceType, region string) (spawnaws.DisplayPrice, error) {
+		return spawnaws.ResolveDisplayPrice(ctx, awsCfg, instanceType, region)
 	}
 	recommendedAMIFn = func(ctx context.Context, region, instanceType string) (string, error) {
 		awsClient, err := spawnaws.NewClient(ctx)
@@ -1674,7 +1672,8 @@ func ensureStagePrice(ctx context.Context, state *pipeline.PipelineState, stageD
 	if stageState.PricePerHourUSD > 0 || stageDef == nil {
 		return nil
 	}
-	rate, source, err := priceFn(ctx, stageDef.InstanceType, stageRegion(stageDef))
+	dp, err := priceFn(ctx, stageDef.InstanceType, stageRegion(stageDef))
+	rate := dp.PricePerHour
 	if err == nil && rate <= 0 {
 		err = fmt.Errorf("no on-demand price for %s in %s", stageDef.InstanceType, stageRegion(stageDef))
 	}
@@ -1687,6 +1686,9 @@ func ensureStagePrice(ctx context.Context, state *pipeline.PipelineState, stageD
 			stageDef.StageID, stageDef.InstanceType, stageRegion(stageDef), err)
 		return nil
 	}
+	// truffle's wording, so a static rate says why and when (#1502), in the
+	// saved state as well as the log.
+	source := dp.SourceLabel()
 	stageState.PricePerHourUSD = rate
 	stageState.PriceSource = source
 	log.Printf("Stage %s: %s in %s = $%.4f/h on-demand (%s)", stageDef.StageID, stageDef.InstanceType,

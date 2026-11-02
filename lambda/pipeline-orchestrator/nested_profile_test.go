@@ -21,7 +21,9 @@ func TestNestedSpawnStageProfileIsNeverLaunched(t *testing.T) {
 	t.Cleanup(func() {
 		putObjectFn, launchEC2ForRegion, recommendedAMIFn, priceFn = oldPut, oldLaunch, oldAMI, oldPrice
 	})
-	priceFn = func(context.Context, string, string) (float64, string, error) { return 1, "test", nil }
+	priceFn = func(context.Context, string, string) (spawnaws.DisplayPrice, error) {
+		return spawnaws.DisplayPrice{PricePerHour: 1, Source: "live"}, nil
+	}
 	putObjectFn = func(context.Context, *s3.PutObjectInput) error { return nil }
 	recommendedAMIFn = func(context.Context, string, string) (string, error) { return "ami-looked-up", nil }
 

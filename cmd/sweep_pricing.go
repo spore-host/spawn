@@ -9,6 +9,7 @@ import (
 
 	"github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/aws"
+	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
 // resolveSweepRowPrice looks up the on-demand rate for one sweep row. It is a
@@ -42,9 +43,9 @@ type sweepPricer struct {
 }
 
 type sweepPriceEntry struct {
-	price  float64
-	source string
-	err    error
+	price float64
+	quote aws.DisplayPrice // the rate and its origin, for SourceSummary
+	err   error
 }
 
 func newSweepPricer(ctx context.Context) *sweepPricer {
@@ -61,7 +62,7 @@ func (p *sweepPricer) Resolve(region, instanceType string) (float64, error) {
 	}
 
 	dp, err := resolveSweepRowPrice(p.ctx, region, instanceType)
-	entry := sweepPriceEntry{price: dp.PricePerHour, source: dp.SourceLabel(), err: err}
+	entry := sweepPriceEntry{price: dp.PricePerHour, quote: dp, err: err}
 	if err == nil && dp.PricePerHour <= 0 {
 		entry.err = fmt.Errorf("no on-demand price for %s in %s", instanceType, region)
 	}
@@ -70,19 +71,30 @@ func (p *sweepPricer) Resolve(region, instanceType string) (float64, error) {
 }
 
 // SourceSummary describes where the successful quotes came from, e.g.
-// "2 shapes priced: 1 live, 1 static fallback". Per #543 an estimate that doesn't
+// "2 instance shape(s) priced: 1 live, 1 static (static, collected 2026-10-07:
+// live AWS Price List unavailable: <err>)". Per #543 an estimate that doesn't
 // say whether it was quoted or guessed cannot be audited, and the single-launch
 // path already labels its rate this way — this is the sweep path's equivalent.
+// A static rate must also say why and when (#1502), so each distinct static
+// origin is spelled out once in truffle's wording rather than per row.
 //
 // It returns "" when nothing priced, since the unpriced-row list already says so.
 func (p *sweepPricer) SourceSummary() string {
 	counts := map[string]int{}
+	var staticOrigins []truffleaws.PriceOrigin
 	total := 0
 	for _, e := range p.cache {
 		if e.err != nil {
 			continue
 		}
-		counts[e.source]++
+		o := e.quote.Origin()
+		switch {
+		case o.IsStatic():
+			counts["static"]++
+			staticOrigins = append(staticOrigins, o)
+		default:
+			counts[e.quote.SourceLabel()]++
+		}
 		total++
 	}
 	if total == 0 {
@@ -97,7 +109,11 @@ func (p *sweepPricer) SourceSummary() string {
 
 	parts := make([]string, 0, len(labels))
 	for _, label := range labels {
-		parts = append(parts, fmt.Sprintf("%d %s", counts[label], label))
+		part := fmt.Sprintf("%d %s", counts[label], label)
+		if label == "static" {
+			part += " (" + strings.Join(truffleaws.StaticPriceNotes(staticOrigins), "; ") + ")"
+		}
+		parts = append(parts, part)
 	}
 	return fmt.Sprintf("%d instance shape(s) priced: %s", total, strings.Join(parts, ", "))
 }

@@ -111,12 +111,12 @@ type countingPricer struct {
 	calls int
 }
 
-func (p *countingPricer) OnDemandPriceWithSource(_ context.Context, _, _ string) (float64, truffleaws.PriceSource, error) {
+func (p *countingPricer) OnDemandPriceWithOrigin(_ context.Context, _, _ string) (float64, truffleaws.PriceOrigin, error) {
 	p.calls++
 	if p.rate == 0 {
-		return 0, "", errors.New("no price")
+		return 0, truffleaws.PriceOrigin{}, errors.New("no price")
 	}
-	return p.rate, truffleaws.PriceSourceLive, nil
+	return p.rate, truffleaws.LivePriceOrigin(), nil
 }
 
 // A LaunchTagger prices each (region, type, OS) once across a sweep's members,

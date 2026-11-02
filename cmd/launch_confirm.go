@@ -24,8 +24,7 @@ import (
 func confirmLaunchCost(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig) bool {
 	plan := describeLaunchPlan(config)
 	if dp, err := resolveLaunchDryRunPrice(ctx, awsClient, config.InstanceType, config.Region); err == nil {
-		plan.OnDemandPricePerHour = dp.PricePerHour
-		plan.PriceSource = dp.SourceLabel()
+		plan.setPrice(dp)
 		plan.PriceIsLowerBound = isWindowsTarget(config.TargetOS)
 		if d, derr := parseDuration(plan.TTL); derr == nil {
 			plan.MaxCostUSD = dp.PricePerHour * d.Hours() * float64(max(plan.Count, 1))
@@ -70,7 +69,7 @@ func renderLaunchConfirmation(out io.Writer, p launchPlan) {
 	fmt.Fprintf(out, "  Purchase:     %s\n", purchase)
 	fmt.Fprintf(out, "  Lifetime:     ttl=%s idle=%s on-complete=%s\n", orDash(p.TTL), orDash(p.IdleTimeout), orDash(p.OnComplete))
 	if p.OnDemandPricePerHour > 0 {
-		fmt.Fprintf(out, "  Rate:         $%.4f/hr on-demand (%s)\n", p.OnDemandPricePerHour, p.PriceSource)
+		fmt.Fprintf(out, "  Rate:         $%.4f/hr on-demand (%s)\n", p.OnDemandPricePerHour, p.priceLabel())
 		if p.PriceIsLowerBound {
 			fmt.Fprintf(out, "                ⚠️  %s\n", windowsLicenceNote)
 		}

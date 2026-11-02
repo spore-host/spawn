@@ -16,7 +16,7 @@ import (
 // than taking *truffleaws.Client directly) lets tests inject a fake that
 // never touches AWS, since *truffleaws.Client satisfies it structurally.
 type onDemandPricer interface {
-	OnDemandPriceWithSource(ctx context.Context, instanceType, region string) (float64, truffleaws.PriceSource, error)
+	OnDemandPriceWithOrigin(ctx context.Context, instanceType, region string) (float64, truffleaws.PriceOrigin, error)
 }
 
 // resolvePricePerHour fills in cfg.PricePerHour by asking truffle — the
@@ -59,7 +59,7 @@ func resolvePricePerHour(ctx context.Context, pricer onDemandPricer, cfg *Launch
 		return nil
 	}
 
-	price, source, err := pricer.OnDemandPriceWithSource(ctx, cfg.InstanceType, cfg.Region)
+	price, origin, err := pricer.OnDemandPriceWithOrigin(ctx, cfg.InstanceType, cfg.Region)
 	if err == nil && price <= 0 {
 		err = fmt.Errorf("no on-demand price returned for %s in %s", cfg.InstanceType, cfg.Region)
 	}
@@ -75,15 +75,16 @@ func resolvePricePerHour(ctx context.Context, pricer onDemandPricer, cfg *Launch
 	}
 
 	cfg.PricePerHour = price
-	cfg.PriceSource = string(source)
-	switch source {
-	case truffleaws.PriceSourceLive:
-		log.Printf("pricing: %s in %s = $%.4f/hr (truffle, live AWS Price List)", cfg.InstanceType, cfg.Region, price)
-	case truffleaws.PriceSourceStatic:
-		log.Printf("pricing: %s in %s = $%.4f/hr (truffle, static fallback table — Price List API unavailable)", cfg.InstanceType, cfg.Region, price)
-	default:
-		log.Printf("pricing: %s in %s = $%.4f/hr (truffle)", cfg.InstanceType, cfg.Region, price)
+	// The spawn:price-source tag keeps the raw "live"/"static" value; the log
+	// gets truffle's full wording, so a static rate says WHY the live Price List
+	// was not used (truffle's real reason, not an assumed outage) and WHEN the
+	// static table was collected (#1502).
+	cfg.PriceSource = string(origin.PriceSource)
+	label := origin.Label()
+	if label == "" {
+		label = "source unknown"
 	}
+	log.Printf("pricing: %s in %s = $%.4f/hr (truffle, %s)", cfg.InstanceType, cfg.Region, price, label)
 	return nil
 }
 
@@ -118,27 +119,59 @@ func CheckCostLimitEnforceable(cfg LaunchConfig, windows bool) error {
 
 // DisplayPrice is an on-demand rate quoted to a human (an estimate, a dry-run
 // preview, a cost breakdown) rather than one enforced against a spend cap.
-// Source records where it came from, matching [truffleaws.PriceSource]'s two
-// values ("live" or "static") as a string so display call sites don't need to
-// import truffle's aws package just to print it.
+// Source, AsOf and FallbackReason are truffle's [truffleaws.PriceOrigin] as
+// plain strings, so display call sites don't need to import truffle's aws
+// package just to print it:
+//
+//   - Source is "live", "static", or "" (unknown).
+//   - AsOf is the date (YYYY-MM-DD) a static rate's table was collected.
+//   - FallbackReason is why the live Price List was not used.
+//
+// The owner rule (truffle#184, spawn#1502): a static price shown anywhere must
+// say it is static, why, and when it was collected. [DisplayPrice.SourceLabel]
+// renders all three; a display site that prints Source alone breaks the rule.
 type DisplayPrice struct {
-	PricePerHour float64
-	Source       string // "live", "static", or "" (unknown)
+	PricePerHour   float64
+	Source         string // "live", "static", or "" (unknown)
+	AsOf           string // static only: when the static table was collected
+	FallbackReason string // static only: why the live Price List was not used
 }
 
-// SourceLabel renders Source as the short parenthetical shown next to a
-// quoted rate, e.g. "(live)" or "(static fallback)". Per #543, an estimate
-// that doesn't say whether it was quoted or guessed cannot be audited, so
-// every display call site shows this alongside the number.
-func (d DisplayPrice) SourceLabel() string {
-	switch d.Source {
-	case string(truffleaws.PriceSourceLive):
-		return "live"
-	case string(truffleaws.PriceSourceStatic):
-		return "static fallback"
-	default:
-		return "unknown source"
+// NewDisplayPrice is price with its full truffle origin.
+func NewDisplayPrice(price float64, origin truffleaws.PriceOrigin) DisplayPrice {
+	return DisplayPrice{
+		PricePerHour:   price,
+		Source:         string(origin.PriceSource),
+		AsOf:           origin.PriceAsOf,
+		FallbackReason: origin.PriceFallbackReason,
 	}
+}
+
+// Origin is d's provenance as truffle's [truffleaws.PriceOrigin].
+func (d DisplayPrice) Origin() truffleaws.PriceOrigin {
+	return truffleaws.PriceOrigin{
+		PriceSource:         truffleaws.PriceSource(d.Source),
+		PriceAsOf:           d.AsOf,
+		PriceFallbackReason: d.FallbackReason,
+	}
+}
+
+// SourceLabel renders d's origin as the parenthetical shown next to a quoted
+// rate, in truffle's wording ([truffleaws.PriceOrigin.Label]) so the phrasing
+// matches truffle's own output:
+//
+//	live
+//	static, collected 2026-10-07: live AWS Price List unavailable: <err>
+//
+// A static rate with no recorded date or reason says so ("collection date
+// unknown", "reason not recorded") rather than passing for a current one. Per
+// #543, an estimate that doesn't say whether it was quoted or guessed cannot
+// be audited, so every display call site shows this alongside the number.
+func (d DisplayPrice) SourceLabel() string {
+	if label := d.Origin().Label(); label != "" {
+		return label
+	}
+	return "unknown source"
 }
 
 // ResolveDisplayPrice asks truffle — the suite's pricing authority (#533) —
@@ -161,12 +194,12 @@ func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, regi
 // same spawn-local onDemandPricer seam as [resolvePricePerHour], so tests can
 // inject a fake and never touch AWS or the network.
 func resolveDisplayPrice(ctx context.Context, pricer onDemandPricer, instanceType, region string) (DisplayPrice, error) {
-	price, source, err := pricer.OnDemandPriceWithSource(ctx, instanceType, region)
+	price, origin, err := pricer.OnDemandPriceWithOrigin(ctx, instanceType, region)
 	if err == nil && price <= 0 {
 		err = fmt.Errorf("no on-demand price returned for %s in %s", instanceType, region)
 	}
 	if err != nil {
 		return DisplayPrice{}, fmt.Errorf("cannot determine the on-demand price for %s in %s: %w", instanceType, region, err)
 	}
-	return DisplayPrice{PricePerHour: price, Source: string(source)}, nil
+	return NewDisplayPrice(price, origin), nil
 }

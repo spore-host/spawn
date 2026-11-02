@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"fmt"
-	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"io"
 	"strings"
 	"time"
+
+	"github.com/spore-host/spawn/pkg/aws"
+	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 )
 
 // windowsLicenceNote accompanies every rate quoted for a Windows target (#884).
@@ -41,7 +43,11 @@ func isWindowsTarget(targetOS string) bool {
 //
 // targetOS is the instance's OS ("windows" or "linux"); for Windows the rate is
 // labelled as the Linux lower bound it is (#884).
-func renderInstanceCostEstimate(w io.Writer, instanceType, region, targetOS string, pricePerHour float64, sourceLabel, ttl string, count int) {
+//
+// dp's origin is printed in truffle's wording, so a static rate says why and
+// when it was collected (#1502).
+func renderInstanceCostEstimate(w io.Writer, instanceType, region, targetOS string, dp aws.DisplayPrice, ttl string, count int) {
+	pricePerHour, sourceLabel := dp.PricePerHour, dp.SourceLabel()
 	// A count of 0 or less is reachable (`--count` is a plain int flag) and must
 	// not multiply the estimate to zero: "$0.00" for a launch that still costs
 	// money is the most dangerous possible rendering of this bug. Quote the

@@ -127,12 +127,12 @@ func TestWindowsDryRunJSONMarksTheRateALowerBound(t *testing.T) {
 func TestWindowsEstimateSaysTheRateExcludesTheLicence(t *testing.T) {
 	for _, n := range []int{1, 3} {
 		var b strings.Builder
-		renderInstanceCostEstimate(&b, "m7i.xlarge", "us-east-1", "windows", 0.2016, "live", "4h", n)
+		renderInstanceCostEstimate(&b, "m7i.xlarge", "us-east-1", "windows", spawnaws.DisplayPrice{PricePerHour: 0.2016, Source: "live"}, "4h", n)
 		if !strings.Contains(b.String(), windowsLicenceNote) {
 			t.Errorf("count=%d: the Windows estimate omits the licence caveat:\n%s", n, b.String())
 		}
 		b.Reset()
-		renderInstanceCostEstimate(&b, "m7i.xlarge", "us-east-1", "linux", 0.2016, "live", "4h", n)
+		renderInstanceCostEstimate(&b, "m7i.xlarge", "us-east-1", "linux", spawnaws.DisplayPrice{PricePerHour: 0.2016, Source: "live"}, "4h", n)
 		if strings.Contains(b.String(), "Windows licence") {
 			t.Errorf("count=%d: the Linux estimate carries the Windows caveat", n)
 		}

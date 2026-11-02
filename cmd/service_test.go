@@ -311,15 +311,17 @@ func TestRenderServiceDryRunShowsTheStaticFallbackSource(t *testing.T) {
 	serviceInstanceType = "m7i.large"
 	serviceTTL = "1h"
 	spawnRegion = "us-east-1"
-	withFakeServiceDryRunPrice(t, aws.DisplayPrice{PricePerHour: 0.1008, Source: "static"}, nil)
+	dp := staticTestPrice(0.1008)
+	withFakeServiceDryRunPrice(t, dp, nil)
 
 	var out bytes.Buffer
 	if err := renderServiceDryRun(context.Background(), &out, []string{"./svc"}, "--addr 127.0.0.1:0"); err != nil {
 		t.Fatalf("renderServiceDryRun: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "(static fallback)") {
-		t.Errorf("dry run did not label the static-fallback source:\n%s", got)
+	// Static, why, and when (#1502), in truffle's wording.
+	if want := "(static, collected " + dp.AsOf + ": " + dp.FallbackReason + ")"; !strings.Contains(got, want) {
+		t.Errorf("dry run did not label the static source with its date and reason (want %q):\n%s", want, got)
 	}
 }
 

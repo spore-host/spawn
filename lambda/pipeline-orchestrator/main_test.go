@@ -120,14 +120,14 @@ func newHarness(t *testing.T, state *pipeline.PipelineState) *harness {
 	})
 	// $1/instance-hour unless a test sets h.prices.
 	h.prices = map[string]float64{}
-	priceFn = func(_ context.Context, instanceType, _ string) (float64, string, error) {
+	priceFn = func(_ context.Context, instanceType, _ string) (spawnaws.DisplayPrice, error) {
 		if p, ok := h.prices[instanceType]; ok {
 			if p < 0 {
-				return 0, "", fmt.Errorf("no price for %s", instanceType)
+				return spawnaws.DisplayPrice{}, fmt.Errorf("no price for %s", instanceType)
 			}
-			return p, "test", nil
+			return spawnaws.DisplayPrice{PricePerHour: p, Source: "live"}, nil
 		}
-		return 1, "test", nil
+		return spawnaws.DisplayPrice{PricePerHour: 1, Source: "live"}, nil
 	}
 	markers = h.markers
 	ec2ForRegion = func(_ context.Context, region string) (stageEC2API, error) {
@@ -727,7 +727,9 @@ func TestLaunchStageGivesTheRunnerItsTagsConfigAndProfile(t *testing.T) {
 	})
 	// The stage is priced before launch (#930); the real priceFn calls the
 	// AWS Price List.
-	priceFn = func(context.Context, string, string) (float64, string, error) { return 1, "test", nil }
+	priceFn = func(context.Context, string, string) (spawnaws.DisplayPrice, error) {
+		return spawnaws.DisplayPrice{PricePerHour: 1, Source: "live"}, nil
+	}
 	putObjectFn = func(_ context.Context, in *s3.PutObjectInput) error {
 		b, _ := io.ReadAll(in.Body)
 		written["s3://"+aws.ToString(in.Bucket)+"/"+aws.ToString(in.Key)] = b
