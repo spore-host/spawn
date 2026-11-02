@@ -50,7 +50,10 @@ var mpiBaseTools = map[string]string{
 	"ssh-keygen": "openssh",
 	"curl":       "curl (curl-minimal on AL2023); EFA, and the instance ID when the bootstrap did not set INSTANCE_ID",
 	"tar":        "tar; EFA path only",
-	"sha256sum":  "coreutils; EFA path only (#1505)",
+	// Not run by name: GNU tar execs it for -z (bsdtar, macOS's, does not,
+	// which is how a missing gzip passed locally and failed on CI's Ubuntu).
+	"gzip":      "gzip; EFA path only, via tar -xzf",
+	"sha256sum": "coreutils; EFA path only (#1505)",
 }
 
 // mpiPackageManagers are on some bases only (#1487), so the script may run one
