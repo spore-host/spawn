@@ -239,6 +239,29 @@ jobs:
           rm -rf "$back"  # ~2 GiB; GoReleaser needs the runner's disk next
           echo "✅ Verified the versioned spored ${VERSION} in ${#BUCKETS[@]} regions"
 
+      # The AWS CLI zips the Linux bootstrap installs on an image with no aws
+      # CLI (stock Ubuntu), mirrored into every bucket above (#1494): an
+      # instance in a private subnet reaches its regional bucket through the S3
+      # endpoint --no-public-ip requires, and not awscli.amazonaws.com. The
+      # script mirrors exactly the version and sha256s this build pins (`spawn
+      # awscli-pin`), and only after each zip's signature verifies against the
+      # committed AWS CLI team key; it also deletes mirrored versions older than
+      # the newest few. Before GoReleaser, so no installable spawn prefers a
+      # mirror that is not there yet; the bootstrap still falls back to
+      # awscli.amazonaws.com and checks the sha256 either way.
+      - name: Mirror the pinned AWS CLI to S3
+        env:
+          AWSCLI_MIRROR_DIR: ${{ runner.temp }}/awscli-mirror
+        run: scripts/mirror-awscli.sh publish
+
+      # Read every mirrored zip back the way an instance does (anonymous HTTPS
+      # at the regional S3 name) and require the pinned sha256 and the bytes
+      # just verified, in every region. Then removes the local copies.
+      - name: Verify the AWS CLI mirror
+        env:
+          AWSCLI_MIRROR_DIR: ${{ runner.temp }}/awscli-mirror
+        run: scripts/mirror-awscli.sh verify
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:

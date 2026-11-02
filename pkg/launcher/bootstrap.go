@@ -679,26 +679,67 @@ const (
 	awsCLISHA256aarch64 = "f6eb845fbacb11bee87de3f5fbe8043773cbe89d0414607b44b71e216eb9226b"
 )
 
-// awsCLIInstallTemplate defines spawn_need_aws, which returns 0 once there is
-// an aws CLI: the image's, or the pinned one it downloads, checks against its
-// sha256 and installs with AWS's own installer (into /usr/local/aws-cli, with
-// /usr/local/bin/aws). Ubuntu has no unzip, so the zip is unpacked with
-// python3, which cloud-init itself runs on, keeping the modes the installer
-// needs. The zip's name carries the architecture as uname -m prints it. Any
-// failure returns 1, having said why (curl and python3 report their own
-// errors), and the callers fail closed. Filled in by
-// awsCLIInstallFunc: the version, then the x86_64 and aarch64 sha256.
+// awsCLIMirrorDir is where the release workflow mirrors the pinned AWS CLI
+// zips, byte for byte, in every spawn-binaries-<region> bucket (#1494):
+// <dir>/awscli-exe-linux-<arch>-<version>.zip, the official file name. An
+// instance with no internet route (a private subnet with only VPC endpoints,
+// which --no-public-ip requires to include S3) reaches its regional bucket but
+// not awscli.amazonaws.com. Under spawn/, which instances already read
+// anonymously. The release keeps the newest few pinned versions there and
+// deletes the rest.
+const awsCLIMirrorDir = "spawn/awscli"
+
+// AWSCLIPin is one architecture's pinned AWS CLI installer zip: what the Linux
+// bootstrap installs on an image with no aws CLI, and what the release
+// workflow mirrors, at MirrorKey, into every spawn-binaries-<region> bucket.
+type AWSCLIPin struct {
+	Arch      string // as uname -m prints it: x86_64 or aarch64
+	Version   string
+	SHA256    string
+	MirrorKey string
+}
+
+// AWSCLIPins returns the pinned zips, one per architecture the bootstrap
+// installs on. `spawn awscli-pin` prints them for the release workflow, so the
+// bytes it mirrors and the key it writes are the ones this build fetches.
+func AWSCLIPins() []AWSCLIPin {
+	var out []AWSCLIPin
+	for _, p := range [][2]string{{"x86_64", awsCLISHA256x86_64}, {"aarch64", awsCLISHA256aarch64}} {
+		out = append(out, AWSCLIPin{Arch: p[0], Version: awsCLIVersion, SHA256: p[1],
+			MirrorKey: awsCLIMirrorDir + "/awscli-exe-linux-" + p[0] + "-" + awsCLIVersion + ".zip"})
+	}
+	return out
+}
+
+// awsCLIInstallTemplate defines spawn_need_aws REGION, which returns 0 once
+// there is an aws CLI: the image's, or the pinned one it downloads, checks
+// against its sha256 and installs with AWS's own installer (into
+// /usr/local/aws-cli, with /usr/local/bin/aws). The zip comes from REGION's
+// spawn-binaries mirror first (#1494), at its regional S3 name (#1436), so an
+// S3 gateway or interface endpoint reaches it, and from awscli.amazonaws.com
+// second. Each source's bytes must match the pinned sha256 before anything is
+// unpacked: the mirror is no more trusted than the origin. Ubuntu has no
+// unzip, so the zip is unpacked with python3, which cloud-init itself runs on,
+// keeping the modes the installer needs. The zip's name carries the
+// architecture as uname -m prints it. Any failure returns 1, having said why
+// (curl and python3 report their own errors), and the callers fail closed.
+// Filled in by awsCLIInstallFunc: the version, the x86_64 and aarch64 sha256,
+// and the mirror directory.
 const awsCLIInstallTemplate = `
-# spawn_need_aws: an aws CLI, installed when the image has none (#1490).
+# spawn_need_aws REGION: an aws CLI, installed when the image has none (#1490).
 spawn_need_aws() {
     command -v aws >/dev/null 2>&1 && return 0
-    local h=%[2]s r=0
+    local h=%[2]s r=1 u region=$1
     [ "$(uname -m)" != aarch64 ] || h=%[3]s
     echo "spawn: no aws CLI; installing AWS CLI %[1]s (#1490)"
     rm -rf /tmp/spawn-awscli
     mkdir -p /tmp/spawn-awscli
-    curl -fsS --connect-timeout 10 --max-time 600 --retry 3 -o /tmp/spawn-awscli/c.zip "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-%[1]s.zip" &&
-        { [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ] || { echo "spawn: AWS CLI zip: sha256 mismatch" >&2; false; }; } &&
+    for u in "https://spawn-binaries-$region.s3.$region.amazonaws.com/%[4]s" https://awscli.amazonaws.com; do
+        curl -fsS --connect-timeout 10 --max-time 600 --retry 3 -o /tmp/spawn-awscli/c.zip "$u/awscli-exe-linux-$(uname -m)-%[1]s.zip" || continue
+        [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ] && r=0 && break
+        echo "spawn: AWS CLI zip from $u: sha256 mismatch" >&2
+    done
+    [ "$r" = 0 ] &&
         python3 -c 'import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1]);[os.chmod(z.extract(i,sys.argv[2]),i.external_attr>>16&511 or 493) for i in z.infolist()]' /tmp/spawn-awscli/c.zip /tmp/spawn-awscli &&
         /tmp/spawn-awscli/aws/install >/dev/null &&
         command -v aws >/dev/null 2>&1 || r=1
@@ -710,7 +751,7 @@ spawn_need_aws() {
 
 // awsCLIInstallFunc is awsCLIInstallTemplate filled in with the pinned release.
 func awsCLIInstallFunc() string {
-	return fmt.Sprintf(shellmin.Strip(awsCLIInstallTemplate), awsCLIVersion, awsCLISHA256x86_64, awsCLISHA256aarch64)
+	return fmt.Sprintf(shellmin.Strip(awsCLIInstallTemplate), awsCLIVersion, awsCLISHA256x86_64, awsCLISHA256aarch64, awsCLIMirrorDir)
 }
 
 // bodyMain is the part of the static body that runs: spored's install and
@@ -898,7 +939,7 @@ const stagedFilesTemplate = `
 SPAWN_ST_URI=%s
 SPAWN_ST_REGION=%s
 SPAWN_ST_SHA256=%s
-spawn_need_aws || spawn_fatal_retire "no aws CLI to fetch this launch's staged files from $SPAWN_ST_URI, and it could not be installed"
+spawn_need_aws "$SPAWN_ST_REGION" || spawn_fatal_retire "no aws CLI to fetch this launch's staged files from $SPAWN_ST_URI, and it could not be installed"
 mkdir -p /etc/spawn
 for SPAWN_ST_TRY in 1 2 3 4 5 6; do
     rm -f %[4]s
@@ -1166,7 +1207,7 @@ case "$INSTANCE_ID" in
     i-*) ;;
     *) echo "spawn: no instance ID from IMDS; stopping (#1490)" >&2; exit 1 ;;
 esac
-spawn_need_aws || { echo "spawn: no aws CLI to read this instance's tags with; stopping (#1490)" >&2; exit 1; }
+spawn_need_aws "$REGION" || { echo "spawn: no aws CLI to read this instance's tags with; stopping (#1490)" >&2; exit 1; }
 spawn_tag() {
     local n=0
     until aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=$1" --query "${2:-Tags[0].Value}" --output text; do

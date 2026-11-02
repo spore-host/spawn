@@ -63,8 +63,10 @@ var privateServices = []PrivateService{
 		// TestEveryBootstrapS3HostIsRegional), which both a gateway endpoint
 		// and an interface endpoint's private DNS serve.
 		Endpoint: "s3", IAMPrefixes: []string{"s3"}, Gateway: true,
-		Why: "the bootstrap downloads spored from https://spawn-binaries-<region>.s3.<region>.amazonaws.com, and spored " +
-			"reads its launch config object and stages data",
+		// The same bucket mirrors the pinned AWS CLI an image without one
+		// (Ubuntu) installs (#1494), so no Linux launch needs the internet for it.
+		Why: "the bootstrap downloads spored (and, on an image with no aws CLI, the pinned AWS CLI) from " +
+			"https://spawn-binaries-<region>.s3.<region>.amazonaws.com, and spored reads its launch config object and stages data",
 	},
 	{
 		Endpoint: "ec2", IAMPrefixes: []string{"ec2"},

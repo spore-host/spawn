@@ -144,6 +144,13 @@ func TestNoInstanceIDFailsClosed(t *testing.T) {
 // (mode 0755, as in the real zip) installs an aws that serves describe-tags.
 func testAWSCLIZip(t *testing.T) []byte {
 	t.Helper()
+	return testAWSCLIZipMarked(t, "installed")
+}
+
+// testAWSCLIZipMarked is testAWSCLIZip whose installer records marker, so a
+// test can tell which zip was installed.
+func testAWSCLIZipMarked(t *testing.T, marker string) []byte {
+	t.Helper()
 	var b bytes.Buffer
 	z := zip.NewWriter(&b)
 	add := func(name, body string, mode uint32) {
@@ -159,7 +166,7 @@ func testAWSCLIZip(t *testing.T) []byte {
 		}
 	}
 	add("aws/dist/aws", tagStandIn(""), 0o100755)
-	add("aws/install", "#!/bin/bash\necho installed >> \"$HOME/awscli-installs\"\ncp \"$(dirname \"$0\")/dist/aws\" \"$HOME/bin/aws\"\n", 0o100755)
+	add("aws/install", "#!/bin/bash\necho "+marker+" >> \"$HOME/awscli-installs\"\ncp \"$(dirname \"$0\")/dist/aws\" \"$HOME/bin/aws\"\n", 0o100755)
 	if err := z.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +228,7 @@ func TestAWSCLIInstalledWhenAbsent(t *testing.T) {
 			if sb.read("awscli-installs") != "" {
 				t.Error("an AWS CLI that is not the pinned one was installed")
 			}
-			if served != nil && !strings.Contains(out, "AWS CLI zip: sha256 mismatch") {
+			if served != nil && !strings.Contains(out, ": sha256 mismatch") {
 				t.Errorf("the refusal does not say the zip failed its sha256 check\n%s", out)
 			}
 			for _, want := range []string{"could not install AWS CLI " + awsCLIVersion, "no aws CLI to read this instance's tags with"} {
