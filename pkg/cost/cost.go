@@ -90,6 +90,15 @@ type CostBreakdown struct {
 	// under-report the total, but a family-size guess would misreport it by up
 	// to 38x in either direction, which is worse.
 	UnpricedInstanceTypes []string
+
+	// StaticPriceNotes holds one line per distinct static origin among the
+	// rates ComputeCost was priced with. Each line uses truffle's wording:
+	// "static, collected <date>: <why the live Price List was not used>". It is
+	// empty when every rate was live. The owner rule (truffle#184, spawn#1510)
+	// is that a figure derived from a static rate must say that it is static,
+	// why, and when the table was collected, so `spawn cost` prints these under
+	// the Compute line.
+	StaticPriceNotes []string
 }
 
 // StateTransition records when an instance changed state
@@ -144,8 +153,34 @@ type SweepRecord struct {
 // *truffleaws.Client dependency) lets tests inject a fake that never touches
 // AWS, since *truffleaws.Client satisfies it structurally — the same seam
 // pkg/aws's resolvePricePerHour uses for #533.
+//
+// A pricer that also implements originPricer (as *truffleaws.Client does)
+// is asked for the rate's origin, so a static rate can be labelled with its
+// collection date and reason (#1510). A pricer that cannot report one has an
+// unknown origin, and nothing is claimed about it.
 type onDemandPricer interface {
 	OnDemandPrice(ctx context.Context, instanceType, region string) (float64, error)
+}
+
+// originPricer is the optional origin-reporting extension of onDemandPricer.
+type originPricer interface {
+	OnDemandPriceWithOrigin(ctx context.Context, instanceType, region string) (float64, truffleaws.PriceOrigin, error)
+}
+
+// pricedRate is a cached on-demand rate together with its origin.
+type pricedRate struct {
+	rate   float64
+	origin truffleaws.PriceOrigin
+}
+
+// quoteRate asks pricer for instanceType's rate in region, with its origin
+// when the pricer can report one.
+func quoteRate(ctx context.Context, pricer onDemandPricer, instanceType, region string) (float64, truffleaws.PriceOrigin, error) {
+	if op, ok := pricer.(originPricer); ok {
+		return op.OnDemandPriceWithOrigin(ctx, instanceType, region)
+	}
+	rate, err := pricer.OnDemandPrice(ctx, instanceType, region)
+	return rate, truffleaws.PriceOrigin{}, err
 }
 
 // Client provides cost tracking operations
@@ -231,7 +266,8 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 	// instance in the sweep — sweeps commonly run many instances of the same
 	// type. unpriced tracks (type, region) pairs truffle could not price, in
 	// insertion order, deduplicated, for breakdown.UnpricedInstanceTypes.
-	rateCache := make(map[string]float64)
+	rateCache := make(map[string]pricedRate)
+	var staticOrigins []truffleaws.PriceOrigin
 	unpriced := make(map[string]bool)
 	var unpricedOrder []string
 	pricer := c.onDemandPricerOrDefault(ctx)
@@ -261,7 +297,10 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 
 		totalHrs := totalHours(inst.LaunchedAt, endTime)
 		runningHrs := calculateRunningHours(inst.StateHistory, inst.LaunchedAt, endTime)
-		computeCost, priced := calculateComputeCost(ctx, pricer, rateCache, inst, runningHrs)
+		computeCost, origin, priced := calculateComputeCost(ctx, pricer, rateCache, inst, runningHrs)
+		if priced && origin.IsStatic() {
+			staticOrigins = append(staticOrigins, origin)
+		}
 		if !priced {
 			// truffle could not determine a rate (live nor its own static
 			// fallback). Exclude this instance's compute from every total rather
@@ -300,6 +339,7 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 	}
 
 	breakdown.UnpricedInstanceTypes = unpricedOrder
+	breakdown.StaticPriceNotes = truffleaws.StaticPriceNotes(staticOrigins)
 
 	// Recalculate total cost from components
 	breakdown.TotalCost = breakdown.ComputeCost + breakdown.StorageCost + breakdown.NetworkCost
@@ -346,7 +386,8 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 // hours, priced by truffle (the suite's pricing authority, #533) rather than
 // libs/pricing's static per-family-size guess table — which was wrong by up
 // to 38x for a family or size (e.g. a metal-Nxl variant) it didn't know
-// (#543). The second return is false when truffle could not price the type
+// (#543). The second return is the rate's origin, so a static rate can be
+// labelled (#1510). The third is false when truffle could not price the type
 // at all (neither live nor its own static fallback); the caller must treat
 // that as "unpriced", never as a $0 cost.
 //
@@ -356,7 +397,7 @@ func (c *Client) GetCostBreakdown(ctx context.Context, sweepID string) (*CostBre
 // for one real rate. Only a successful lookup is cached, so an unpriceable
 // (type, region) pair is retried on every call rather than remembered as
 // permanently unpriced — cheap, since it's already the failure path.
-func calculateComputeCost(ctx context.Context, pricer onDemandPricer, rateCache map[string]float64, inst SweepInstance, runningHrs float64) (float64, bool) {
+func calculateComputeCost(ctx context.Context, pricer onDemandPricer, rateCache map[string]pricedRate, inst SweepInstance, runningHrs float64) (float64, truffleaws.PriceOrigin, bool) {
 	instType := inst.ActualType
 	if instType == "" {
 		instType = inst.RequestedType
@@ -365,22 +406,22 @@ func calculateComputeCost(ctx context.Context, pricer onDemandPricer, rateCache 
 		instType = "t3.micro"
 	}
 	if runningHrs == 0 {
-		return 0, true
+		return 0, truffleaws.PriceOrigin{}, true
 	}
 
 	key := instType + "\x00" + inst.Region
-	if rate, ok := rateCache[key]; ok {
-		return runningHrs * rate, true
+	if hit, ok := rateCache[key]; ok {
+		return runningHrs * hit.rate, hit.origin, true
 	}
 	if pricer == nil {
-		return 0, false
+		return 0, truffleaws.PriceOrigin{}, false
 	}
-	rate, err := pricer.OnDemandPrice(ctx, instType, inst.Region)
+	rate, origin, err := quoteRate(ctx, pricer, instType, inst.Region)
 	if err != nil || rate <= 0 {
-		return 0, false
+		return 0, truffleaws.PriceOrigin{}, false
 	}
-	rateCache[key] = rate
-	return runningHrs * rate, true
+	rateCache[key] = pricedRate{rate: rate, origin: origin}
+	return runningHrs * rate, origin, true
 }
 
 // calculateStorageCost returns EBS storage cost for lifetime hours

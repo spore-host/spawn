@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -91,130 +92,140 @@ func runCostBreakdown(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get cost breakdown: %w", err)
 	}
 
-	fmt.Printf("\nCost Breakdown for %s\n", sweepID)
-	fmt.Println(strings.Repeat("━", 60))
-	fmt.Println()
+	renderCostBreakdown(os.Stdout, sweepID, breakdown)
+	return nil
+}
+
+// renderCostBreakdown prints a sweep's cost breakdown to w.
+func renderCostBreakdown(w io.Writer, sweepID string, breakdown *cost.CostBreakdown) {
+	fmt.Fprintf(w, "\nCost Breakdown for %s\n", sweepID)
+	fmt.Fprintln(w, strings.Repeat("━", 60))
+	fmt.Fprintln(w)
 
 	// Budget status
 	if breakdown.Budget > 0 {
-		fmt.Printf("Budget:           $%.2f\n", breakdown.Budget)
-		fmt.Printf("Total Cost:       $%.2f\n", breakdown.TotalCost)
+		fmt.Fprintf(w, "Budget:           $%.2f\n", breakdown.Budget)
+		fmt.Fprintf(w, "Total Cost:       $%.2f\n", breakdown.TotalCost)
 		if breakdown.BudgetExceeded {
-			fmt.Printf("Budget Status:    EXCEEDED by $%.2f\n", -breakdown.BudgetRemaining)
+			fmt.Fprintf(w, "Budget Status:    EXCEEDED by $%.2f\n", -breakdown.BudgetRemaining)
 		} else {
-			fmt.Printf("Budget Remaining: $%.2f\n", breakdown.BudgetRemaining)
+			fmt.Fprintf(w, "Budget Remaining: $%.2f\n", breakdown.BudgetRemaining)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	} else {
-		fmt.Printf("Total Cost:       $%.2f\n", breakdown.TotalCost)
-		fmt.Println()
+		fmt.Fprintf(w, "Total Cost:       $%.2f\n", breakdown.TotalCost)
+		fmt.Fprintln(w)
 	}
 
 	// Resource costs (only if we have component data)
 	if breakdown.ComputeCost > 0 || breakdown.StorageCost > 0 || breakdown.NetworkCost > 0 {
-		fmt.Println("Resource Costs:")
-		fmt.Printf("  Compute (%.1fh running):  $%.2f\n", breakdown.RunningHours, breakdown.ComputeCost)
-		fmt.Printf("  Storage (%.1fh total):    $%.2f\n", breakdown.TotalHours, breakdown.StorageCost)
-		if breakdown.NetworkCost > 0 {
-			fmt.Printf("  Network (IPv4):          $%.2f\n", breakdown.NetworkCost)
+		fmt.Fprintln(w, "Resource Costs:")
+		fmt.Fprintf(w, "  Compute (%.1fh running):  $%.2f\n", breakdown.RunningHours, breakdown.ComputeCost)
+		// A compute cost priced from truffle's static table says so, why, and
+		// when the table was collected (truffle#184, spawn#1510).
+		for _, note := range breakdown.StaticPriceNotes {
+			fmt.Fprintf(w, "    ⚠️  priced from a static rate (%s)\n", note)
 		}
-		fmt.Printf("  %s\n", strings.Repeat("─", 35))
-		fmt.Printf("  Total:                   $%.2f\n", breakdown.TotalCost)
-		fmt.Println()
+		fmt.Fprintf(w, "  Storage (%.1fh total):    $%.2f\n", breakdown.TotalHours, breakdown.StorageCost)
+		if breakdown.NetworkCost > 0 {
+			fmt.Fprintf(w, "  Network (IPv4):          $%.2f\n", breakdown.NetworkCost)
+		}
+		fmt.Fprintf(w, "  %s\n", strings.Repeat("─", 35))
+		fmt.Fprintf(w, "  Total:                   $%.2f\n", breakdown.TotalCost)
+		fmt.Fprintln(w)
 	}
 
 	// Time breakdown
 	if breakdown.TotalHours > 0 {
-		fmt.Println("Time Breakdown:")
+		fmt.Fprintln(w, "Time Breakdown:")
 		totalH := int(breakdown.TotalHours)
 		totalM := int((breakdown.TotalHours - float64(totalH)) * 60)
 		runH := int(breakdown.RunningHours)
 		runM := int((breakdown.RunningHours - float64(runH)) * 60)
 		stopH := int(breakdown.StoppedHours)
 		stopM := int((breakdown.StoppedHours - float64(stopH)) * 60)
-		fmt.Printf("  Lifetime:  %dh %dm\n", totalH, totalM)
+		fmt.Fprintf(w, "  Lifetime:  %dh %dm\n", totalH, totalM)
 		if breakdown.TotalHours > 0 {
-			fmt.Printf("  Running:   %dh %dm (%.1f%%)\n", runH, runM, (breakdown.RunningHours/breakdown.TotalHours)*100)
-			fmt.Printf("  Stopped:   %dh %dm (%.1f%%)\n", stopH, stopM, (breakdown.StoppedHours/breakdown.TotalHours)*100)
+			fmt.Fprintf(w, "  Running:   %dh %dm (%.1f%%)\n", runH, runM, (breakdown.RunningHours/breakdown.TotalHours)*100)
+			fmt.Fprintf(w, "  Stopped:   %dh %dm (%.1f%%)\n", stopH, stopM, (breakdown.StoppedHours/breakdown.TotalHours)*100)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	// Cloud economics
 	if breakdown.EffectiveCostPerHour > 0 {
-		fmt.Println("Cloud Economics:")
-		fmt.Printf("  Effective Cost/Hour:     $%.4f/hr\n", breakdown.EffectiveCostPerHour)
+		fmt.Fprintln(w, "Cloud Economics:")
+		fmt.Fprintf(w, "  Effective Cost/Hour:     $%.4f/hr\n", breakdown.EffectiveCostPerHour)
 		if breakdown.Utilization > 0 {
-			fmt.Printf("  Utilization:             %.1f%%\n", breakdown.Utilization)
+			fmt.Fprintf(w, "  Utilization:             %.1f%%\n", breakdown.Utilization)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	// By region
 	if len(breakdown.ByRegion) > 0 {
-		fmt.Println("By Region:")
-		fmt.Println()
+		fmt.Fprintln(w, "By Region:")
+		fmt.Fprintln(w)
 
-		w := newTableWriter(os.Stdout)
-		_, _ = fmt.Fprintln(w, "REGION\tINSTANCES\tRUNNING-HOURS\tCOST")
-		_, _ = fmt.Fprintln(w, strings.Repeat("─", 60))
+		tw := newTableWriter(w)
+		_, _ = fmt.Fprintln(tw, "REGION\tINSTANCES\tRUNNING-HOURS\tCOST")
+		_, _ = fmt.Fprintln(tw, strings.Repeat("─", 60))
 
 		for _, rc := range breakdown.ByRegion {
-			_, _ = fmt.Fprintf(w, "%s\t%d\t%.1f\t$%.2f\n",
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%.1f\t$%.2f\n",
 				rc.Region,
 				rc.InstanceCount,
 				rc.InstanceHours,
 				rc.EstimatedCost,
 			)
 		}
-		_ = w.Flush()
-		fmt.Println()
+		_ = tw.Flush()
+		fmt.Fprintln(w)
 	}
 
 	// By instance type
 	if len(breakdown.ByInstanceType) > 0 {
-		fmt.Println("By Instance Type:")
-		fmt.Println()
+		fmt.Fprintln(w, "By Instance Type:")
+		fmt.Fprintln(w)
 
-		w := newTableWriter(os.Stdout)
-		_, _ = fmt.Fprintln(w, "INSTANCE TYPE\tINSTANCES\tRUNNING-HOURS\tCOST")
-		_, _ = fmt.Fprintln(w, strings.Repeat("─", 60))
+		tw := newTableWriter(w)
+		_, _ = fmt.Fprintln(tw, "INSTANCE TYPE\tINSTANCES\tRUNNING-HOURS\tCOST")
+		_, _ = fmt.Fprintln(tw, strings.Repeat("─", 60))
 
 		for _, tc := range breakdown.ByInstanceType {
-			_, _ = fmt.Fprintf(w, "%s\t%d\t%.1f\t$%.2f\n",
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%.1f\t$%.2f\n",
 				tc.InstanceType,
 				tc.InstanceCount,
 				tc.InstanceHours,
 				tc.EstimatedCost,
 			)
 		}
-		_ = w.Flush()
-		fmt.Println()
+		_ = tw.Flush()
+		fmt.Fprintln(w)
 	}
 
 	// Summary
-	fmt.Println("Summary:")
-	fmt.Printf("  Total Running-Hours: %.1f\n", breakdown.TotalInstanceHours)
-	fmt.Printf("  Total Cost:          $%.2f\n", breakdown.TotalCost)
+	fmt.Fprintln(w, "Summary:")
+	fmt.Fprintf(w, "  Total Running-Hours: %.1f\n", breakdown.TotalInstanceHours)
+	fmt.Fprintf(w, "  Total Cost:          $%.2f\n", breakdown.TotalCost)
 	if breakdown.Budget > 0 {
 		percentUsed := (breakdown.TotalCost / breakdown.Budget) * 100
-		fmt.Printf("  Budget Utilization:  %.1f%%\n", percentUsed)
+		fmt.Fprintf(w, "  Budget Utilization:  %.1f%%\n", percentUsed)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	// #543: an instance type truffle could not price (live nor its own static
 	// fallback) has its compute cost excluded above, not fabricated from a
 	// guess — say so, since a Total Cost that quietly omits real spend can't be
 	// trusted without this line.
 	if len(breakdown.UnpricedInstanceTypes) > 0 {
-		fmt.Println("⚠️  Unpriced (excluded from Total Cost above — pricing unavailable):")
+		fmt.Fprintln(w, "⚠️  Unpriced (excluded from Total Cost above — pricing unavailable):")
 		for _, t := range breakdown.UnpricedInstanceTypes {
-			fmt.Printf("  - %s\n", t)
+			fmt.Fprintf(w, "  - %s\n", t)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
-	return nil
 }
 
 // resolveInstanceForCost best-effort resolves identifier to a single
@@ -326,6 +337,15 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 	}
 
 	fmt.Fprintf(&b, "Rate:            $%.4f/hr (spawn:price-per-hour)\n", rate)
+	if inst.Tags[aws.PriceSourceTag] == "static" {
+		// The launch priced this instance from truffle's static table. The
+		// instance records only THAT (spawn:price-source), not when the table
+		// was collected or why the live Price List was not used, so the label
+		// says both are unknown rather than reading like a current rate
+		// (truffle#184, spawn#1510).
+		label := aws.DisplayPrice{Source: "static"}.SourceLabel()
+		fmt.Fprintf(&b, "                 ⚠️  %s (the instance records only that its rate was static)\n", label)
+	}
 	est := estimateInstanceCost(inst, rt.Compute)
 	unknownWindow := rt.Window.Ended && !rt.Window.Known
 	switch {

@@ -52,6 +52,8 @@ var originSelectors = map[string]bool{
 	"OnDemandPricePerHour": true, // cmd launchPlan's rate
 	"PriceAsOf":            true,
 	"PriceFallbackReason":  true,
+	"StaticPriceNotes":     true, // pkg/cost CostBreakdown's static-origin labels (and truffle's builder of them)
+	"PriceSourceTag":       true, // the spawn:price-source tag a rate read back from an instance carries
 }
 
 // notRenderSites are the discovered functions that obtain or carry a price
@@ -64,18 +66,20 @@ var notRenderSites = map[string]string{
 	"pkg/aws.ResolveDisplayPrice": "builds the truffle client and delegates to resolveDisplayPrice, which is registered",
 	"pkg/aws.resolvePricePerHour": "records the rate for --cost-limit enforcement; its only human-facing output is the log " +
 		"line TestResolvePricePerHourLogsTheRealFallbackReason checks for the date and reason",
-	"cmd.confirmLaunchCost":                "stores the price and origin on the plan (setPrice); renderLaunchConfirmation and maxCostLine render it",
-	"cmd.runLaunchDryRun":                  "stores the price and origin on the plan (setPrice); renderLaunchPlanTable renders it, and TestLaunchDryRunJSONCarriesThePriceOrigin gates its JSON",
-	"cmd.runLaunch":                        "the --estimate-only path: passes the DisplayPrice to renderInstanceCostEstimate, which is registered",
-	"cmd.launchPlan.setPrice":              "copies a DisplayPrice's rate and origin onto the plan; prints nothing",
-	"cmd.launchPlan.priceLabel":            "the label helper renderLaunchConfirmation and renderLaunchPlanTable print; gated through both",
-	"cmd.sweepPricer.Resolve":              "stores each quote with its origin in the cache; SourceSummary renders it",
-	"cmd.resolveLaunchDryRunPrice":         "production seam returning a DisplayPrice; its callers render it",
-	"cmd.resolveServiceDryRunPrice":        "production seam returning a DisplayPrice; its callers render it",
-	"cmd.resolveSweepRowPrice":             "production seam returning a DisplayPrice; its callers render it",
+	"cmd.confirmLaunchCost":         "stores the price and origin on the plan (setPrice); renderLaunchConfirmation and maxCostLine render it",
+	"cmd.runLaunchDryRun":           "stores the price and origin on the plan (setPrice); renderLaunchPlanTable renders it, and TestLaunchDryRunJSONCarriesThePriceOrigin gates its JSON",
+	"cmd.runLaunch":                 "the --estimate-only path: passes the DisplayPrice to renderInstanceCostEstimate, which is registered",
+	"cmd.launchPlan.setPrice":       "copies a DisplayPrice's rate and origin onto the plan; prints nothing",
+	"cmd.launchPlan.priceLabel":     "the label helper renderLaunchConfirmation and renderLaunchPlanTable print; gated through both",
+	"cmd.sweepPricer.Resolve":       "stores each quote with its origin in the cache; SourceSummary renders it",
+	"cmd.resolveLaunchDryRunPrice":  "production seam returning a DisplayPrice; its callers render it",
+	"cmd.resolveServiceDryRunPrice": "production seam returning a DisplayPrice; its callers render it",
+	"cmd.resolveSweepRowPrice":      "production seam returning a DisplayPrice; its callers render it",
+	"pkg/cost.quoteRate":            "asks the pricer for the rate and its origin; GetCostBreakdown records the origin, and is registered",
+	"cmd.singleInstanceCostReport": "KNOWN GAP spawn#1512: the instance records only spawn:price-source=static, not the date or reason, " +
+		"so the report says static with the date and reason unknown (TestSingleInstanceCostReportSaysAStaticRateIsStatic); " +
+		"recording both at launch is tracked there",
 	"lambda/pipeline-orchestrator.priceFn": "production seam returning a DisplayPrice; ensureStagePrice renders it",
-	"pkg/cost.calculateComputeCost": "KNOWN GAP spawn#1510: `spawn cost` prices compute through truffle's OnDemandPrice, " +
-		"which can answer from the static table, and the breakdown does not say so; tracked there, not fixed by #1502",
 }
 
 // TestEveryPriceDisplaySiteIsGated discovers every non-test function in the
