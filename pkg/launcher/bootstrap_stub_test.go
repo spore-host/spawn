@@ -687,17 +687,25 @@ func readOr(p string) []byte { b, _ := os.ReadFile(p); return b }
 // boot sandbox: a test-key-signed fake spored is served from the stand-in
 // bucket, and every command that would change the machine is a stand-in.
 // failSystemctl names systemctl arguments that fail (e.g. "acpid").
-func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string) (*bootSandbox, string, error) {
+func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string, opts ...bootOpts) (*bootSandbox, string, error) {
 	t.Helper()
-	sb, _, out, err := fullBootPinned(t, cfg, failSystemctl, "", "spawn")
+	sb, _, out, err := fullBootPinned(t, cfg, failSystemctl, "", "spawn", opts...)
 	return sb, out, err
+}
+
+// bootOpts adjusts a full boot: standIns replace or add stand-ins by name
+// (after the defaults), and appended is user data a caller adds after the
+// bootstrap, as cmd/launch_jobarray.go appends the MPI script.
+type bootOpts struct {
+	standIns map[string]string
+	appended string
 }
 
 // fullBootPinned is fullBoot for a bootstrap pinned to spored version pin
 // ("" for a dev build), with the signed spored published only under the key
 // prefix publish (e.g. "spawn" or "spawn/versions/9.9.9") in the regional
 // bucket. It also returns the stand-in bucket, for its request counts.
-func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publish string) (*bootSandbox, *stubServer, string, error) {
+func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publish string, opts ...bootOpts) (*bootSandbox, *stubServer, string, error) {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -728,7 +736,7 @@ func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publi
 		t.Fatal(err)
 	}
 	ok := "#!/bin/bash\nexit 0\n"
-	sb := newBootSandbox(t, srv, awsTerminates, map[string]string{
+	standIns := map[string]string{
 		"uname": "#!/bin/bash\necho x86_64\n",
 		// describe-tags finds no tag; terminate-instances is recorded.
 		"aws":          "#!/bin/bash\necho \"$*\" >> \"$HOME/aws-calls\"\n[ \"$2\" = describe-tags ] && echo None\nexit 0\n",
@@ -739,7 +747,14 @@ func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publi
 		"dnf": "#!/bin/bash\nexit 137\n", "yum": "#!/bin/bash\nexit 137\n",
 		"id": "#!/bin/bash\nexit 1\n", "useradd": ok, "usermod": ok, "chown": ok,
 		"su": "#!/bin/bash\nexec bash \"$4\"\n",
-	})
+	}
+	for _, o := range opts {
+		for name, body := range o.standIns {
+			standIns[name] = body
+		}
+		script += o.appended
+	}
+	sb := newBootSandbox(t, srv, awsTerminates, standIns)
 	out, err := sb.run(script)
 	return sb, srv, out, err
 }
