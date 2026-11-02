@@ -351,13 +351,50 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //     the key owner file was written empty, and pkg/mpicohort, which reads
 //     rank 0's public key only once that file names the instance (#1338),
 //     would never have released it. The ID now comes from IMDSv2 with curl.
-//   - EFA: the installer brings its own Open MPI under /opt/amazon/openmpi,
-//     but this script never puts that on PATH (its profile.d snippet is read
-//     by login shells only), and mpi.sh puts AL's /usr/lib64/openmpi/bin
-//     first. So, as on AL, the distribution's Open MPI runs mpirun, through
-//     its OFI component and the distribution's libfabric, which on Ubuntu
-//     24.04 (1.17) is built with the efa provider. Not changed here; see the
-//     follow-up, spawn#1491.
+//   - EFA: see spawn#1491 below; with --efa the distribution's Open MPI is
+//     not installed at all.
+//
+// EFA (spawn#1491; owner decision). With --efa, mpirun is the EFA installer's
+// Open MPI 4.1 under /opt/amazon/openmpi, built against the installer's own
+// libfabric (/opt/amazon/efa), which is AWS's documented EFA path. Before
+// this, the distribution's Open MPI was installed first and mpi.sh put AL's
+// /usr/lib64/openmpi/bin ahead of everything (on Ubuntu /usr/bin/mpirun was
+// simply first), and the installer's profile.d snippet is read only by login
+// shells, so rank 0's mpirun was the distribution's, on whatever libfabric
+// ld.so found first.
+//
+//   - With --efa the yum/apt-get Open MPI install is skipped (the installer
+//     installs Open MPI 4.1 at /opt/amazon/openmpi and Open MPI 5 at
+//     /opt/amazon/openmpi5 by default, since installer 1.30.0; 4.1 is the one
+//     AWS's guide puts on PATH). An image that already carries a distribution
+//     Open MPI keeps it, but out of this script's PATH.
+//   - On apt-get bases the installer apt-installs its own dependencies, so
+//     'apt-get update' runs first, retried with the Open MPI install's bound.
+//     That install ran the only update, and a stock Ubuntu AMI's indexes are
+//     stale: live, every Ubuntu --efa member failed in the installer with
+//     'Unable to locate package environment-modules' until this was added.
+//   - mpi.sh, for --efa, puts /opt/amazon/openmpi/bin and /opt/amazon/efa/bin
+//     (fi_info, fi_pingpong) first, and /opt/amazon/openmpi/lib64 and /lib
+//     (AL and Ubuntu lay it out differently) first in LD_LIBRARY_PATH, keeping
+//     #1487's no-empty-entry form. Without --efa it is unchanged.
+//   - The peers: mpirun reaches orted over a non-interactive ssh, which reads
+//     no profile.d. The installer builds Open MPI with
+//     --enable-orterun-prefix-by-default (since installer 1.19.0), so mpirun
+//     passes its own prefix to orted, and the ranks get its PATH and library
+//     path.
+//   - After the installer, the script requires /opt/amazon/openmpi/bin/mpirun
+//     and fails closed (#1483) without it, rather than falling through to
+//     whatever mpirun PATH finds next (/usr/bin/mpirun on Ubuntu).
+//   - Root: checked as root in ubuntu:24.04 with installer 1.51.0
+//     (--skip-kmod --no-verify), with this script's --mca and '-np 2': Open
+//     MPI 4.1.8 (/opt/amazon/openmpi) refuses root without the flag, and runs
+//     with it, as does 5.0.9amzn1 (/opt/amazon/openmpi5). ompi_info shows
+//     '--enable-orterun-prefix-by-default' and the ofi mtl and btl; the lib
+//     directory there is /opt/amazon/openmpi/lib.
+//   - Distributions: the installer supports AL2023, Ubuntu 22.04/24.04/26.04,
+//     RHEL/Rocky, Debian and SUSE. It dropped AL2 in 1.50.0 (2026-08-21), and
+//     this script fetches aws-efa-installer-latest, so --efa on an AL2 --ami
+//     fails at the installer (closed, recorded): spawn#1504.
 //
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
@@ -401,7 +438,9 @@ spawn_mpi_exit() {
 }
 trap spawn_mpi_exit EXIT
 rm -f /tmp/mpi-hostfile {{.NodeReadyFile}}
-{{- if not .SkipInstall}}
+{{- if .EFAEnabled}}
+echo "Using the EFA installer's Open MPI (#1491)"
+{{- else if not .SkipInstall}}
 # Check if MPI is already installed
 if ! command -v mpirun &> /dev/null; then
   echo "Installing OpenMPI..."
@@ -433,11 +472,25 @@ echo "Installing EFA driver..."
 # (#689): this fragment must not run ./efa_installer.sh from the wrong
 # directory if it is ever emitted without errexit. Failure stays fatal, as it
 # was under set -e.
-cd /tmp || exit 1
+cd /tmp/ || exit 1
 curl -O https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz
 tar -xf aws-efa-installer-latest.tar.gz
 cd aws-efa-installer || exit 1
+if command -v apt-get >/dev/null; then
+  # The installer apt-installs its dependencies (environment-modules among
+  # them) and needs fresh indexes: a stock Ubuntu AMI's are stale, and with
+  # --efa the Open MPI install above, which ran the only update, is skipped
+  # (#1491). Same bound as that install; spawn_mpi_exit records a failure.
+  SPAWN_APT=0
+  until apt-get update; do
+    SPAWN_APT=$((SPAWN_APT + 1))
+    [ "$SPAWN_APT" -lt 10 ] || exit 1
+    sleep 15
+  done
+fi
 ./efa_installer.sh -y -g
+# --efa runs the installer's Open MPI (#1491): see mpi.go.
+[ -x /opt/amazon/openmpi/bin/mpirun ] || { echo "spawn: no Open MPI at /opt/amazon/openmpi after the EFA installer" | tee -a /var/log/spawn-command.log >&2; exit 1; }
 
 # Configure libfabric for EFA
 echo "export FI_PROVIDER=efa" >> /etc/profile.d/efa.sh
@@ -447,8 +500,13 @@ source /etc/profile.d/efa.sh
 
 # Configure MPI environment (always run, even if pre-installed)
 cat >> /etc/profile.d/mpi.sh <<'EOF'
+{{- if .EFAEnabled}}
+export PATH=/opt/amazon/openmpi/bin:/opt/amazon/efa/bin:$PATH
+export LD_LIBRARY_PATH=/opt/amazon/openmpi/lib64:/opt/amazon/openmpi/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+{{- else}}
 export PATH=/usr/lib64/openmpi/bin:$PATH
 export LD_LIBRARY_PATH=/usr/lib64/openmpi/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+{{- end}}
 export OMPI_MCA_plm_rsh_agent=ssh
 export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
