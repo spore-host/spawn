@@ -17,7 +17,7 @@ func extractHostnameBlock(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("BuildLinuxBootstrap: %v", err)
 	}
-	const start = "SPAWN_NAME_TAG=$(aws ec2 describe-tags"
+	const start = "SPAWN_NAME_TAG=$(spawn_tag Name)"
 	const end = "echo \"✅ Hostname set to $SPAWN_HOSTNAME (from the Name tag)\"\nfi\n"
 	i := strings.Index(script, start)
 	if i < 0 {
@@ -31,7 +31,7 @@ func extractHostnameBlock(t *testing.T) string {
 }
 
 // runHostnameBlock executes the block under set -e (as the bootstrap does)
-// with aws/hostnamectl/curl stubbed and /etc redirected to a temp dir. It
+// with spawn_tag/hostnamectl/curl stubbed and /etc redirected to a temp dir. It
 // returns the hostname handed to hostnamectl ("" if none) and /etc/hosts.
 func runHostnameBlock(t *testing.T, nameTag, arrayID, index string) (string, string) {
 	t.Helper()
@@ -47,7 +47,7 @@ func runHostnameBlock(t *testing.T, nameTag, arrayID, index string) (string, str
 		t.Fatal(err)
 	}
 	prelude := `set -e
-aws() { printf '%s\n' "$NAME_TAG"; }
+spawn_tag() { printf '%s\n' "$NAME_TAG"; }
 hostnamectl() { printf '%s' "$2" > "$T/set"; }
 curl() { echo 172.31.21.42; }
 REGION=us-west-2 INSTANCE_ID=i-0abc TOKEN=t
@@ -122,7 +122,7 @@ func TestBootstrapSetsHostnameBeforeCommandStarts(t *testing.T) {
 	}
 	set := strings.Index(script, `hostnamectl set-hostname "$SPAWN_HOSTNAME"`)
 	run := strings.Index(script, `su - "$LOCAL_USERNAME" -c '/tmp/spawn-command.sh'`)
-	idx := strings.Index(script, "    JOB_ARRAY_INDEX=$(aws ec2 describe-tags")
+	idx := strings.Index(script, "    JOB_ARRAY_INDEX=$(spawn_tag spawn:job-array-index)")
 	if set < 0 || run < 0 || idx < 0 {
 		t.Fatalf("markers missing: hostnamectl=%d command=%d JOB_ARRAY_INDEX=%d", set, run, idx)
 	}

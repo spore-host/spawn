@@ -739,8 +739,7 @@ func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publi
 	standIns := map[string]string{
 		"uname": "#!/bin/bash\necho x86_64\n",
 		// describe-tags finds no tag; terminate-instances is recorded.
-		"aws":          "#!/bin/bash\necho \"$*\" >> \"$HOME/aws-calls\"\n[ \"$2\" = describe-tags ] && echo None\nexit 0\n",
-		"ec2-metadata": "#!/bin/bash\necho 'instance-id: i-0test'\n",
+		"aws": "#!/bin/bash\necho \"$*\" >> \"$HOME/aws-calls\"\n[ \"$2\" = describe-tags ] && echo None\nexit 0\n",
 		"systemctl": "#!/bin/bash\necho \"$*\" >> \"$HOME/systemctl-calls\"\n" +
 			"if [ -n '" + failSystemctl + "' ] && [[ \"$*\" == *'" + failSystemctl + "'* ]]; then exit 1; fi\nexit 0\n",
 		// The 0.5 GiB instance: the package manager is OOM-killed.

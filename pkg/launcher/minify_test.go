@@ -33,6 +33,7 @@ func staticTemplates() map[string]string {
 		"bodyStubTemplate":                    bodyStubTemplate,
 		"fatalRetireFunc":                     fatalRetireFunc,
 		"stagedFilesTemplate":                 stagedFilesTemplate,
+		"awsCLIInstallTemplate":               awsCLIInstallTemplate,
 	}
 }
 
@@ -155,7 +156,13 @@ func TestMinifyShellKeepsData(t *testing.T) {
 // 230 gzipped bytes, and the bare bootstrap had 30 to spare above the margin.
 // It lands in the published body; a release launch carries the stub, whose
 // size it does not change, so the room lost is a dev build's.
-const bootstrapGzipBudget = 8*1024 + 256
+//
+// Raised by 512 for #1490, in review: spawn_need_aws, which installs the
+// pinned AWS CLI on an image with none (Ubuntu), is about 490 gzipped bytes
+// in the bare bootstrap (two sha256s and the unzip are most of it), and the
+// margin had 12 to spare. The same holds: it lands in the published body, and
+// a release launch's stub carries it only when it stages files (a task).
+const bootstrapGzipBudget = 8*1024 + 768
 
 // bootstrapGzipMargin is the headroom under bootstrapGzipBudget the bare
 // bootstrap must keep (#1422). It reached 10 bytes before anything flagged
