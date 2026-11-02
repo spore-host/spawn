@@ -3,9 +3,7 @@ package userdata
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -65,11 +63,10 @@ func (r mpiRun) record(t *testing.T, rel string) (completionRecord, bool) {
 	return rec, true
 }
 
-// runRank0 renders rank 0's script, takes the rank-0 block (the last
-// `if [ "0" -eq 0 ]`, which holds the readiness wait and the mpirun), and runs
-// it under `set -e` the way the bootstrap does. Absolute paths are moved
-// under a temp root. The ssh stand-in runs the remote command with that host's
-// /tmp redirected to hosts/<ip>/, so each peer's files are separate.
+// runRank0 runs rank 0's whole rendered script in the MPI sandbox
+// (runSandbox, #1483), under set -e the way the bootstrap does. The ssh
+// stand-in runs the remote command with that host's /tmp redirected to
+// hosts/<ip>/, so each peer's files are separate.
 func runRank0(t *testing.T, mpiRC int, unreachable string) mpiRun {
 	t.Helper()
 	return runRank0With(t, mpiRC, unreachable, "")
@@ -80,81 +77,15 @@ func runRank0(t *testing.T, mpiRC int, unreachable string) mpiRun {
 // under <root>/tmp/ and each peer's under hosts/<ip>/.
 func runRank0With(t *testing.T, mpiRC int, unreachable, completionFile string) mpiRun {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("Linux-only: executes the Linux MPI user-data block (/tmp, /var/log) under bash (#1002)")
-	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
-	}
-	script, err := GenerateMPIUserData(MPIConfig{
-		Region: "us-east-1", JobArrayID: "arr-1",
-		JobArrayIndex: 0, JobArraySize: 3, MPICommand: "hostname",
-		CompletionFile: completionFile,
-	})
-	if err != nil {
-		t.Fatalf("GenerateMPIUserData: %v", err)
-	}
-	i := strings.LastIndex(script, `if [ "0" -eq 0 ]; then`)
-	if i < 0 {
-		t.Fatalf("no rank-0 block in:\n%s", relevant(script))
-	}
-	block := script[i:]
-
-	root := t.TempDir()
-	for _, d := range []string{"tmp", "var/log", "etc/spawn", "bin", "hosts"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, p := range []string{"/tmp/", "/var/log/", "/etc/spawn/"} {
-		block = strings.ReplaceAll(block, p, root+p)
-	}
-	hostfile := rank0IP + " slots=1\n" + peerA + " slots=1\n" + peerB + " slots=1\n"
-	if err := os.WriteFile(filepath.Join(root, "tmp/mpi-hostfile"), []byte(hostfile), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	stubs := map[string]string{
-		"mpirun": "#!/bin/bash\necho rank-output-from-mpirun\necho rank-stderr >&2\nexit " + strconv.Itoa(mpiRC) + "\n",
-		// Rank 0's own private address is among the hostfile entries.
-		"hostname": "#!/bin/bash\necho '" + rank0IP + " 172.17.0.1'\n",
-		"sleep":    "#!/bin/bash\nexit 0\n",
-		"ssh": `#!/bin/bash
-host=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -n) shift ;;
-    -o) shift 2 ;;
-    *) host="$1"; shift; break ;;
-  esac
-done
-echo "$host $*" >> "$STUB_ROOT/ssh.log"
-[ "$host" = "$STUB_UNREACHABLE" ] && exit 255
-[ "$*" = "true" ] && exit 0
-mkdir -p "$STUB_ROOT/hosts/$host"
-cmd="$*"
-exec bash -c "${cmd//$STUB_ROOT\/tmp\//$STUB_ROOT/hosts/$host/}"
-`,
-	}
-	for name, body := range stubs {
-		if err := os.WriteFile(filepath.Join(root, "bin", name), []byte(body), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	rank0 := filepath.Join(root, "rank0.sh")
-	if err := os.WriteFile(rank0, []byte("set -e\nSLOTS=1\n"+block), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("bash", rank0)
-	cmd.Env = append(os.Environ(),
-		"PATH="+filepath.Join(root, "bin")+":"+os.Getenv("PATH"),
-		"STUB_ROOT="+root,
-		"STUB_UNREACHABLE="+unreachable,
-	)
-	out, _ := cmd.CombinedOutput()
-	t.Logf("rank-0 block output:\n%s", out)
-	return mpiRun{root: root}
+	return runSandbox(t, sandboxOpts{
+		cfg: MPIConfig{
+			Region: "us-east-1", JobArrayID: "arr-1",
+			JobArrayIndex: 0, JobArraySize: 3, MPICommand: "hostname",
+			CompletionFile: completionFile,
+		},
+		peers: []string{rank0IP, peerA, peerB}, self: rank0IP,
+		mpiRC: mpiRC, unreachable: unreachable,
+	}).mpiRun
 }
 
 func TestMPICommandSignalsCompletion(t *testing.T) {

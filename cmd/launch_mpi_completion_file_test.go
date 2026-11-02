@@ -35,7 +35,8 @@ func TestMPIMemberHonoursCompletionFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("index %d: decode user-data: %v", idx, err)
 		}
-		if !strings.Contains(ud, `"source": "mpi"}' > '/data/done'`) {
+		// spawn_mpi_put, the one local write of every record (#1483).
+		if !strings.Contains(ud, `echo "$rec" > '/data/done'`) {
 			t.Errorf("member %d: the MPI script does not write the configured --completion-file /data/done; spored would never see completion (#1170)", idx)
 		}
 		if strings.Contains(ud, "/tmp/SPAWN_COMPLETE") {

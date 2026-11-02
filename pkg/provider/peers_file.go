@@ -21,8 +21,9 @@ import (
 const JobArrayPeersFile = "/etc/spawn/job-array-peers.json"
 
 // MarshalPeers is the peers file's content: a JSON array of PeerInfo, indented
-// by two spaces, which the MPI user-data's jq step reads. An empty or nil list
-// is "[]", never "null", so a reader can always iterate it.
+// by two spaces. The MPI user-data's hostfile step reads its "ip" members with
+// awk, not jq, which stock AL2 lacks (#1483), so they must stay plain strings.
+// An empty or nil list is "[]", never "null", so a reader can always iterate it.
 func MarshalPeers(peers []PeerInfo) ([]byte, error) {
 	if peers == nil {
 		peers = []PeerInfo{}

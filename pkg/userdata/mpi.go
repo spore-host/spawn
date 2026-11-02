@@ -251,11 +251,82 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 // No release warned about the flag. The variables stay in mpi.sh for a user's
 // own mpirun on a newer Open MPI. mpi_root_test.go gates both halves.
 //
+// Failing closed (spawn#1483). On a stock AL2 --ami the script died at its jq
+// hostfile step: jq is not in AL2 and nothing installed it, so under the
+// bootstrap's set -e the script exited 127 between the peers-file wait and the
+// peer-SSH wait, the only two steps that wrote a failed record. No member wrote
+// one, --on-complete never fired, and the cohort billed to its TTL.
+//
+//   - The hostfile is built with awk from the peers file, which is spawn's own
+//     JSON (provider.MarshalPeers): each "ip" member, in file order, compact or
+//     indented. No new dependency; mpi_tools_test.go discovers every command
+//     the rendered script runs and requires each to be a base tool of every
+//     supported MPI base or installed first.
+//   - An EXIT trap, set before the first step, writes a failed record whenever
+//     the script exits non-zero before a record was written: the exit status as
+//     exit_code and "source": "mpi-bootstrap" (setup failed), beside "mpi"
+//     (mpirun's result, spawn_mpi_done's default). It covers install, EFA, key
+//     setup, the peers-file wait, the hostfile, the --mpi-command files and the
+//     peer-SSH wait, which now just exit 1. On rank 0 with --mpi-command it goes
+//     through spawn_mpi_done, so once the hostfile exists every peer gets the
+//     record too; any other member writes its own. A clean exit writes nothing:
+//     a peer then waits for rank 0's record, and without --mpi-command the
+//     --command workload writes its own.
+//   - The trap acts only in the shell that set it (BASHPID), not in a
+//     backgrounded subshell, and then runs the bootstrap's own exit guard
+//     (spawn_exit_guard, #1274), which it replaces as the EXIT trap.
+//   - /tmp/mpi-hostfile is removed first. An image of a rank-0 instance can
+//     carry its parent cohort's hostfile and, until ssh-keygen runs, its
+//     private key, and a failure before the new hostfile is built must not
+//     signal the parent cohort's members.
+//   - Not covered: a peer whose rank 0 dies outright (the instance is gone, so
+//     no trap runs) still waits for a record, bounded by its TTL and idle
+//     timeout; and a bootstrap failure before this script starts runs no trap
+//     of this script's.
+//
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
 # MPI Setup
-{{if not .SkipInstall}}
+# Fail closed (#1483): see mpi.go.
+SPAWN_MPI_PID=${BASHPID:-$$} SPAWN_MPI_REC=
+spawn_mpi_rec() {
+  SPAWN_MPI_REC=1
+  rec="{\"status\": \"$([ "$1" -eq 0 ] && echo completed || echo failed)\", \"exit_code\": $1, \"source\": \"$2\"}"
+}
+spawn_mpi_put() {
+  mkdir -p "$(dirname -- {{.CompletionPath}})" || true
+  echo "$rec" > {{.CompletionPath}}
+}
+{{- if .MPICommand}}
+# Record rank 0's result and hand it to every member (spawn#894).
+spawn_mpi_done() {
+  local ip pids=""
+  echo "$1" > /tmp/SPAWN_EXITCODE
+  spawn_mpi_rec "$1" "${2:-mpi}"
+  for ip in $(awk '{print $1}' /tmp/mpi-hostfile 2>/dev/null); do
+    case " $(hostname -I 2>/dev/null) " in *" $ip "*) continue ;; esac
+    printf '%s\n' "$rec" | ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ip" \
+      {{.RemoteCompletionWrite}} ||
+      echo "spawn: could not signal completion to $ip" | tee -a /var/log/spawn-command.log &
+    pids="$pids $!"
+  done
+  [ -z "$pids" ] || wait $pids
+  spawn_mpi_put
+}
+{{- end}}
+spawn_mpi_exit() {
+  local rc=$?
+  set +e
+  if [ "$rc" -ne 0 ] && [ -z "$SPAWN_MPI_REC" ] && [ "${BASHPID:-$$}" = "$SPAWN_MPI_PID" ]; then
+    echo "spawn: MPI setup failed (status $rc, at ${SPAWN_LAST_FAILED:-?}); recording the failure" | tee -a /var/log/spawn-command.log >&2
+    {{if and .MPICommand (eq .JobArrayIndex 0)}}spawn_mpi_done "$rc" mpi-bootstrap{{else}}spawn_mpi_rec "$rc" mpi-bootstrap; spawn_mpi_put{{end}}
+  fi
+  if declare -F spawn_exit_guard >/dev/null; then (exit "$rc"); spawn_exit_guard; fi
+}
+trap spawn_mpi_exit EXIT
+rm -f /tmp/mpi-hostfile
+{{- if not .SkipInstall}}
 # Check if MPI is already installed
 if ! command -v mpirun &> /dev/null; then
   echo "Installing OpenMPI..."
@@ -330,15 +401,14 @@ SPAWN_PEERS_WAITED=0
 while [ ! -f /etc/spawn/job-array-peers.json ]; do
   if [ "$SPAWN_PEERS_WAITED" -ge 600 ]; then
     echo "spawn: no peers file after ${SPAWN_PEERS_WAITED}s; MPI wire-up never completed" >&2
-    mkdir -p "$(dirname -- {{.CompletionPath}})" || true
-    echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > {{.CompletionPath}}
-    exit 1
+    exit 1 # spawn_mpi_exit records it
   fi
   sleep 2
   SPAWN_PEERS_WAITED=$((SPAWN_PEERS_WAITED + 2))
 done
 {{if .MPIProcessesPerNode}}SLOTS={{.MPIProcessesPerNode}}{{else}}SLOTS=$(nproc){{end}}
-jq -r ".[] | \"\(.ip) slots=$SLOTS\"" /etc/spawn/job-array-peers.json > /tmp/mpi-hostfile
+# No jq: AL2 lacks it (#1483).
+awk -F'"' -v s="$SLOTS" '{for (i = 2; i < NF - 1; i++) if ($i == "ip" && $(i + 1) ~ /^[ \t]*:[ \t]*$/) print $(i + 2) " slots=" s}' /etc/spawn/job-array-peers.json > /tmp/mpi-hostfile
 {{if .ReadyGate}}
 # Signal the --command gate here, BEFORE the mpirun below (spawn#664).
 mkdir -p "$(dirname {{.ReadyGate}})"
@@ -412,24 +482,6 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   # unbounded: a broken peer should produce a SPAWN_COMPLETE record saying so,
   # not an opaque mpirun error about an unreachable host. And a healthy 2-node
   # cohort now starts in ~0s instead of always paying 10.
-{{if .MPICommand}}
-  # Record rank 0's result and hand it to every member (spawn#894).
-  spawn_mpi_done() {
-    local s=completed; [ "$1" -eq 0 ] || s=failed
-    local rec="{\"status\": \"$s\", \"exit_code\": $1, \"source\": \"mpi\"}" ip pids=""
-    echo "$1" > /tmp/SPAWN_EXITCODE
-    for ip in $(awk '{print $1}' /tmp/mpi-hostfile); do
-      case " $(hostname -I 2>/dev/null) " in *" $ip "*) continue ;; esac
-      printf '%s\n' "$rec" | ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$ip" \
-        {{.RemoteCompletionWrite}} ||
-        echo "spawn: could not signal completion to $ip" | tee -a /var/log/spawn-command.log &
-      pids="$pids $!"
-    done
-    [ -z "$pids" ] || wait $pids
-    mkdir -p "$(dirname -- {{.CompletionPath}})" || true
-    echo "$rec" > {{.CompletionPath}}
-  }
-{{end}}
   SPAWN_PEERS_READY_WAITED=0
   while :; do
     NOT_READY=0
@@ -440,8 +492,7 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
     [ "$NOT_READY" -eq 0 ] && break
     if [ "$SPAWN_PEERS_READY_WAITED" -ge 600 ]; then
       echo "spawn: $NOT_READY peer(s) never accepted SSH after ${SPAWN_PEERS_READY_WAITED}s; MPI cannot start" | tee -a /var/log/spawn-command.log >&2
-      {{if .MPICommand}}spawn_mpi_done 1{{else}}mkdir -p "$(dirname -- {{.CompletionPath}})" || true; echo '{"status": "failed", "exit_code": 1, "source": "mpi"}' > {{.CompletionPath}}{{end}}
-      exit 1
+      exit 1 # spawn_mpi_exit records it, on every member
     fi
     sleep 5
     SPAWN_PEERS_READY_WAITED=$((SPAWN_PEERS_READY_WAITED + 5))

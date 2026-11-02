@@ -63,22 +63,14 @@ func TestMPIWaitsForPeerSSHBeforeMpirun(t *testing.T) {
 	if !strings.Contains(tail, "600") {
 		t.Error("the peer readiness wait has no deadline")
 	}
-	// With --mpi-command the failure record goes through spawn_mpi_done, which
-	// also signals the reachable peers (#894). TestMPIPeerReadinessFailure-
-	// SignalsReachablePeers executes that path. Without a command, the script
-	// writes the record directly.
-	if !strings.Contains(tail, "spawn_mpi_done 1") {
-		t.Error("a peer that never accepts SSH produces no SPAWN_COMPLETE failure record, " +
-			"so the cohort fails with an opaque mpirun error instead of a named cause")
-	}
-	bare, err := GenerateMPIUserData(MPIConfig{
-		Region: "us-east-1", JobArrayID: "arr-1", JobArrayIndex: 0, JobArraySize: 4,
-	})
-	if err != nil {
-		t.Fatalf("GenerateMPIUserData: %v", err)
-	}
-	if !strings.Contains(bare[strings.Index(bare, readinessProbe):], "> '/tmp/SPAWN_COMPLETE'") {
-		t.Error("without --mpi-command, a peer that never accepts SSH produces no SPAWN_COMPLETE failure record")
+	// The failure exits non-zero, and the script's exit trap writes the failed
+	// record (#1483), through spawn_mpi_done with --mpi-command so the reachable
+	// peers are signalled too (#894). Executed, with and without a command, by
+	// TestMPIPeerReadinessFailureSignalsReachablePeers and
+	// TestMPIFailureWritesAFailedCompletion.
+	if !strings.Contains(tail, "exit 1") {
+		t.Error("a peer that never accepts SSH does not fail the script, so no SPAWN_COMPLETE " +
+			"failure record is written and the cohort fails with an opaque mpirun error instead")
 	}
 
 	// Ordering: readiness must come after the hostfile is built (it reads it) and
