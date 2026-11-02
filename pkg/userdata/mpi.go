@@ -3,6 +3,7 @@ package userdata
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template
 
 	"github.com/spore-host/spawn/pkg/security"
@@ -84,6 +85,12 @@ type mpiTemplateData struct {
 	NodeReadyFile    string
 	NodeReadyID      string
 	RemoteReadyProbe string
+	// EFAVersion, EFASHA256 and EFASources are the pinned EFA installer
+	// (efa.go, spawn#1505): its version, its tarball's sha256, and the
+	// shell-quoted URLs to try, mirror first.
+	EFAVersion string
+	EFASHA256  string
+	EFASources string
 }
 
 func newMPITemplateData(config MPIConfig) mpiTemplateData {
@@ -103,6 +110,9 @@ func newMPITemplateData(config MPIConfig) mpiTemplateData {
 		NodeReadyFile:         MPINodeReadyFile,
 		NodeReadyID:           id,
 		RemoteReadyProbe:      security.ShellQuote("grep -qxF " + id + " " + MPINodeReadyFile),
+		EFAVersion:            efaInstallerVersion,
+		EFASHA256:             efaInstallerSHA256,
+		EFASources:            strings.Join(efaInstallerSources(config.Region), " "),
 	}
 }
 
@@ -392,9 +402,9 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //     '--enable-orterun-prefix-by-default' and the ofi mtl and btl; the lib
 //     directory there is /opt/amazon/openmpi/lib.
 //   - Distributions: the installer supports AL2023, Ubuntu 22.04/24.04/26.04,
-//     RHEL/Rocky, Debian and SUSE. It dropped AL2 in 1.50.0 (2026-08-21), and
-//     this script fetches aws-efa-installer-latest, so --efa on an AL2 --ami
-//     fails at the installer (closed, recorded): spawn#1504.
+//     RHEL/Rocky, Debian and SUSE. It dropped AL2 in 1.50.0 (2026-08-21), so
+//     the script refuses --efa on an AL2 --ami (closed, recorded, with a
+//     message) before downloading anything: spawn#1504, and efa.go.
 //
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
@@ -466,16 +476,23 @@ echo "Skipping MPI installation (--skip-mpi-install specified)"
 {{end}}
 
 {{if .EFAEnabled}}
-# Install EFA driver
-echo "Installing EFA driver..."
-# Each cd is checked explicitly rather than left to the bootstrap's set -e
-# (#689): this fragment must not run ./efa_installer.sh from the wrong
-# directory if it is ever emitted without errexit. Failure stays fatal, as it
-# was under set -e.
-cd /tmp/ || exit 1
-curl -O https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz
-tar -xf aws-efa-installer-latest.tar.gz
-cd aws-efa-installer || exit 1
+# EFA installer {{.EFAVersion}}, pinned and sha256-checked (#1505), never on AL2 (#1504): see efa.go.
+# Every step is checked explicitly, not left to set -e (#689).
+if (. /etc/os-release 2>/dev/null && [ "$ID" = amzn ] && [ "$VERSION_ID" = 2 ]); then
+  echo "spawn: --efa needs AL2023 or Ubuntu: the EFA installer dropped Amazon Linux 2 in 1.50.0" | tee -a /var/log/spawn-command.log >&2
+  exit 1
+fi
+echo "Installing EFA installer {{.EFAVersion}}..."
+rm -rf /tmp/spawn-efa && mkdir -p /tmp/spawn-efa && cd /tmp/spawn-efa || exit 1
+for u in {{.EFASources}}; do
+  if curl -fsS --connect-timeout 10 --max-time 1800 --retry 3 -o e.tgz "$u"; then
+    [ "$(sha256sum e.tgz | cut -d ' ' -f 1)" = {{.EFASHA256}} ] && break
+    echo "spawn: EFA installer from $u: sha256 mismatch" >&2
+  fi
+  rm -f e.tgz
+done
+[ -f e.tgz ] || { echo "spawn: no EFA installer {{.EFAVersion}} with the pinned sha256" | tee -a /var/log/spawn-command.log >&2; exit 1; }
+tar -xzf e.tgz && rm -f e.tgz && cd aws-efa-installer || exit 1
 if command -v apt-get >/dev/null; then
   # The installer apt-installs its dependencies (environment-modules among
   # them) and needs fresh indexes: a stock Ubuntu AMI's are stale, and with
@@ -488,7 +505,9 @@ if command -v apt-get >/dev/null; then
     sleep 15
   done
 fi
-./efa_installer.sh -y -g
+if ./efa_installer.sh -y -g; then r=0; else r=$?; fi
+cd /tmp/ && rm -rf /tmp/spawn-efa
+[ "$r" -eq 0 ] || exit "$r"
 # --efa runs the installer's Open MPI (#1491): see mpi.go.
 [ -x /opt/amazon/openmpi/bin/mpirun ] || { echo "spawn: no Open MPI at /opt/amazon/openmpi after the EFA installer" | tee -a /var/log/spawn-command.log >&2; exit 1; }
 

@@ -1,4 +1,4 @@
-package main
+package pinkit
 
 import (
 	"crypto/sha1" //nolint:gosec // RFC 4880 v4 fingerprints are SHA-1 by definition
@@ -9,11 +9,11 @@ import (
 	"strings"
 )
 
-// keyFingerprint returns the v4 fingerprint of the primary key in an
+// KeyFingerprint returns the v4 fingerprint of the primary key in an
 // ASCII-armored OpenPGP public key: SHA-1 over 0x99, the body's two-byte
 // length and the public-key packet body (RFC 4880 section 12.2). It is what
 // `gpg --fingerprint` prints, computed without gpg so the test runs anywhere.
-func keyFingerprint(armored string) (string, error) {
+func KeyFingerprint(armored string) (string, error) {
 	body, err := dearmor(armored)
 	if err != nil {
 		return "", err

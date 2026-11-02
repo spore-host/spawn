@@ -26,15 +26,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"os"
 	"regexp"
-	"sort"
-	"strconv"
-	"strings"
+
+	"github.com/spore-host/spawn/scripts/internal/pinkit"
 )
 
 // The constants the bump moves, in the order `show` prints them.
@@ -127,52 +123,16 @@ type pin struct {
 	start, end int
 }
 
-// readPins finds each of pinConsts in src. Each must be declared exactly once,
-// as a const, with a plain string literal value.
+// readPins finds each of pinConsts in src (pinkit.ReadConsts: each declared
+// exactly once, as a const, with a plain string literal value).
 func readPins(src []byte) (map[string]pin, error) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "bootstrap.go", src, 0)
+	consts, err := pinkit.ReadConsts(src, "bootstrap.go", "scripts/awsclipin", pinConsts)
 	if err != nil {
 		return nil, err
 	}
-	want := map[string]bool{}
-	for _, n := range pinConsts {
-		want[n] = true
-	}
 	pins := map[string]pin{}
-	for _, d := range f.Decls {
-		gd, ok := d.(*ast.GenDecl)
-		if !ok || gd.Tok != token.CONST {
-			continue
-		}
-		for _, s := range gd.Specs {
-			vs := s.(*ast.ValueSpec)
-			for i, id := range vs.Names {
-				if !want[id.Name] {
-					continue
-				}
-				if _, dup := pins[id.Name]; dup {
-					return nil, fmt.Errorf("%s is declared twice", id.Name)
-				}
-				if i >= len(vs.Values) {
-					return nil, fmt.Errorf("%s has no value", id.Name)
-				}
-				lit, ok := vs.Values[i].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					return nil, fmt.Errorf("%s is not a string literal", id.Name)
-				}
-				v, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					return nil, err
-				}
-				pins[id.Name] = pin{value: v, start: fset.Position(lit.Pos()).Offset, end: fset.Position(lit.End()).Offset}
-			}
-		}
-	}
-	for _, n := range pinConsts {
-		if _, ok := pins[n]; !ok {
-			return nil, fmt.Errorf("no const %s: the bump would move nothing (renamed? update scripts/awsclipin)", n)
-		}
+	for n, c := range consts {
+		pins[n] = pin{value: c.Value, start: c.Start, end: c.End}
 	}
 	return pins, nil
 }
@@ -198,23 +158,12 @@ func rewritePins(src []byte, want map[string]string) ([]byte, error) {
 	if err := validate(want); err != nil {
 		return nil, err
 	}
-	pins, err := readPins(src)
-	if err != nil {
-		return nil, err
+	sub := map[string]string{}
+	for _, n := range pinConsts {
+		sub[n] = want[n]
 	}
-	// Splice from the last literal back, so earlier offsets stay valid.
-	order := append([]string(nil), pinConsts...)
-	sort.Slice(order, func(i, j int) bool { return pins[order[i]].start > pins[order[j]].start })
-	out := append([]byte(nil), src...)
-	for _, n := range order {
-		p := pins[n]
-		out = append(out[:p.start:p.start], append([]byte(strconv.Quote(want[n])), out[p.end:]...)...)
-	}
-	return out, nil
+	return pinkit.RewriteConsts(src, "bootstrap.go", "scripts/awsclipin", sub)
 }
-
-// afterChanged: a new "### Changed" group goes before the first of these.
-var afterChanged = map[string]bool{"Deprecated": true, "Removed": true, "Fixed": true, "Security": true, "Documentation": true}
 
 // addChangelogEntry adds the bump's entry to the `## [Unreleased]` section,
 // under its `### Changed` group (made if absent).
@@ -224,59 +173,8 @@ func addChangelogEntry(cl []byte, oldVersion string, want map[string]string) ([]
 		"Both installer zips' signatures verified against the AWS CLI team's PGP key (`%[3]s`) before their sha256s were pinned: "+
 		"x86_64 `%[4]s`, aarch64 `%[5]s`. Opened by the weekly AWS CLI pin workflow.",
 		oldVersion, want[constVersion], KeyFingerprint, want[constX8664], want[constAarch64])
-
-	lines := strings.Split(string(cl), "\n")
-	start := -1
-	for i, l := range lines {
-		if strings.TrimSpace(l) == "## [Unreleased]" {
-			start = i
-			break
-		}
-	}
-	if start < 0 {
-		return nil, errors.New("no `## [Unreleased]` section")
-	}
-	end := len(lines)
-	for i := start + 1; i < len(lines); i++ {
-		if strings.HasPrefix(lines[i], "## ") {
-			end = i
-			break
-		}
-	}
-	changed, later := -1, -1
-	for i := start + 1; i < end; i++ {
-		g, ok := strings.CutPrefix(lines[i], "### ")
-		if !ok {
-			continue
-		}
-		switch g = strings.TrimSpace(g); {
-		case g == "Changed" && changed < 0:
-			changed = i
-		case afterChanged[g] && later < 0:
-			later = i
-		}
-	}
-	var at int
-	var add []string
-	switch {
-	case changed >= 0: // first in the existing group, after its blank line
-		at = changed + 1
-		for at < end && strings.TrimSpace(lines[at]) == "" {
-			at++
-		}
-		add = []string{entry, ""}
-	case later >= 0: // a new group, before the first group that follows Changed
-		at = later
-		add = []string{"### Changed", "", entry, ""}
-	default: // a new group, after the section's last non-blank line
-		at = end
-		for at > start+1 && strings.TrimSpace(lines[at-1]) == "" {
-			at--
-		}
-		add = []string{"", "### Changed", "", entry}
-	}
-	out := append([]string(nil), lines[:at]...)
-	out = append(out, add...)
-	out = append(out, lines[at:]...)
-	return []byte(strings.Join(out, "\n")), nil
+	return pinkit.AddUnreleasedChanged(cl, entry)
 }
+
+// keyFingerprint is pinkit.KeyFingerprint: the primary key's v4 fingerprint.
+func keyFingerprint(armored string) (string, error) { return pinkit.KeyFingerprint(armored) }
