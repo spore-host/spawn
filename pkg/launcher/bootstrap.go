@@ -695,7 +695,7 @@ spawn_need_aws() {
     rm -rf /tmp/spawn-awscli
     mkdir -p /tmp/spawn-awscli
     curl -fsS --connect-timeout 10 --max-time 600 --retry 3 -o /tmp/spawn-awscli/c.zip "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-%[1]s.zip" &&
-        { [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ] || { echo "spawn: the AWS CLI download is not AWS CLI %[1]s (sha256)" >&2; false; }; } &&
+        { [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ] || { echo "spawn: AWS CLI zip: sha256 mismatch" >&2; false; }; } &&
         python3 -c 'import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1]);[os.chmod(z.extract(i,sys.argv[2]),i.external_attr>>16&511 or 493) for i in z.infolist()]' /tmp/spawn-awscli/c.zip /tmp/spawn-awscli &&
         /tmp/spawn-awscli/aws/install >/dev/null &&
         command -v aws >/dev/null 2>&1 || r=1

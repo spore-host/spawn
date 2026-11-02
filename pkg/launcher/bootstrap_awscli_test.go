@@ -221,7 +221,7 @@ func TestAWSCLIInstalledWhenAbsent(t *testing.T) {
 			if sb.read("awscli-installs") != "" {
 				t.Error("an AWS CLI that is not the pinned one was installed")
 			}
-			if served != nil && !strings.Contains(out, "is not AWS CLI "+awsCLIVersion+" (sha256)") {
+			if served != nil && !strings.Contains(out, "AWS CLI zip: sha256 mismatch") {
 				t.Errorf("the refusal does not say the zip failed its sha256 check\n%s", out)
 			}
 			for _, want := range []string{"could not install AWS CLI " + awsCLIVersion, "no aws CLI to read this instance's tags with"} {
