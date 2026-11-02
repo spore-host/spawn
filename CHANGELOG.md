@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spawn status <id> --check-complete` exits 1 (failed), not 3 (error), when the bootstrap failed before it created the login user** (#1493). The SSH user comes from the `spawn:local-username` tag, and a bootstrap that fails at `useradd` leaves no such user, so SSH was refused (ssh exits 255) and spawn reported 3 although spored on the instance had the failed record and exited 1. A caller polling `--check-complete` without `--on-complete`, the documented way to keep a failed instance, never saw "failed". Now, when SSH cannot reach spored (ssh's own exit status 255, or ssh cannot be run), spawn asks spored over SSM RunCommand, as keyless `spawn status` and `spawn connect` already do, and exits with its code; if SSM fails too, it exits 3 as before. spawn status already called `ssm:SendCommand` and `ssm:GetCommandInvocation`, so it needs no new permission. Over SSM, a result that is not one of spored's four codes (a timed-out invocation, a missing spored) is now 3 instead of being passed through, on the keyless path too, so `--check-complete` exits only with 0, 1, 2 or 3 there.
+
 ## [0.155.0] - 2026-11-02
 
 ### Added
