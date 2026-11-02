@@ -168,9 +168,11 @@ type StageState struct {
 	StageCostUSD  float64        `json:"stage_cost_usd"`
 
 	// PricePerHourUSD is the on-demand rate of one of the stage's instances,
-	// resolved once, and PriceSource where it came from ("live", "static", or
-	// "" when unknown). The stage's cost is an ESTIMATE at this rate: spot
-	// stages are billed less, and EBS and data transfer are not counted. It
+	// resolved once, and PriceSource where it came from, in truffle's wording:
+	// "live", or for a static rate "static, collected <date>: <why>" so the
+	// state says why and when (#1502); "" when unknown. The stage's cost is
+	// an ESTIMATE at this rate: spot stages are billed less, and EBS and data
+	// transfer are not counted. It
 	// was a flat $0.10/hour whatever the type, so max_cost_usd let through
 	// about 300x its value on a p4d.24xlarge (#930).
 	PricePerHourUSD float64 `json:"price_per_hour_usd,omitempty"`

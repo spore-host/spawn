@@ -441,7 +441,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 			// understates the ceiling by exactly that factor on the flag whose
 			// whole job is to bound spend.
 			renderInstanceCostEstimate(os.Stderr, config.InstanceType, config.Region,
-				estimateTargetOS(ctx, awsClient, config), dp.PricePerHour, dp.SourceLabel(), config.TTL, count)
+				estimateTargetOS(ctx, awsClient, config), dp, config.TTL, count)
 		}
 		// --fsx-create provisions the single most expensive thing a launch can
 		// create (1200 GiB is the FSx Lustre minimum, ~$174/month) and the estimate

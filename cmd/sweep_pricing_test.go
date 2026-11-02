@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	libpricing "github.com/spore-host/libs/pricing"
 	"github.com/spore-host/spawn/pkg/aws"
 )
 
@@ -172,9 +173,7 @@ func TestEstimateAndReportSweepUsesTruffleNotTheStaticGuess(t *testing.T) {
 func TestEstimateAndReportSweepNamesUnpriceableRows(t *testing.T) {
 	withSweepRowPricer(t, func(_ context.Context, region, instanceType string) (aws.DisplayPrice, error) {
 		if instanceType == "c5.xlarge" {
-			// Source carries truffle's raw PriceSource value ("live"/"static");
-			// SourceLabel() is what renders "static" as "static fallback".
-			return aws.DisplayPrice{PricePerHour: 0.17, Source: "static"}, nil
+			return staticTestPrice(0.17), nil
 		}
 		return aws.DisplayPrice{}, fmt.Errorf("no price for %s in %s", instanceType, region)
 	})
@@ -204,7 +203,7 @@ func TestEstimateAndReportSweepNamesUnpriceableRows(t *testing.T) {
 	for _, want := range []string{
 		"p5e.48xlarge@us-east-1", // the row is named
 		"FLOOR",                  // the total is labelled
-		"1 static fallback",      // provenance of what did price
+		"1 static (static, collected " + libpricing.PricesAsOf + ": " + staticTestReason + ")", // provenance of what did price (#1502)
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("preview must contain %q, got:\n%s", want, out)

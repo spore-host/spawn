@@ -423,7 +423,7 @@ func TestBudgetIsEnforcedAtRealRatesWhileStagesRun(t *testing.T) {
 			t.Errorf("i-%d not terminated after the budget was exceeded", i)
 		}
 	}
-	if st := getStageState(state, "train"); st.StageCostUSD < 100 || st.PriceSource != "test" {
+	if st := getStageState(state, "train"); st.StageCostUSD < 100 || st.PriceSource != "live" {
 		t.Errorf("stage cost = $%.2f (source %q), want the real-rate estimate, over $100", st.StageCostUSD, st.PriceSource)
 	}
 }

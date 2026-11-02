@@ -136,6 +136,8 @@ field DeleteAMIResult.RetainedSnapshots map[string]string
 field DeleteAMIResult.SnapshotErrors map[string]string
 field DiscoverOptions.OnlyMine bool
 field DiscoverOptions.Region string
+field DisplayPrice.AsOf string
+field DisplayPrice.FallbackReason string
 field DisplayPrice.PricePerHour float64
 field DisplayPrice.Source string
 field EFACapacity.Cards []EFANetworkCard
@@ -597,6 +599,7 @@ func (*TagLimitError) Error() string
 func (*UserDataTooLargeError) Error() string
 func (*ZoneFallbackError) Error() string
 func (*ZoneFallbackError) Unwrap() error
+func (DisplayPrice) Origin() truffleaws.PriceOrigin
 func (DisplayPrice) SourceLabel() string
 func (EFACapacity) ResolveInterfaces(requested int) (int, error)
 func (ImageProvenance) Recorded() bool
@@ -671,6 +674,7 @@ func NestedSpawnTTLError() error
 func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
+func NewDisplayPrice(price float64, origin truffleaws.PriceOrigin) DisplayPrice
 func NewLaunchSettings(lc LaunchConfig, rootDeviceName string, amiMinGiB int32) LaunchSettings
 func PlacementGroupAvailableWait() time.Duration
 func PostLaunchTagKeys() []string

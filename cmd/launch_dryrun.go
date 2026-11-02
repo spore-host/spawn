@@ -98,8 +98,7 @@ func runLaunchDryRun(ctx context.Context, out io.Writer, awsClient *aws.Client, 
 	// API / static-table lookup); best-effort — an unpriced type/region leaves
 	// the rate fields empty rather than failing the whole preview.
 	if dp, err := resolveLaunchDryRunPrice(ctx, awsClient, config.InstanceType, config.Region); err == nil {
-		plan.OnDemandPricePerHour = dp.PricePerHour
-		plan.PriceSource = dp.SourceLabel()
+		plan.setPrice(dp)
 		plan.PriceIsLowerBound = isWindowsTarget(config.TargetOS)
 		if d, derr := parseDuration(plan.TTL); derr == nil {
 			plan.MaxCostUSD = dp.PricePerHour * d.Hours()
@@ -128,6 +127,18 @@ func runLaunchDryRun(ctx context.Context, out io.Writer, awsClient *aws.Client, 
 // none yet at that point).
 var resolveLaunchDryRunPrice = func(ctx context.Context, awsClient *aws.Client, instanceType, region string) (aws.DisplayPrice, error) {
 	return aws.ResolveDisplayPrice(ctx, awsClient.Config(), instanceType, region)
+}
+
+// setPrice records dp's rate and full origin on the plan.
+func (p *launchPlan) setPrice(dp aws.DisplayPrice) {
+	p.OnDemandPricePerHour = dp.PricePerHour
+	p.PriceSource, p.PriceAsOf, p.PriceFallbackReason = dp.Source, dp.AsOf, dp.FallbackReason
+}
+
+// priceLabel is the plan's rate origin in truffle's wording: "live", or for a
+// static rate "static, collected <date>: <why>" (#1502).
+func (p *launchPlan) priceLabel() string {
+	return aws.DisplayPrice{Source: p.PriceSource, AsOf: p.PriceAsOf, FallbackReason: p.PriceFallbackReason}.SourceLabel()
 }
 
 // launchPlan is the resolved, would-launch shape of a LaunchConfig, rendered
@@ -189,7 +200,13 @@ type launchPlan struct {
 	CustomUserDataBytes  int               `json:"custom_user_data_bytes,omitempty"`
 	Tags                 map[string]string `json:"tags,omitempty"`
 	OnDemandPricePerHour float64           `json:"on_demand_price_per_hour,omitempty"`
-	PriceSource          string            `json:"price_source,omitempty"`
+	// PriceSource is truffle's raw "live" or "static"; for a static rate,
+	// PriceAsOf is when the static table was collected and PriceFallbackReason
+	// why the live Price List was not used — the same three fields, under the
+	// same names, as truffle's own -o json (truffle#184, spawn#1502).
+	PriceSource         string `json:"price_source,omitempty"`
+	PriceAsOf           string `json:"price_as_of,omitempty"`
+	PriceFallbackReason string `json:"price_fallback_reason,omitempty"`
 	// PriceIsLowerBound is set for a Windows target (#884): the rate is the Linux
 	// one and excludes the Windows licence, so it and MaxCostUSD understate.
 	PriceIsLowerBound bool    `json:"price_is_lower_bound,omitempty"`
@@ -397,7 +414,7 @@ func renderLaunchPlanTable(out io.Writer, p launchPlan) {
 	}
 	fmt.Fprintf(out, "Lifetime:     ttl=%s idle=%s on-complete=%s\n", orDash(p.TTL), orDash(p.IdleTimeout), orDash(p.OnComplete))
 	if p.OnDemandPricePerHour > 0 {
-		fmt.Fprintf(out, "Rate:         $%.4f/hr on-demand (%s)\n", p.OnDemandPricePerHour, p.PriceSource)
+		fmt.Fprintf(out, "Rate:         $%.4f/hr on-demand (%s)\n", p.OnDemandPricePerHour, p.priceLabel())
 		if p.MaxCostUSD > 0 {
 			fmt.Fprintf(out, "Max cost:     ~$%.2f (rate × ttl, compute only)\n", p.MaxCostUSD)
 		}

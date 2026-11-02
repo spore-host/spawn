@@ -1,11 +1,14 @@
 package aws
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"testing"
 
+	libpricing "github.com/spore-host/libs/pricing"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
@@ -17,8 +20,20 @@ type fakePricer struct {
 	err    error
 }
 
-func (f fakePricer) OnDemandPriceWithSource(_ context.Context, _, _ string) (float64, truffleaws.PriceSource, error) {
-	return f.price, f.source, f.err
+// fakeStaticReason is the fallback reason a static fakePricer reports, so tests
+// can check it reaches what the user sees.
+const fakeStaticReason = "live AWS Price List unavailable: fake outage"
+
+func (f fakePricer) OnDemandPriceWithOrigin(_ context.Context, _, _ string) (float64, truffleaws.PriceOrigin, error) {
+	switch f.source {
+	case truffleaws.PriceSourceLive:
+		return f.price, truffleaws.LivePriceOrigin(), f.err
+	case truffleaws.PriceSourceStatic:
+		// The only way to build a static origin, as in truffle itself: it carries
+		// libs/pricing's collection date and the reason.
+		return f.price, truffleaws.StaticPriceOrigin(fakeStaticReason), f.err
+	}
+	return f.price, truffleaws.PriceOrigin{PriceSource: f.source}, f.err
 }
 
 // TestResolvePricePerHour_Success covers #533 case (a): a successful truffle
@@ -155,8 +170,53 @@ func TestResolveDisplayPrice_StaticSourceIsLabeled(t *testing.T) {
 	if dp.PricePerHour != 0.096 {
 		t.Errorf("PricePerHour = %v, want 0.096", dp.PricePerHour)
 	}
-	if got := dp.SourceLabel(); got != "static fallback" {
-		t.Errorf("SourceLabel() = %q, want %q", got, "static fallback")
+	// #1502: static, WHY, and WHEN, in truffle's wording.
+	want := "static, collected " + libpricing.PricesAsOf + ": " + fakeStaticReason
+	if got := dp.SourceLabel(); got != want {
+		t.Errorf("SourceLabel() = %q, want %q", got, want)
+	}
+	if dp.AsOf != libpricing.PricesAsOf || dp.FallbackReason != fakeStaticReason {
+		t.Errorf("DisplayPrice dropped the origin: AsOf=%q FallbackReason=%q", dp.AsOf, dp.FallbackReason)
+	}
+}
+
+// TestDisplayPriceSourceLabelNeverHidesAMissingDateOrReason: a static
+// DisplayPrice built without its date or reason (a fake, or a future caller
+// that drops them) must say so, never read like a current rate (#1502).
+func TestDisplayPriceSourceLabelNeverHidesAMissingDateOrReason(t *testing.T) {
+	got := DisplayPrice{PricePerHour: 0.1, Source: "static"}.SourceLabel()
+	for _, want := range []string{"static", "collection date unknown", "reason not recorded"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("SourceLabel() = %q, want it to contain %q", got, want)
+		}
+	}
+	if got := (DisplayPrice{PricePerHour: 0.1}).SourceLabel(); got != "unknown source" {
+		t.Errorf("unknown source label = %q", got)
+	}
+}
+
+// TestResolvePricePerHourLogsTheRealFallbackReason: the static-rate log used
+// to assert "Price List API unavailable" whatever truffle's actual reason was,
+// and gave no date (#1502). It now logs truffle's reason and collection date.
+func TestResolvePricePerHourLogsTheRealFallbackReason(t *testing.T) {
+	var buf bytes.Buffer
+	oldOut, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
+
+	cfg := &LaunchConfig{InstanceType: "m5.large", Region: "us-east-1"}
+	if err := resolvePricePerHour(context.Background(), fakePricer{price: 0.096, source: truffleaws.PriceSourceStatic}, cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{"static", "collected " + libpricing.PricesAsOf, fakeStaticReason} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log %q does not contain %q", got, want)
+		}
+	}
+	if cfg.PriceSource != "static" {
+		t.Errorf("spawn:price-source value = %q, want the raw %q", cfg.PriceSource, "static")
 	}
 }
 
@@ -192,5 +252,32 @@ func TestResolveDisplayPrice_ZeroPriceNoErrorIsTreatedAsFailure(t *testing.T) {
 
 	if _, err := resolveDisplayPrice(context.Background(), pricer, "weird.type", "us-east-1"); err == nil {
 		t.Fatal("resolveDisplayPrice: expected an error for a zero price, got nil")
+	}
+}
+
+// staticPriceRenderers is pkg/aws's half of the #1502 gate (see
+// internal/pricehygiene): each entry turns a truffle static origin into what a
+// caller displays, through the real function.
+var staticPriceRenderers = map[string]func(t *testing.T) string{
+	"resolveDisplayPrice": func(t *testing.T) string {
+		dp, err := resolveDisplayPrice(context.Background(), fakePricer{price: 0.096, source: truffleaws.PriceSourceStatic}, "m5.large", "us-east-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dp.SourceLabel()
+	},
+	"NewDisplayPrice": func(t *testing.T) string {
+		return NewDisplayPrice(0.096, truffleaws.StaticPriceOrigin(fakeStaticReason)).SourceLabel()
+	},
+}
+
+func TestStaticPriceIsLabelledByEveryDisplayPriceConstructor(t *testing.T) {
+	for name, render := range staticPriceRenderers {
+		got := render(t)
+		for _, want := range []string{"static", "collected " + libpricing.PricesAsOf, fakeStaticReason} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: label %q is missing %q (static, why, when — #1502)", name, got, want)
+			}
+		}
 	}
 }
