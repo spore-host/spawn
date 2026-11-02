@@ -35,17 +35,24 @@ type sandboxOpts struct {
 	unreachable string
 	// noMPI leaves mpirun off PATH, so the script installs it with yum.
 	noMPI bool
-	// stubs replaces or adds stand-ins by name.
+	// stubs replaces or adds stand-ins by name; "" removes one.
 	stubs map[string]string
 	// setup runs before the script, with the sandbox root.
 	setup func(t *testing.T, root string)
-	// container runs the script in amazonlinux:2.
+	// container runs the script in amazonlinux:2, or in ubuntu if set.
 	container bool
+	ubuntu    bool
 	// peerScriptAt is, per peer IP, the login at which that peer's own MPI
 	// script runs (see sandboxSSH); 0 or absent is the first.
 	peerScriptAt map[string]int
 	// noPeerScripts runs no peer's MPI script, so no peer is ever ready.
 	noPeerScripts bool
+	// apt makes apt-get, not yum, this base's package manager (Ubuntu,
+	// #1487): its stand-in installs mpirun. ubuntu implies it.
+	apt bool
+	// noInstanceID leaves INSTANCE_ID unset, as the bootstrap does on a base
+	// without ec2-metadata (Ubuntu).
+	noInstanceID bool
 }
 
 type sandboxRun struct {
@@ -139,11 +146,22 @@ echo private > "$f"; echo "ssh-rsa AAAAstub spawn-mpi-cohort" > "$f.pub"
 		"yum":    "#!/bin/bash\necho \"yum $*\" >> \"$STUB_ROOT/yum.log\"\n",
 		"mpirun": sandboxMpirun,
 	}
+	if o.apt || o.ubuntu {
+		delete(s, "yum")
+		// Installs the mpirun stand-in, once update and install have both run.
+		s["apt-get"] = `#!/bin/bash
+echo "apt-get $*" >> "$STUB_ROOT/apt.log"
+case " $* " in *" install "*) cat "$STUB_ROOT/mpirun.pkg" > "$(dirname "$0")/mpirun" && chmod +x "$(dirname "$0")/mpirun" ;; esac
+`
+	}
 	if o.noMPI {
 		delete(s, "mpirun")
 	}
 	for k, v := range o.stubs {
 		s[k] = v
+		if v == "" {
+			delete(s, k) // "": this base has no such tool
+		}
 	}
 	return s
 }
@@ -172,17 +190,21 @@ func sandboxPeers(t *testing.T, ips []string) []byte {
 	return b
 }
 
+// ubuntuImage is the Ubuntu base the Ubuntu container runs use (#1487). Never
+// pulled by a test either.
+const ubuntuImage = "ubuntu:24.04"
+
 // containerImage is the AL2 image the container runs use. It is never pulled
 // by a test: a run needs the image present locally, and skips otherwise.
 const containerImage = "amazonlinux:2"
 
-func containerAvailable(t *testing.T) {
+func containerAvailable(t *testing.T, image string) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")
 	}
-	if err := exec.Command("docker", "image", "inspect", containerImage).Run(); err != nil {
-		t.Skipf("%s not present locally (docker pull %s to run this)", containerImage, containerImage)
+	if err := exec.Command("docker", "image", "inspect", image).Run(); err != nil {
+		t.Skipf("%s not present locally (docker pull %s to run this)", image, image)
 	}
 }
 
@@ -195,8 +217,12 @@ func runSandbox(t *testing.T, o sandboxOpts) sandboxRun {
 	if err != nil {
 		t.Skip("bash not available")
 	}
+	image := containerImage
+	if o.ubuntu {
+		image = ubuntuImage
+	}
 	if o.container {
-		containerAvailable(t)
+		containerAvailable(t, image)
 	}
 	if o.cfg.MPIProcessesPerNode == 0 {
 		o.cfg.MPIProcessesPerNode = 1
@@ -249,8 +275,14 @@ func runSandbox(t *testing.T, o sandboxOpts) sandboxRun {
 	if err := os.WriteFile(file, []byte("set -e\necho \"sandbox bash $BASH_VERSION\"\n"+relocate(script, root)), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"PATH=" + path, "STUB_ROOT=" + root, "STUB_UNREACHABLE=" + o.unreachable, "INSTANCE_ID=i-self", "HOME=" + root,
+	if err := os.WriteFile(filepath.Join(root, "mpirun.pkg"), []byte(sandboxStubs(sandboxOpts{mpiRC: o.mpiRC})["mpirun"]), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + path, "STUB_ROOT=" + root, "STUB_UNREACHABLE=" + o.unreachable, "HOME=" + root,
 		"STUB_SELF=" + o.self, "MPIRC=" + strconv.Itoa(o.mpiRC)}
+	if !o.noInstanceID {
+		env = append(env, "INSTANCE_ID=i-self")
+	}
 
 	var cmd *exec.Cmd
 	if o.container {
@@ -259,7 +291,7 @@ func runSandbox(t *testing.T, o sandboxOpts) sandboxRun {
 		for _, e := range env {
 			args = append(args, "-e", e)
 		}
-		cmd = exec.Command("docker", append(args, containerImage, "/bin/bash", file)...) //nolint:gosec // test-built argv
+		cmd = exec.Command("docker", append(args, image, "/bin/bash", file)...) //nolint:gosec // test-built argv
 	} else {
 		cmd = exec.Command(bash, file) //nolint:gosec // the sandbox's own script
 		cmd.Env = env
@@ -272,7 +304,7 @@ func runSandbox(t *testing.T, o sandboxOpts) sandboxRun {
 		t.Fatalf("running the member script: %v\n%s", err, out)
 	}
 	t.Logf("member script (rank %d) exited %d:\n%s", o.cfg.JobArrayIndex, rc, out)
-	if o.container && !strings.Contains(string(out), "sandbox bash 4.2.") {
+	if o.container && !o.ubuntu && !strings.Contains(string(out), "sandbox bash 4.2.") {
 		t.Fatalf("the container run did not run under AL2's bash 4.2")
 	}
 	return sandboxRun{mpiRun: mpiRun{root: root}, rc: rc, out: string(out)}

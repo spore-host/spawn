@@ -323,6 +323,42 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //   - The wait keeps its 600 s bound and exits 1, which spawn_mpi_exit records
 //     as an "mpi-bootstrap" failure on every reachable member (#1483).
 //
+// Ubuntu (spawn#1487). The install was 'yum install -y openmpi openmpi-devel'
+// and nothing else, so on an Ubuntu --ami without --skip-mpi-install every
+// member died at 'yum: command not found' (failing closed since #1483).
+//
+//   - The package manager is detected with 'command -v': yum first, so AL2 and
+//     AL2023 (dnf's yum alias) are unchanged, then apt-get, which installs
+//     Ubuntu's openmpi-bin (mpirun, orted; it pulls openssh-client) and
+//     libopenmpi-dev (mpicc and headers, as openmpi-devel), Open MPI 4.1.2 on
+//     22.04 and 4.1.6 on 24.04. --no-install-recommends keeps it to about 100
+//     packages instead of 143 (it leaves out gfortran).
+//   - 'apt-get update' and the install are retried together, up to 10 times
+//     15 s apart: on first boot apt-daily or cloud-init can hold apt's lists
+//     lock, and DPkg::Lock::Timeout waits only for the dpkg lock (checked in
+//     ubuntu:24.04: 'update' under a held lists lock exits 100 at once, with or
+//     without the option). Past the bound, exit 1 and the trap records it.
+//   - With neither, the script names --skip-mpi-install and exits 1, recorded.
+//     spawn cannot refuse this at launch: before launch it knows only whether
+//     an AMI is Windows (DescribeImages' Platform), which already refuses
+//     --mpi; Ubuntu, Debian, SUSE and Alpine all report "Linux/UNIX".
+//   - mpi.sh needs nothing for Ubuntu: mpirun and orted are in /usr/bin and
+//     libmpi in the default library path, and the /usr/lib64/openmpi entries
+//     are absent there, which is harmless. LD_LIBRARY_PATH no longer gains a
+//     trailing empty entry (the current directory) when it was unset.
+//   - Ubuntu has no ec2-metadata (it is not in Canonical's 22.04 or 24.04
+//     cloud-image manifest), so the bootstrap's INSTANCE_ID is empty there,
+//     the key owner file was written empty, and pkg/mpicohort, which reads
+//     rank 0's public key only once that file names the instance (#1338),
+//     would never have released it. The ID now comes from IMDSv2 with curl.
+//   - EFA: the installer brings its own Open MPI under /opt/amazon/openmpi,
+//     but this script never puts that on PATH (its profile.d snippet is read
+//     by login shells only), and mpi.sh puts AL's /usr/lib64/openmpi/bin
+//     first. So, as on AL, the distribution's Open MPI runs mpirun, through
+//     its OFI component and the distribution's libfabric, which on Ubuntu
+//     24.04 (1.17) is built with the efa provider. Not changed here; see the
+//     follow-up, spawn#1491.
+//
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
@@ -369,7 +405,20 @@ rm -f /tmp/mpi-hostfile {{.NodeReadyFile}}
 # Check if MPI is already installed
 if ! command -v mpirun &> /dev/null; then
   echo "Installing OpenMPI..."
-  yum install -y openmpi openmpi-devel
+  if command -v yum >/dev/null; then
+    yum install -y openmpi openmpi-devel
+  elif command -v apt-get >/dev/null; then
+    # Ubuntu (#1487): see mpi.go.
+    SPAWN_APT=0
+    until apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y --no-install-recommends openmpi-bin libopenmpi-dev; do
+      SPAWN_APT=$((SPAWN_APT + 1))
+      [ "$SPAWN_APT" -lt 10 ] || exit 1 # spawn_mpi_exit records it
+      sleep 15
+    done
+  else
+    echo "spawn: no yum or apt-get to install Open MPI; use an image with it and --skip-mpi-install" | tee -a /var/log/spawn-command.log >&2
+    exit 1 # spawn_mpi_exit records it
+  fi
 else
   echo "MPI already installed, skipping installation"
 fi
@@ -399,7 +448,7 @@ source /etc/profile.d/efa.sh
 # Configure MPI environment (always run, even if pre-installed)
 cat >> /etc/profile.d/mpi.sh <<'EOF'
 export PATH=/usr/lib64/openmpi/bin:$PATH
-export LD_LIBRARY_PATH=/usr/lib64/openmpi/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/lib64/openmpi/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export OMPI_MCA_plm_rsh_agent=ssh
 export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
@@ -415,7 +464,7 @@ spawn_ak_drop() {
   { grep -v "$@" /root/.ssh/authorized_keys > /root/.ssh/.ak || [ $? -eq 1 ]; } && cat /root/.ssh/.ak > /root/.ssh/authorized_keys
   rm -f /root/.ssh/.ak
 }
-SPAWN_IID=${INSTANCE_ID:-$(ec2-metadata --instance-id | cut -d " " -f 2)}
+SPAWN_IID=${INSTANCE_ID:-$(curl -sf -H "X-aws-ec2-metadata-token: $(curl -sf -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)" http://169.254.169.254/latest/meta-data/instance-id || true)}
 # shellcheck disable=SC2050  # the rank is fixed at render time: one script per member
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   if [ -z "$SPAWN_IID" ] || [ "$(cat {{.KeyOwnerFile}} 2>/dev/null)" != "$SPAWN_IID" ]; then

@@ -17,40 +17,52 @@ import (
 // before any completion record, so the cohort billed to its TTL.
 //
 // mpiBaseTools are the external commands the MPI user data may assume on every
-// supported MPI base (the default AL2023 AMI and an AL2 --ami). Each was run by
-// the script on a stock AL2 EC2 instance in #1483 (all but jq succeeded) or is
-// in the AL2 and AL2023 AMIs' base package set, named beside it. Adding a tool
-// here is a claim about every base: check it on both, or install it in the
-// script and list it in mpiInstalledTools.
+// supported MPI base: the default AL2023 AMI, an AL2 --ami and, since #1487, an
+// Ubuntu 22.04 or 24.04 --ami. Each was run by the script on a stock AL2 EC2
+// instance in #1483 (all but jq succeeded) or is in the AL2 and AL2023 AMIs'
+// base package set, named beside it; and each is in Canonical's 22.04 and 24.04
+// server cloud-image manifests (coreutils, gawk and mawk, grep, hostname,
+// procps, openssh-client, curl, tar). Adding a tool here is a claim about every
+// base: check it on all of them, or install it in the script and list it in
+// mpiInstalledTools.
+//
+// Neither package manager is on every base, and ec2-metadata is not on
+// Ubuntu, so none of them is here: see mpiPackageManagers.
 var mpiBaseTools = map[string]string{
-	"awk":          "gawk",
-	"bash":         "bash",
-	"cat":          "coreutils",
-	"chmod":        "coreutils",
-	"cut":          "coreutils",
-	"dirname":      "coreutils",
-	"mkdir":        "coreutils",
-	"mkfifo":       "coreutils",
-	"nproc":        "coreutils",
-	"rm":           "coreutils",
-	"sleep":        "coreutils",
-	"tee":          "coreutils",
-	"touch":        "coreutils",
-	"tr":           "coreutils",
-	"grep":         "grep",
-	"hostname":     "hostname",
-	"ps":           "procps-ng",
-	"ssh":          "openssh-clients",
-	"ssh-keygen":   "openssh",
-	"curl":         "curl (curl-minimal on AL2023); EFA path only",
-	"tar":          "tar; EFA path only",
-	"yum":          "yum (dnf's yum alias on AL2023)",
-	"ec2-metadata": "ec2-utils / amazon-ec2-utils; only when the bootstrap did not set INSTANCE_ID",
+	"awk":        "gawk",
+	"bash":       "bash",
+	"cat":        "coreutils",
+	"chmod":      "coreutils",
+	"cut":        "coreutils",
+	"dirname":    "coreutils",
+	"mkdir":      "coreutils",
+	"mkfifo":     "coreutils",
+	"nproc":      "coreutils",
+	"rm":         "coreutils",
+	"sleep":      "coreutils",
+	"tee":        "coreutils",
+	"touch":      "coreutils",
+	"tr":         "coreutils",
+	"grep":       "grep",
+	"hostname":   "hostname",
+	"ps":         "procps-ng",
+	"ssh":        "openssh-clients",
+	"ssh-keygen": "openssh",
+	"curl":       "curl (curl-minimal on AL2023); EFA, and the instance ID when the bootstrap did not set INSTANCE_ID",
+	"tar":        "tar; EFA path only",
+}
+
+// mpiPackageManagers are on some bases only (#1487), so the script may run one
+// only inside 'if command -v <it>', which TestMPIUserDataToolsExistOnEveryBase
+// checks.
+var mpiPackageManagers = map[string]string{
+	"yum":     "AL2, and dnf's yum alias on AL2023",
+	"apt-get": "Ubuntu (apt)",
 }
 
 // mpiInstalledTools are commands the script installs before it uses them.
 var mpiInstalledTools = map[string]string{
-	"mpirun": "yum install -y openmpi openmpi-devel, or the image (--skip-mpi-install)",
+	"mpirun": "yum install -y openmpi openmpi-devel, apt-get install openmpi-bin libopenmpi-dev, or the image (--skip-mpi-install)",
 	// The EFA installer's own script, fetched and unpacked by the EFA block.
 	"./efa_installer.sh": "aws-efa-installer-latest.tar.gz",
 }
@@ -179,6 +191,9 @@ func TestMPIUserDataToolsExistOnEveryBase(t *testing.T) {
 			}
 			inventory[c] = append(inventory[c], name)
 		}
+		for _, c := range unguardedPackageManagers(t, name, script) {
+			t.Errorf("%s: the MPI user data runs %q outside 'if command -v %s', but it is not on every supported MPI base (#1487: yum on Ubuntu)", name, c, c)
+		}
 	}
 	if len(inventory) < 10 {
 		t.Fatalf("discovered only %d tools in the MPI user data; the discovery is broken: %v", len(inventory), inventory)
@@ -191,6 +206,9 @@ func TestMPIUserDataToolsExistOnEveryBase(t *testing.T) {
 		}
 		if _, ok := mpiInstalledTools[c]; ok {
 			continue
+		}
+		if _, ok := mpiPackageManagers[c]; ok {
+			continue // guarded, checked above
 		}
 		sort.Strings(where)
 		t.Errorf("the MPI user data runs %q, which is not a base tool of every supported MPI base and is not installed first (#1483: jq on AL2 died with 127 and no completion record); e.g. in %s", c, where[0])
@@ -207,5 +225,60 @@ jq -r ".[] | \"\(.ip) slots=$SLOTS\"" /etc/spawn/job-array-peers.json > /tmp/mpi
 `
 	if !scriptCommands(t, "the #1483 hostfile line", old)["jq"] {
 		t.Fatal("the tool scan does not see the jq call of the #1483 hostfile line")
+	}
+}
+
+// unguardedPackageManagers returns each mpiPackageManagers call in script that
+// is not inside the then-branch of an 'if command -v <that tool>'.
+func unguardedPackageManagers(t *testing.T, name, script string) []string {
+	t.Helper()
+	f, err := syntax.NewParser().Parse(strings.NewReader(script), name)
+	if err != nil {
+		t.Fatalf("%s: rendered MPI user data does not parse: %v", name, err)
+	}
+	guarded := map[*syntax.CallExpr]bool{}
+	syntax.Walk(f, func(n syntax.Node) bool {
+		ic, ok := n.(*syntax.IfClause)
+		if !ok || len(ic.Cond) != 1 {
+			return true
+		}
+		ce, ok := ic.Cond[0].Cmd.(*syntax.CallExpr)
+		if !ok || len(ce.Args) != 3 || ce.Args[0].Lit() != "command" || ce.Args[1].Lit() != "-v" {
+			return true
+		}
+		tool := ce.Args[2].Lit()
+		for _, st := range ic.Then {
+			syntax.Walk(st, func(m syntax.Node) bool {
+				if c, ok := m.(*syntax.CallExpr); ok && len(c.Args) > 0 && c.Args[0].Lit() == tool {
+					guarded[c] = true
+				}
+				return true
+			})
+		}
+		return true
+	})
+	var bad []string
+	syntax.Walk(f, func(n syntax.Node) bool {
+		c, ok := n.(*syntax.CallExpr)
+		if !ok || len(c.Args) == 0 {
+			return true
+		}
+		if _, pm := mpiPackageManagers[c.Args[0].Lit()]; pm && !guarded[c] {
+			bad = append(bad, c.Args[0].Lit())
+		}
+		return true
+	})
+	return bad
+}
+
+// TestMPIPackageManagerGuardScanSeesABareYum proves the guard check sees the
+// pre-#1487 install, a bare yum that Ubuntu does not have.
+func TestMPIPackageManagerGuardScanSeesABareYum(t *testing.T) {
+	const old = `if ! command -v mpirun &> /dev/null; then
+  yum install -y openmpi openmpi-devel
+fi
+`
+	if got := unguardedPackageManagers(t, "the pre-#1487 install", old); len(got) != 1 || got[0] != "yum" {
+		t.Fatalf("the guard scan found %v in the pre-#1487 install, want [yum]", got)
 	}
 }
