@@ -69,6 +69,8 @@ type rankSandbox struct {
 	program []string // argv of the per-rank program, paths rewritten
 	polls   int      // the rendered drain bound
 	poll    string   // the rendered poll interval
+	opts    []string // the rendered mpirun options before -np
+	rootEnv []string // the OMPI_ALLOW_RUN_AS_ROOT* the rendered mpi.sh exports
 }
 
 func newRankSandbox(t *testing.T, command string) *rankSandbox {
@@ -102,15 +104,14 @@ func newRankSandbox(t *testing.T, command string) *rankSandbox {
 		program: strings.Fields(rw.Replace(rankProgram(t, script))),
 		polls:   rankDrainPolls(t, body),
 		poll:    rankDrainPoll(t, body),
+		opts:    mpirunOptions(t, script),
+		rootEnv: profileRootEnv(t, script),
 	}
 }
 
 func (sb *rankSandbox) env() []string {
-	env := []string{"PATH=" + filepath.Join(sb.dir, "bin") + ":" + os.Getenv("PATH"), "HOME=" + sb.dir}
-	if os.Geteuid() == 0 { // CI containers: mpirun refuses root without these
-		env = append(env, "OMPI_ALLOW_RUN_AS_ROOT=1", "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1")
-	}
-	return env
+	// The rendered /etc/profile.d/mpi.sh's root variables, as on the instance.
+	return append([]string{"PATH=" + filepath.Join(sb.dir, "bin") + ":" + os.Getenv("PATH"), "HOME=" + sb.dir}, sb.rootEnv...)
 }
 
 func (sb *rankSandbox) read(t *testing.T, name string) string {
@@ -276,21 +277,28 @@ func mpirunBinary(t *testing.T) string {
 }
 
 // runMPI runs the rendered per-rank program under a real `mpirun -np 2` on
-// this host. Output goes to a file: Open MPI's own forwarding, not a pipe the
-// test holds, is what decides when mpirun returns.
+// this host, with the rendered mpirun options (so as root, the rendered root
+// mechanism is what lets it start, #1481). Output goes to a file: Open MPI's
+// own forwarding, not a pipe the test holds, is what decides when mpirun
+// returns.
 func (sb *rankSandbox) runMPI(t *testing.T, mpirun string) (string, int) {
+	t.Helper()
+	return sb.runMPIProgram(t, mpirun, sb.program...)
+}
+
+func (sb *rankSandbox) runMPIProgram(t *testing.T, mpirun string, program ...string) (string, int) {
 	t.Helper()
 	f, err := os.Create(filepath.Join(sb.dir, "mpirun.out"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	args := []string{"--oversubscribe", "-np", "2"}
-	if os.Geteuid() == 0 { // Open MPI before 4.0.3 ignores the env vars
-		args = append(args, "--allow-run-as-root")
-	}
-	args = append(args, sb.program...)
+	args := append(append(append([]string{}, sb.opts...), "--oversubscribe", "-np", "2"), program...)
 	cmd := exec.Command(mpirun, args...) //nolint:gosec // nosemgrep
+	// argv[0] is the bare name, as the user data runs it. Invoked by absolute
+	// path, Open MPI implies --prefix and puts that bin dir first on the ranks'
+	// PATH; on Ubuntu that is /usr/bin, which hides the counting sleep.
+	cmd.Args[0] = "mpirun"
 	cmd.Env = sb.env()
 	cmd.Stdout, cmd.Stderr = f, f
 	cmd.Stdin = nil
@@ -352,5 +360,24 @@ func TestMPIRunEndsAtTheRanksExitWithARealMPIRun(t *testing.T) {
 				t.Errorf("the drains polled %d times with no straggler (bound %d)", got, sb.polls)
 			}
 		})
+	}
+}
+
+// TestRenderedMPIRunStartsAsRoot is #1481 against Open MPI itself: as root,
+// with only what the user data renders (the mpirun line's options and the
+// mpi.sh variables), a real `mpirun -np 2` starts both ranks. Open MPI 4.0.1
+// (AL2) refuses root with the variables alone. Skipped unless the test runs as
+// root with an mpirun installed (e.g. an amazonlinux:2 container with the
+// openmpi package).
+func TestRenderedMPIRunStartsAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("not root: the run-as-root half of #1481 needs uid 0 (an amazonlinux:2 container with openmpi)")
+	}
+	mpirun := mpirunBinary(t)
+	sb := newRankSandbox(t, "true")
+	out, rc := sb.runMPIProgram(t, mpirun, "/bin/sh", "-c", "echo spawn-root-rank-ok")
+	if rc != 0 || strings.Count(out, "spawn-root-rank-ok") != 2 {
+		t.Errorf("as root, mpirun with the rendered options %q and env %q exited %d with %d of 2 ranks run:\n%s",
+			sb.opts, sb.rootEnv, rc, strings.Count(out, "spawn-root-rank-ok"), out)
 	}
 }

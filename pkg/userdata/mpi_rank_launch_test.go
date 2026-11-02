@@ -33,15 +33,18 @@ func rankWrapperBody(t *testing.T, script string) string {
 	return rest[:j+1]
 }
 
-// TestEveryMPIRankLaunchRunsTheWrapper: every mpirun invocation spawn renders
-// runs the rank wrapper, and every member, not only rank 0, writes it (mpirun
-// starts ranks on peers through orted, which runs the same path there). The
-// invocations are discovered: every non-comment line of the rendered scripts
-// that calls mpirun with a flag, and every Go source line in cmd/ and pkg/
-// that does, so a second launch path cannot appear without the wrapper.
-func TestEveryMPIRankLaunchRunsTheWrapper(t *testing.T) {
+// mpirunLaunch is one mpirun invocation spawn can emit: where it was found and
+// the line itself.
+type mpirunLaunch struct{ where, line string }
+
+// mpirunLaunches discovers every mpirun invocation spawn renders or writes:
+// every non-comment line of the rendered scripts that calls mpirun with a flag,
+// and every Go source line in cmd/ and pkg/ that does. Each half failing to
+// find any is fatal, so a broken scan cannot pass.
+func mpirunLaunches(t *testing.T) []mpirunLaunch {
+	t.Helper()
 	invocation := regexp.MustCompile(`(^|[;&|(]\s*)mpirun\s+-`)
-	launches := 0
+	var rendered, sources []mpirunLaunch
 	for name, cfg := range map[string]MPIConfig{
 		"rank 0":             {JobArrayIndex: 0, JobArraySize: 2},
 		"rank 1":             {JobArrayIndex: 1, JobArraySize: 2},
@@ -59,17 +62,12 @@ func TestEveryMPIRankLaunchRunsTheWrapper(t *testing.T) {
 			if trim := strings.TrimSpace(line); strings.HasPrefix(trim, "#") || !invocation.MatchString(trim) {
 				continue
 			}
-			launches++
-			if !strings.Contains(line, " bash "+mpiRankWrapper+" ") {
-				t.Errorf("%s: an mpirun invocation does not run the rank wrapper %s: %s", name, mpiRankWrapper, strings.TrimSpace(line))
-			}
+			rendered = append(rendered, mpirunLaunch{name, line})
 		}
 	}
-	if launches == 0 {
+	if len(rendered) == 0 {
 		t.Fatal("found no mpirun invocation in any rendered script: the scan is broken, not the template")
 	}
-
-	var sources []string
 	for _, root := range []string{"../../cmd", "../../pkg"} {
 		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
@@ -84,10 +82,7 @@ func TestEveryMPIRankLaunchRunsTheWrapper(t *testing.T) {
 				if strings.HasPrefix(trim, "//") || strings.HasPrefix(trim, "#") || !invocation.MatchString(trim) {
 					continue
 				}
-				sources = append(sources, fmt.Sprintf("%s:%d", p, i+1))
-				if !strings.Contains(line, " bash "+mpiRankWrapper+" ") {
-					t.Errorf("%s:%d launches mpirun without the rank wrapper %s (#1479): %s", p, i+1, mpiRankWrapper, trim)
-				}
+				sources = append(sources, mpirunLaunch{fmt.Sprintf("%s:%d", p, i+1), line})
 			}
 			return nil
 		})
@@ -96,4 +91,18 @@ func TestEveryMPIRankLaunchRunsTheWrapper(t *testing.T) {
 		t.Fatal("found no mpirun invocation in cmd/ or pkg/ source: the scan is broken")
 	}
 	t.Logf("mpirun invocations in source: %v", sources)
+	return append(rendered, sources...)
+}
+
+// TestEveryMPIRankLaunchRunsTheWrapper: every mpirun invocation spawn renders
+// or writes (mpirunLaunches) runs the rank wrapper, and every member, not only
+// rank 0, writes it (mpirun starts ranks on peers through orted, which runs
+// the same path there). The invocations are discovered, so a second launch
+// path cannot appear without the wrapper.
+func TestEveryMPIRankLaunchRunsTheWrapper(t *testing.T) {
+	for _, l := range mpirunLaunches(t) {
+		if !strings.Contains(l.line, " bash "+mpiRankWrapper+" ") {
+			t.Errorf("%s: an mpirun invocation does not run the rank wrapper %s (#1479): %s", l.where, mpiRankWrapper, strings.TrimSpace(l.line))
+		}
+	}
 }
