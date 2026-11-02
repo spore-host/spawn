@@ -62,7 +62,7 @@ type sandboxRun struct {
 }
 
 // sandboxTargets are the absolute path prefixes moved under the sandbox root.
-var sandboxTargets = []string{"/tmp/", "/var/", "/etc/", "/root/", "/run/"}
+var sandboxTargets = []string{"/tmp/", "/var/", "/etc/", "/root/", "/run/", "/opt/"}
 
 // relocate moves every sandboxTargets path under root in one pass, so a root
 // that itself starts with one of them (macOS's /var/folders) is not rewritten.
