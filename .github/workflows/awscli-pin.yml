@@ -18,9 +18,13 @@ name: AWS CLI pin
 #
 # Only GITHUB_TOKEN. Two limits come with it: a PR it opens does not trigger CI
 # (close and reopen the PR, or push to it, to run the checks), and GitHub
-# refuses to let it open a PR at all unless "Allow GitHub Actions to create and
-# approve pull requests" is enabled for the repository. Without that setting the
-# branch is still pushed and the run fails with the compare link.
+# refuses to let it open a PR at all while "Allow GitHub Actions to create and
+# approve pull requests" is off, as it is for this org. On that refusal, and
+# only that one (scripts/awsclipin pr-refused), the run opens an issue, or
+# updates the open one with the same title, holding the compare link, the
+# verified version, both sha256s and the signing key's fingerprint, and the
+# owner opens the PR from the link. Any other failure (push, gh, gpg) fails
+# the run.
 
 on:
   schedule:
@@ -41,6 +45,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Go
@@ -51,18 +56,20 @@ jobs:
       - name: Check the key and look for a newer AWS CLI
         id: bump
         run: scripts/bump-awscli-pin.sh
-      - name: Open a PR
+      - name: Open a PR (or, if GitHub refuses, an issue)
         if: steps.bump.outputs.bumped == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           FROM: ${{ steps.bump.outputs.from }}
           VERSION: ${{ steps.bump.outputs.version }}
+          SHA_X86_64: ${{ steps.bump.outputs.sha256_x86_64 }}
+          SHA_AARCH64: ${{ steps.bump.outputs.sha256_aarch64 }}
           REPO: ${{ github.repository }}
           BASE: ${{ github.ref_name }}
         run: |
           branch="bot/awscli-$VERSION"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-            echo "$branch already exists; its PR was opened by an earlier run"
+            echo "$branch already exists; an earlier run opened its PR or issue"
             exit 0
           fi
           git config user.name "github-actions[bot]"
@@ -71,13 +78,33 @@ jobs:
           git add pkg/launcher/bootstrap.go CHANGELOG.md
           git commit -m "chore(bootstrap): AWS CLI $FROM -> $VERSION (#1495)"
           git push origin "$branch"
+          compare="https://github.com/$REPO/compare/$BASE...$branch?expand=1"
           body="Moves the AWS CLI v2 that the Linux bootstrap installs on an image with no aws CLI from $FROM to $VERSION.
 
           Both installer zips' signatures verified against the AWS CLI team key (FB5DB77FD5C118B80511ADA8A6310ACC4672475C, scripts/awsclipin/aws-cli-team.asc) before their sha256s were pinned; the run's log has both. This changes the published bootstrap body, so it ships in a release and the sweep orchestrator is redeployed from it.
 
           Opened by .github/workflows/awscli-pin.yml with GITHUB_TOKEN, so CI has not run: close and reopen this PR to run it."
-          if ! gh pr create --repo "$REPO" --base "$BASE" --head "$branch" \
-            --title "chore(bootstrap): AWS CLI $FROM -> $VERSION" --body "$body"; then
-            echo "::error::Pushed $branch but could not open its PR (is \"Allow GitHub Actions to create and approve pull requests\" enabled?). Open it by hand: https://github.com/$REPO/compare/$BASE...$branch"
+          if out=$(gh pr create --repo "$REPO" --base "$BASE" --head "$branch" \
+            --title "chore(bootstrap): AWS CLI $FROM -> $VERSION" --body "$body" 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out" >&2
+          # Only GitHub's "not permitted to create or approve pull requests"
+          # falls back to an issue; anything else fails the run.
+          if ! printf '%s' "$out" | go -C scripts run ./awsclipin pr-refused; then
+            echo "::error::gh pr create failed for $branch: $out"
             exit 1
+          fi
+          title=$(go -C scripts run ./awsclipin issue-title --from "$FROM" --version "$VERSION")
+          go -C scripts run ./awsclipin issue-body --from "$FROM" --version "$VERSION" \
+            --sha256-x86_64 "$SHA_X86_64" --sha256-aarch64 "$SHA_AARCH64" --compare "$compare" >"$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --repo "$REPO" --state open --search "in:title AWS CLI pin bump available" \
+            --json number,title | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$REPO" --body-file "$RUNNER_TEMP/issue.md"
+            echo "::warning::GitHub refused the PR; updated issue #$existing with the compare link"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+            echo "::warning::GitHub refused the PR; opened an issue with the compare link"
           fi

@@ -59,15 +59,21 @@ var (
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "awsclipin:", err)
+	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
+		if !errors.Is(err, errNotRefused) {
+			fmt.Fprintln(os.Stderr, "awsclipin:", err)
+		}
 		os.Exit(1)
 	}
 }
 
-func run(args []string, stdout io.Writer) error {
+func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: awsclipin show|set [flags]")
+		return errors.New("usage: awsclipin show|set|pr-refused|issue-title|issue-body [flags]")
+	}
+	switch args[0] {
+	case "pr-refused", "issue-title", "issue-body":
+		return runFallback(args, stdin, stdout)
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	bootstrap := fs.String("bootstrap", "pkg/launcher/bootstrap.go", "path to pkg/launcher/bootstrap.go")
@@ -111,7 +117,7 @@ func run(args []string, stdout io.Writer) error {
 		}
 		return os.WriteFile(*changelog, cl, 0o644) //nolint:gosec // a tracked source file
 	default:
-		return fmt.Errorf("unknown subcommand %q (want show or set)", args[0])
+		return fmt.Errorf("unknown subcommand %q (want show, set, pr-refused, issue-title or issue-body)", args[0])
 	}
 }
 

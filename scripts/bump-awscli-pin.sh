@@ -23,7 +23,7 @@
 #
 # Edits pkg/launcher/bootstrap.go and CHANGELOG.md through scripts/awsclipin
 # (go/parser, so a renamed constant fails rather than moving nothing). Writes
-# `bumped`, `from` and `version` to $GITHUB_OUTPUT when set. Needs git, curl,
+# `bumped`, `from`, `version` and the two sha256s to $GITHUB_OUTPUT when set. Needs git, curl,
 # gpg, go and sha256sum (or shasum); calls no AWS API.
 set -euo pipefail
 
@@ -130,4 +130,6 @@ go -C scripts run ./awsclipin set --bootstrap ../pkg/launcher/bootstrap.go --cha
 output bumped true
 output from "$current"
 output version "$version"
+output sha256_x86_64 "$sum_x86_64"
+output sha256_aarch64 "$sum_aarch64"
 echo "moved the AWS CLI pin $current -> $version"
