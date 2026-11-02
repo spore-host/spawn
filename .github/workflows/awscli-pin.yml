@@ -1,0 +1,83 @@
+name: AWS CLI pin
+
+# Moves the AWS CLI v2 release the Linux bootstrap installs on an image with no
+# aws CLI (awsCLIVersion and its two sha256s in pkg/launcher/bootstrap.go,
+# #1490) when AWS publishes a newer one, by opening a PR (#1495). Dependabot
+# cannot see that pin.
+#
+# scripts/bump-awscli-pin.sh does the work: newest 2.N.N tag of aws/aws-cli,
+# both installer zips and their .sig files, gpg verification against the AWS
+# CLI team key committed in scripts/awsclipin/aws-cli-team.asc (fingerprint
+# FB5DB77FD5C118B80511ADA8A6310ACC4672475C), sha256s, and the edit. It also
+# fails this run while that key is expired or within 60 days of expiring
+# (2027-07-01 for the key committed in #1495), so the run goes red in time to
+# replace it, release or no release.
+#
+# Moving the pin changes the published bootstrap body, so the PR is reviewed
+# and merged like any other and ships in a release.
+#
+# Only GITHUB_TOKEN. Two limits come with it: a PR it opens does not trigger CI
+# (close and reopen the PR, or push to it, to run the checks), and GitHub
+# refuses to let it open a PR at all unless "Allow GitHub Actions to create and
+# approve pull requests" is enabled for the repository. Without that setting the
+# branch is still pushed and the run fails with the compare link.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1' # weekly, Monday 06:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: awscli-pin
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump the AWS CLI pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Check the key and look for a newer AWS CLI
+        id: bump
+        run: scripts/bump-awscli-pin.sh
+      - name: Open a PR
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM: ${{ steps.bump.outputs.from }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.ref_name }}
+        run: |
+          branch="bot/awscli-$VERSION"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch already exists; its PR was opened by an earlier run"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add pkg/launcher/bootstrap.go CHANGELOG.md
+          git commit -m "chore(bootstrap): AWS CLI $FROM -> $VERSION (#1495)"
+          git push origin "$branch"
+          body="Moves the AWS CLI v2 that the Linux bootstrap installs on an image with no aws CLI from $FROM to $VERSION.
+
+          Both installer zips' signatures verified against the AWS CLI team key (FB5DB77FD5C118B80511ADA8A6310ACC4672475C, scripts/awsclipin/aws-cli-team.asc) before their sha256s were pinned; the run's log has both. This changes the published bootstrap body, so it ships in a release and the sweep orchestrator is redeployed from it.
+
+          Opened by .github/workflows/awscli-pin.yml with GITHUB_TOKEN, so CI has not run: close and reopen this PR to run it."
+          if ! gh pr create --repo "$REPO" --base "$BASE" --head "$branch" \
+            --title "chore(bootstrap): AWS CLI $FROM -> $VERSION" --body "$body"; then
+            echo "::error::Pushed $branch but could not open its PR (is \"Allow GitHub Actions to create and approve pull requests\" enabled?). Open it by hand: https://github.com/$REPO/compare/$BASE...$branch"
+            exit 1
+          fi

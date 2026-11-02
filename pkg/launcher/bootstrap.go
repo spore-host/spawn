@@ -667,9 +667,12 @@ func bodyFuncs() string {
 // 4672 475C, https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
 // The key itself is not carried in the user data: it would cost ~1.2 KB
 // gzipped of the inline bootstrap's budget and needs gpg on the instance,
-// where a pinned sha256 needs only sha256sum. To move the pin: download both
-// zips and their .sig files, `gpg --verify` each against that key, and put
-// the version and the new sha256sums here.
+// where a pinned sha256 needs only sha256sum. The weekly
+// .github/workflows/awscli-pin.yml moves the pin by PR (#1495):
+// scripts/bump-awscli-pin.sh downloads both zips and their .sig files, verifies
+// each against that key (committed as scripts/awsclipin/aws-cli-team.asc) and
+// rewrites these three constants by name, so rename them only together with
+// scripts/awsclipin. Run that script by hand to move the pin now.
 const (
 	awsCLIVersion       = "2.39.3"
 	awsCLISHA256x86_64  = "14cb35809ad7547dd3c69fa9899a3975fbd850b6a6791f3fe264856490cd9a63"
