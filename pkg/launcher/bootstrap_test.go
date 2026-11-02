@@ -47,10 +47,10 @@ func TestBuildLinuxBootstrap_CoreContent(t *testing.T) {
 		sporedinstall.BucketInstallFuncName + " \"$BINARY\"", // installs spored, via the verified installer
 		"mv -f \"$tmp\" " + sporedinstall.Dest,               // ...which installs by atomic rename
 		"useradd -m -s /bin/bash \"$LOCAL_USERNAME\"",        // creates user
-		"authorized_keys",                   // trusts the key
-		"Name=key,Values=spawn:command",     // reads + runs the command tag (#2)
-		"Name=key,Values=spawn:on-complete", // surfaces on-complete (#3)
-		"systemctl start spored",            // starts the daemon
+		"authorized_keys",                // trusts the key
+		"$(spawn_tag spawn:command)",     // reads + runs the command tag (#2)
+		"$(spawn_tag spawn:on-complete)", // surfaces on-complete (#3)
+		"systemctl start spored",         // starts the daemon
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(script, want) {

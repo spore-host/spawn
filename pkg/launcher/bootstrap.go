@@ -313,6 +313,11 @@ func buildLinuxBootstrap(cfg BootstrapConfig, version, spored, body string) (str
 		// which defines them inside the fetched body, runs the same commands.
 		return prefix + bodyFuncs() + pre + bodyMain() + post, nil
 	}
+	if cfg.StagedFiles != nil {
+		// The staged files are fetched with the aws CLI before the body,
+		// which defines spawn_need_aws, has been fetched (#1490).
+		pre = awsCLIInstallFunc() + pre
+	}
 	return prefix + pre + bodyStub(version, body) + post, nil
 }
 
@@ -645,7 +650,64 @@ func bodyFuncs() string {
 	//
 	// Then the Spot-replacement check the workload starts are gated on (#1007).
 	// Defined above the body, because the body's --command block calls it.
-	return shellmin.Strip(sporedinstall.VerifiedInstallFunc()) + shellmin.Strip(spotReplacementCheckFunc)
+	return shellmin.Strip(sporedinstall.VerifiedInstallFunc()) + shellmin.Strip(spotReplacementCheckFunc) + awsCLIInstallFunc()
+}
+
+// The AWS CLI v2 release the Linux bootstrap installs on an image that has no
+// aws CLI (#1490): stock Canonical Ubuntu ships none, and the bootstrap reads
+// the instance's spawn:* tags, fetches staged files, and runs the task wrapper
+// and flush hook's S3 copies with it. Amazon Linux ships one, so it never
+// installs anything there.
+//
+// Pinned, with the sha256 of each architecture's official installer zip
+// (https://awscli.amazonaws.com/awscli-exe-linux-<arch>-<version>.zip), so the
+// instance runs exactly the bytes that were reviewed here. Those hashes were
+// taken from zips whose detached .sig verified against the AWS CLI team's
+// published PGP key (fingerprint FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC
+// 4672 475C, https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
+// The key itself is not carried in the user data: it would cost ~1.2 KB
+// gzipped of the inline bootstrap's budget and needs gpg on the instance,
+// where a pinned sha256 needs only sha256sum. To move the pin: download both
+// zips and their .sig files, `gpg --verify` each against that key, and put
+// the version and the new sha256sums here.
+const (
+	awsCLIVersion       = "2.39.3"
+	awsCLISHA256x86_64  = "14cb35809ad7547dd3c69fa9899a3975fbd850b6a6791f3fe264856490cd9a63"
+	awsCLISHA256aarch64 = "f6eb845fbacb11bee87de3f5fbe8043773cbe89d0414607b44b71e216eb9226b"
+)
+
+// awsCLIInstallTemplate defines spawn_need_aws, which returns 0 once there is
+// an aws CLI: the image's, or the pinned one it downloads, checks against its
+// sha256 and installs with AWS's own installer (into /usr/local/aws-cli, with
+// /usr/local/bin/aws). Ubuntu has no unzip, so the zip is unpacked with
+// python3, which cloud-init itself runs on, keeping the modes the installer
+// needs. The zip's name carries the architecture as uname -m prints it. Any
+// failure returns 1, having said why (curl and python3 report their own
+// errors), and the callers fail closed. Filled in by
+// awsCLIInstallFunc: the version, then the x86_64 and aarch64 sha256.
+const awsCLIInstallTemplate = `
+# spawn_need_aws: an aws CLI, installed when the image has none (#1490).
+spawn_need_aws() {
+    command -v aws >/dev/null 2>&1 && return 0
+    local h=%[2]s r=0
+    [ "$(uname -m)" != aarch64 ] || h=%[3]s
+    echo "spawn: no aws CLI; installing AWS CLI %[1]s (#1490)"
+    rm -rf /tmp/spawn-awscli
+    mkdir -p /tmp/spawn-awscli
+    curl -fsS --connect-timeout 10 --max-time 600 --retry 3 -o /tmp/spawn-awscli/c.zip "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-%[1]s.zip" &&
+        { [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ] || { echo "spawn: AWS CLI zip: sha256 mismatch" >&2; false; }; } &&
+        python3 -c 'import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1]);[os.chmod(z.extract(i,sys.argv[2]),i.external_attr>>16&511 or 493) for i in z.infolist()]' /tmp/spawn-awscli/c.zip /tmp/spawn-awscli &&
+        /tmp/spawn-awscli/aws/install >/dev/null &&
+        command -v aws >/dev/null 2>&1 || r=1
+    rm -rf /tmp/spawn-awscli
+    [ "$r" = 0 ] || echo "spawn: could not install AWS CLI %[1]s (#1490)" >&2
+    return "$r"
+}
+`
+
+// awsCLIInstallFunc is awsCLIInstallTemplate filled in with the pinned release.
+func awsCLIInstallFunc() string {
+	return fmt.Sprintf(shellmin.Strip(awsCLIInstallTemplate), awsCLIVersion, awsCLISHA256x86_64, awsCLISHA256aarch64)
 }
 
 // bodyMain is the part of the static body that runs: spored's install and
@@ -818,7 +880,9 @@ const stagedFilesPath = "/etc/spawn/staged-files.sh"
 // region and the sha256.
 //
 // The object is private, so it is fetched with the aws CLI and the instance
-// role, which the task wrapper already needs for its own staging. Retried, for
+// role, which the task wrapper already needs for its own staging; an image
+// with no aws CLI (Ubuntu) gets the pinned one installed first (#1490).
+// Retried, for
 // a role whose new policy has not reached every IAM endpoint yet. Saved 0600
 // (it holds the command), checked against the sha256 this user data carries,
 // so nothing but the bytes the launcher staged can run, and then sourced:
@@ -831,7 +895,7 @@ const stagedFilesTemplate = `
 SPAWN_ST_URI=%s
 SPAWN_ST_REGION=%s
 SPAWN_ST_SHA256=%s
-command -v aws >/dev/null 2>&1 || spawn_fatal_retire "no aws CLI to fetch this launch's staged files from $SPAWN_ST_URI"
+spawn_need_aws || spawn_fatal_retire "no aws CLI to fetch this launch's staged files from $SPAWN_ST_URI, and it could not be installed"
 mkdir -p /etc/spawn
 for SPAWN_ST_TRY in 1 2 3 4 5 6; do
     rm -f %[4]s
@@ -1085,11 +1149,34 @@ echo "✅ User $LOCAL_USERNAME configured with SSH access and sudo privileges"
 # This prevents indefinite logins when users leave sessions idle
 echo "Configuring session timeouts..."
 
-# Get session timeout from EC2 tags
-INSTANCE_ID=$(ec2-metadata --instance-id | cut -d " " -f 2)
-SESSION_TIMEOUT=$(aws ec2 describe-tags --region $REGION \
-    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:session-timeout" \
-    --query 'Tags[0].Value' --output text 2>/dev/null || echo "30m")
+# The instance ID and the spawn:* tags everything below reads (#1490). Both
+# used to fail silently on Ubuntu, which has neither ec2-metadata nor an aws
+# CLI: INSTANCE_ID came out empty, every tag read fell back to a default
+# behind 2>/dev/null, and the hostname, the array environment, the MOTD and the
+# --command once-marker were all wrong with nothing said. Now the ID comes from
+# IMDSv2 (curl, on every base), the aws CLI is installed when the image has
+# none, and a missing ID or a tag read that keeps failing stops the bootstrap,
+# which records a failed completion (#1484). A tag the instance does not carry
+# reads as None, as it always has.
+INSTANCE_ID=$(curl -sf --connect-timeout 5 --retry 3 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id || true)
+case "$INSTANCE_ID" in
+    i-*) ;;
+    *) echo "spawn: no instance ID from IMDS; stopping (#1490)" >&2; exit 1 ;;
+esac
+spawn_need_aws || { echo "spawn: no aws CLI to read this instance's tags with; stopping (#1490)" >&2; exit 1; }
+spawn_tag() {
+    local n=0
+    until aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=$1" --query "${2:-Tags[0].Value}" --output text; do
+        n=$((n + 1))
+        if [ "$n" -ge 6 ]; then
+            echo "spawn: could not read tag $1; stopping rather than use a default (#1490)" >&2
+            return 1
+        fi
+        sleep 5
+    done
+}
+
+SESSION_TIMEOUT=$(spawn_tag spawn:session-timeout)
 
 # Convert duration to seconds
 parse_duration() {
@@ -1133,7 +1220,9 @@ if [ "$TIMEOUT_SECONDS" -gt 0 ]; then
     if ! grep -q "^ClientAliveInterval" /etc/ssh/sshd_config; then
         echo "ClientAliveInterval $SSH_INTERVAL" >> /etc/ssh/sshd_config
         echo "ClientAliveCountMax 3" >> /etc/ssh/sshd_config
-        systemctl reload sshd 2>/dev/null || service sshd reload 2>/dev/null || true
+        # systemctl only: every supported base runs systemd, and the service
+        # fallback was a tool the bases are not all known to ship (#1490).
+        systemctl reload sshd 2>/dev/null || true
     fi
 
     # Shell timeout (auto-logout idle shells)
@@ -1154,24 +1243,16 @@ else
 fi
 
 # Setup job array environment variables (if part of a job array)
-JOB_ARRAY_ID=$(aws ec2 describe-tags --region $REGION \
-    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:job-array-id" \
-    --query 'Tags[0].Value' --output text 2>/dev/null || echo "None")
+JOB_ARRAY_ID=$(spawn_tag spawn:job-array-id)
 
 if [ "$JOB_ARRAY_ID" != "None" ]; then
     echo "Setting up job array environment..."
 
-    JOB_ARRAY_NAME=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:job-array-name" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+    JOB_ARRAY_NAME=$(spawn_tag spawn:job-array-name)
 
-    JOB_ARRAY_SIZE=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:job-array-size" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "0")
+    JOB_ARRAY_SIZE=$(spawn_tag spawn:job-array-size)
 
-    JOB_ARRAY_INDEX=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:job-array-index" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "0")
+    JOB_ARRAY_INDEX=$(spawn_tag spawn:job-array-index)
 
     # Create job array environment file
     cat > /etc/profile.d/job-array.sh <<EOFJOBARRAY
@@ -1208,9 +1289,7 @@ fi
 #   daemons). Peers are still addressed by IP: the MPI hostfile is built from
 #   peer private IPs (pkg/userdata/mpi.go), not hostnames, so mpirun is
 #   unaffected by the rename.
-SPAWN_NAME_TAG=$(aws ec2 describe-tags --region $REGION \
-    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=Name" \
-    --query 'Tags[0].Value' --output text 2>/dev/null || echo "None")
+SPAWN_NAME_TAG=$(spawn_tag Name)
 SPAWN_HOSTNAME=""
 if [ -n "$SPAWN_NAME_TAG" ] && [ "$SPAWN_NAME_TAG" != "None" ]; then
     SPAWN_HOSTNAME=$(printf '%s' "$SPAWN_NAME_TAG" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
@@ -1235,29 +1314,19 @@ if [ -n "$SPAWN_HOSTNAME" ]; then
 fi
 
 # Setup parameter sweep environment variables (if part of a sweep)
-SWEEP_ID=$(aws ec2 describe-tags --region $REGION \
-    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:sweep-id" \
-    --query 'Tags[0].Value' --output text 2>/dev/null || echo "None")
+SWEEP_ID=$(spawn_tag spawn:sweep-id)
 
 if [ "$SWEEP_ID" != "None" ]; then
     echo "Setting up parameter sweep environment..."
 
-    SWEEP_NAME=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:sweep-name" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+    SWEEP_NAME=$(spawn_tag spawn:sweep-name)
 
-    SWEEP_SIZE=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:sweep-size" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "0")
+    SWEEP_SIZE=$(spawn_tag spawn:sweep-size)
 
-    SWEEP_INDEX=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:sweep-index" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "0")
+    SWEEP_INDEX=$(spawn_tag spawn:sweep-index)
 
     # Query all spawn:param:* tags
-    PARAM_TAGS=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:param:*" \
-        --query 'Tags[*].[Key,Value]' --output text 2>/dev/null || echo "")
+    PARAM_TAGS=$(spawn_tag 'spawn:param:*' 'Tags[*].[Key,Value]')
 
     # Create parameter sweep environment file
     cat > /etc/profile.d/spawn-params.sh <<EOFPARAMS
@@ -1307,12 +1376,8 @@ if [ -s /etc/spawn/command ]; then
     WORKFLOW_COMMAND="(embedded)"
     STEP_NAME=""
 else
-    WORKFLOW_COMMAND=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:command" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "None")
-    STEP_NAME=$(aws ec2 describe-tags --region $REGION \
-        --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:step" \
-        --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+    WORKFLOW_COMMAND=$(spawn_tag spawn:command)
+    STEP_NAME=$(spawn_tag spawn:step)
 fi
 
 if [ "$WORKFLOW_COMMAND" != "None" ] && [ -n "$WORKFLOW_COMMAND" ]; then
@@ -1536,17 +1601,11 @@ fi
 echo "Creating login banner..."
 
 # Get all spore tags for the banner
-TTL_TAG=$(aws ec2 describe-tags --region $REGION \
-    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:ttl" \
-    --query 'Tags[0].Value' --output text 2>/dev/null || echo "disabled")
+TTL_TAG=$(spawn_tag spawn:ttl)
 
-IDLE_TIMEOUT_TAG=$(aws ec2 describe-tags --region $REGION \
-    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:idle-timeout" \
-    --query 'Tags[0].Value' --output text 2>/dev/null || echo "disabled")
+IDLE_TIMEOUT_TAG=$(spawn_tag spawn:idle-timeout)
 
-ON_COMPLETE_TAG=$(aws ec2 describe-tags --region $REGION \
-    --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=spawn:on-complete" \
-    --query 'Tags[0].Value' --output text 2>/dev/null || echo "disabled")
+ON_COMPLETE_TAG=$(spawn_tag spawn:on-complete)
 
 # Create the banner with optional job array info
 if [ "$JOB_ARRAY_ID" != "None" ]; then
@@ -1622,7 +1681,8 @@ echo "✅ Login banner created"
 # was after the --command had started and before spored did, so the workload
 # ran on an instance with no TTL (#1274). spored is started above now, and a
 # failure here is reported, not fatal.
-if dnf install -y acpid 2>/dev/null || yum install -y acpid 2>/dev/null; then
+# Checked for first: Ubuntu has neither package manager (#1490).
+if { command -v dnf >/dev/null 2>&1 && dnf install -y acpid 2>/dev/null; } || { command -v yum >/dev/null 2>&1 && yum install -y acpid 2>/dev/null; }; then
     systemctl enable --now acpid 2>/dev/null || echo "acpid installed but not started; stop/terminate will not shut down gracefully"
 else
     echo "acpid not installed; stop/terminate will not shut down gracefully"

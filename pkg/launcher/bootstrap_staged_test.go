@@ -75,6 +75,15 @@ func TestStagedFilesAreTheInlineFiles(t *testing.T) {
 				if !strings.Contains(out, scfg.StagedFiles.SHA256) {
 					t.Error("the staged bootstrap does not carry the object's sha256")
 				}
+				// The fetch needs spawn_need_aws (#1490). The inline bootstrap has
+				// the body's; a release stub fetches the files before the body, so
+				// it carries its own copy, once, which the inline one does not.
+				if n := strings.Count(out, awsCLIInstallFunc()); n != 1 {
+					t.Fatalf("the staged bootstrap defines spawn_need_aws %d times, want once", n)
+				}
+				if version != "" {
+					out = strings.Replace(out, awsCLIInstallFunc(), "", 1)
+				}
 				obj := string(StagedFilesObject(cfg.Command, cfg.TaskFlushScript))
 				spliced := strings.Replace(out, fetch, obj, 1)
 				if got, want := hoistedTree(t, "staged+object", spliced), hoistedTree(t, "inline", inline); got != want {

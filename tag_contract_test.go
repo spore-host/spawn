@@ -37,7 +37,8 @@ import (
 //	reads:  index on the right-hand side m["spawn:x"]; `case "spawn:x":`;
 //	        `== "spawn:x"`; an argument to a get/lookup/has/read call; an EC2
 //	        filter "tag:spawn:x" or tagprefix.FilterTag; shell
-//	        `Name=key,Values=spawn:x` and `Key==` + "`spawn:x`"
+//	        `Name=key,Values=spawn:x`, `Key==` + "`spawn:x`" and the Linux
+//	        bootstrap's `$(spawn_tag spawn:x)` (#1490)
 //
 // spelled as the literal, as tagprefix.Tag("x"), or as a string constant
 // holding the key. Every non-test .go file is scanned, nested lambda modules
@@ -203,7 +204,7 @@ type tagScan struct {
 var (
 	tagKeyRe = regexp.MustCompile(`^spawn:[a-z0-9][a-z0-9-]*(:[a-z0-9-]*)?$`)
 	// Shell spellings inside generated scripts.
-	shellReadRe  = regexp.MustCompile(`Name=key,Values=(spawn:[a-z0-9:-]+)|Key==` + "`" + `(spawn:[a-z0-9:-]+)` + "`")
+	shellReadRe  = regexp.MustCompile(`Name=key,Values=(spawn:[a-z0-9:-]+)|Key==` + "`" + `(spawn:[a-z0-9:-]+)` + "`" + `|\$\(spawn_tag '?(spawn:[a-z0-9:-]+)`)
 	shellWriteRe = regexp.MustCompile(`Key=(spawn:[a-z0-9:-]+),Value=`)
 	readCallRe   = regexp.MustCompile(`(?i)^(get|lookup|has|read|parse|tag(value|s?or)?|value|must)|(get|lookup|value)$`)
 	writeCallRe  = regexp.MustCompile(`(?i)^(set|put|append|add|update|write|create|with|tag(ged)?resource)|(set|unique)$`)
@@ -441,7 +442,7 @@ func scanTagUses(t *testing.T, root string) *tagScan {
 						return true
 					}
 					for _, m := range shellReadRe.FindAllStringSubmatch(s, -1) {
-						read(strings.TrimSuffix(m[1]+m[2], "*"), lit.Pos())
+						read(strings.TrimSuffix(m[1]+m[2]+m[3], "*"), lit.Pos())
 					}
 					for _, m := range shellWriteRe.FindAllStringSubmatch(s, -1) {
 						write(m[1], lit.Pos())
