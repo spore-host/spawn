@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--mpi` installs Open MPI on an Ubuntu `--ami`** (#1487). The MPI user data installed Open MPI only with `yum`, so without `--skip-mpi-install` every Ubuntu member failed at `yum: command not found`; since #1485 this failure is recorded and the cohort terminates. It now detects the package manager with `command -v`. `yum` is tried first, so AL2 and AL2023 are unchanged. Otherwise it uses `apt-get`, installing Ubuntu's `openmpi-bin` and `libopenmpi-dev` with `--no-install-recommends`: Open MPI 4.1.2 on 22.04, 4.1.6 on 24.04, and `mpirun` in `/usr/bin`.
+  - `apt-get update` and the install are retried together, up to 10 times 15 s apart, because on first boot apt-daily or cloud-init can hold apt's lists lock, and `DPkg::Lock::Timeout` does not wait for that lock. After the last try the failure is recorded like any other setup failure (`mpi-bootstrap`).
+  - A base with neither `yum` nor `apt-get` fails closed with `spawn: no yum or apt-get to install Open MPI; use an image with it and --skip-mpi-install`. spawn cannot refuse this before launch: all it knows about an AMI then is whether it is Windows, which already refuses `--mpi`.
+  - Rank 0's cluster-key owner is now read from IMDSv2 when the bootstrap did not set `INSTANCE_ID`. On Ubuntu the bootstrap does not set it, because Ubuntu has no `ec2-metadata`, and the cohort could never hand out rank 0's key.
+  - With `--efa`, the distribution's Open MPI still runs `mpirun`, as on AL, not the EFA installer's `/opt/amazon/openmpi` (#1491).
+  - Verified in an `ubuntu:24.04` container, as root, with the rendered script, the real `apt-get` and Open MPI 4.1.6: install, hostfile, `mpirun` through the rank wrapper, and a `completed` record. Not yet verified on EC2. The published bootstrap body does not change; the MPI user data grows by about 285 gzipped bytes.
+
 ### Changed
 
 - **An `--mpi-command` rank ends when its command's own process exits, not when the last process holding its output does** (#1479, the `--mpi-command` twin of #1459).
@@ -28,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Without `--command`** (an interactive instance, or one whose workload is `--user-data`, the container, MPI or the task runner), the same record is written, because none of that user data runs after the failure.
   - **Once `--command` has started, or the bootstrap has finished**, the guard writes nothing: the command's own record, or whatever runs after the bootstrap, owns the outcome. On an MPI member a failure before the MPI user data writes the `bootstrap` record and the MPI script never runs; a failure inside the MPI user data writes only its `mpi-bootstrap` record (#1483). One record either way.
 - **`--mpi-command` no longer fails at random with exit 127 because rank 0 started mpirun before a peer had written its MPI files** (#1486, introduced by #1479). Rank 0's pre-mpirun gate checked only that each peer accepted SSH. A peer gets rank 0's key over SSM before its own bootstrap writes `/etc/spawn/mpi-rank`, so mpirun could exec that file on a peer that did not have it yet (`bash: /etc/spawn/mpi-rank: No such file or directory`). It failed a healthy 2-node AL2 cohort, 0.9 s late. AL2023 missed it by 0.14 s. Now every member writes `/etc/spawn/mpi-node-ready`, holding the job array ID, as the last step of its MPI setup: after the install, EFA, the hostfile and the `--mpi-command` files. Rank 0 waits, over the same SSH login, until every member holds the marker for this cohort, so a marker an image inherited from a parent cohort does not count. The wait keeps its 600 s bound and its `mpi-bootstrap` failure record. Its messages now read `all peers ready after Ns` and `N peer(s) not ready (no SSH, or MPI setup unfinished)`. The published bootstrap body does not change; the MPI user data grows by about 120 gzipped bytes.
+
+### Security
+
+- **`/etc/profile.d/mpi.sh` no longer puts the current directory on every login shell's library path** (#1487). It set `LD_LIBRARY_PATH=/usr/lib64/openmpi/lib:$LD_LIBRARY_PATH`. With `LD_LIBRARY_PATH` unset, which is the usual case, the value ends in an empty entry, and the dynamic loader reads that as `.`. Every login shell on an MPI member then searched the current directory for shared libraries. It now appends `:$LD_LIBRARY_PATH` only when the variable is set.
 
 ## [0.154.0] - 2026-11-01
 
