@@ -28,7 +28,7 @@ type efaWorkflowFile struct {
 	Permissions map[string]string `yaml:"permissions"`
 	Jobs        map[string]struct {
 		Permissions map[string]string `yaml:"permissions"`
-		Steps       []efaWFStep          `yaml:"steps"`
+		Steps       []efaWFStep       `yaml:"steps"`
 	} `yaml:"jobs"`
 }
 

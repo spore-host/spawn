@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // The #1505 gates. --efa runs the EFA installer as root, so its tarball must be
@@ -35,8 +37,12 @@ func curlLog(t *testing.T, r sandboxRun) []string {
 func leftovers(t *testing.T, root string) []string {
 	t.Helper()
 	var found []string
-	err := filepath.Walk(filepath.Join(root, "tmp"), func(p string, info os.FileInfo, err error) error {
+	tmp := filepath.Join(root, "tmp")
+	err := filepath.Walk(tmp, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
+			if treewalk.Vanished(tmp, p, err) {
+				return nil
+			}
 			return err
 		}
 		n := info.Name()

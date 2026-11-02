@@ -180,7 +180,7 @@ func TestVerifyRefusesAnythingButThePinnedSignedTarball(t *testing.T) {
 		ok    bool
 	}{
 		"signed by the pinned key, the pinned sha256": {func(sb *pinSandbox) { sb.pinSum = sb.publish("1.51.0", tgz, sb.pinned) }, true},
-		"signed by another key": {func(sb *pinSandbox) { sb.pinSum = sb.publish("1.51.0", tgz, sb.other) }, false},
+		"signed by another key":                       {func(sb *pinSandbox) { sb.pinSum = sb.publish("1.51.0", tgz, sb.other) }, false},
 		"altered after signing": {func(sb *pinSandbox) {
 			sb.pinSum = sb.publish("1.51.0", tgz, sb.pinned)
 			sb.write("origin/aws-efa-installer-1.51.0.tar.gz", []byte("stand-in EFA installer 1.51.0, altered\n"), 0o644)
