@@ -46,6 +46,12 @@ type gpgHome struct {
 
 func newGPGHome(t *testing.T) *gpgHome {
 	t.Helper()
+	// scripts/mirror-awscli.sh runs only on the Linux release runner, and
+	// Windows has no /tmp (Git for Windows' gpg is on PATH there, so the
+	// LookPath below does not skip it).
+	if runtime.GOOS == "windows" {
+		t.Skip("gpg runs here as on the Linux release runner; not on Windows")
+	}
 	for _, tool := range []string{"gpg", "gpgconf"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not available", tool)
