@@ -44,7 +44,10 @@ const efaInstallerOrigin = "https://efa-installer.amazonaws.com/"
 // own file name, in each spawn-binaries-<region> bucket. The user data tries
 // the launch region's copy first, so a --no-public-ip member, which reaches S3
 // through the endpoint that flag requires but not efa-installer.amazonaws.com,
-// can still install it; the sha256 check applies to either source.
+// can still install it; the sha256 check applies to either source. The release
+// does not publish that copy yet (spawn#1507: it needs spawn/efa/* on the
+// release role), so until it does the mirror fetch fails fast and the origin
+// serves the tarball.
 const efaInstallerMirrorPrefix = "spawn/efa/"
 
 // efaInstallerFile is the pinned tarball's file name, the same at AWS and in

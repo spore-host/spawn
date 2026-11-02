@@ -43,4 +43,9 @@ regexes = [
   # caught.
   '''const KeyFingerprint = "FB5DB77FD5C118B80511ADA8A6310ACC4672475C"$''',
   '''readonly AWSCLI_KEY_FPR=FB5DB77FD5C118B80511ADA8A6310ACC4672475C$''',
+  # AWS's EFA installer signing key FINGERPRINT (#1505), pinned in the EFA
+  # installer bump tooling and published in the EC2 User Guide's EFA page; the
+  # same reasoning and the same exact-line, exact-value form.
+  '''const KeyFingerprint = "4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC"$''',
+  '''readonly EFA_KEY_FPR=4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC$''',
 ]
