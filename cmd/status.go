@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -156,24 +157,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	sshCmd.Stderr = &stderrBuf
 
 	// In check-complete mode, propagate spored's exit code (0/1/2/3) as spawn's
-	// own exit code so callers can poll it. SSH passes through the remote exit
-	// status; SSH's own connection failures use 255, which we map to 3 (error).
+	// own exit code so callers can poll it. When SSH itself fails, ask spored
+	// over SSM instead (#1493); see checkCompleteViaSSH.
 	if statusCheckComplete {
-		runErr := sshCmd.Run()
-		if runErr != nil {
-			if exitErr, ok := runErr.(*exec.ExitError); ok {
-				code := exitErr.ExitCode()
-				if code == 255 {
-					// SSH-level failure (couldn't reach the instance): error.
-					fmt.Fprintf(os.Stderr, "ssh: %s%s\n", stdoutBuf.String(), stderrBuf.String())
-					os.Exit(3)
-				}
-				os.Exit(code)
-			}
-			fmt.Fprintf(os.Stderr, "failed to run status: %v\n", runErr)
-			os.Exit(3)
+		runSSH := func() (int, string, error) {
+			code, err := sshExitStatus(sshCmd.Run())
+			return code, stdoutBuf.String() + stderrBuf.String(), err
 		}
-		os.Exit(0)
+		os.Exit(checkCompleteViaSSH(ctx, runSSH, client.RunShellScript, instance, os.Stderr))
 	}
 
 	runErr := sshCmd.Run()
@@ -500,27 +491,18 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 	// bug this function's siblings had, #540). Keep them separate here too:
 	// spored's log.Printf diagnostics land in res.Stderr and must never be
 	// concatenated into the value we print as stdout.
+	if checkComplete {
+		os.Exit(checkCompleteOverSSM(ctx, client.RunShellScript, instance, os.Stderr))
+	}
 	cmd := "/usr/local/bin/spored status"
-	switch {
-	case checkComplete:
-		cmd += " --check-complete"
-	case jsonOut:
+	if jsonOut {
 		cmd += " --output json"
 	}
 
-	res, err := client.RunShellScript(ctx, instance.Region, instance.InstanceID, cmd, 60*time.Second)
+	res, err := client.RunShellScript(ctx, instance.Region, instance.InstanceID, cmd, statusSSMTimeout)
 	if err != nil {
 		// Couldn't reach the instance over SSM (no agent / no profile / timeout).
-		if checkComplete {
-			fmt.Fprintf(os.Stderr, "status (ssm): %v\n", err)
-			os.Exit(3)
-		}
 		return fmt.Errorf("failed to get status over SSM (instance is keyless; SSM required): %w", err)
-	}
-
-	if checkComplete {
-		// spored's 0/1/2/3 comes back as the SSM ResponseCode.
-		os.Exit(int(res.ResponseCode))
 	}
 
 	rate := resolveStatusRate(ctx, instance, clientSpotPriceLookup(client))
@@ -537,6 +519,98 @@ func runStatusOverSSM(ctx context.Context, client *aws.Client, instance *aws.Ins
 		sporedUpgradeNotice(instance.Tags["spawn:spored-version"], res.Stdout, instance.InstanceID),
 	}, jsonOut, spawnVerbose)
 	return nil
+}
+
+// statusSSMTimeout bounds the one SSM RunCommand `spawn status` sends.
+const statusSSMTimeout = 60 * time.Second
+
+// sshTransportFailure is the exit status ssh(1) uses for its own errors: the
+// connection, the host key or authentication failed, so the remote command
+// never ran. Any other status is the remote command's.
+const sshTransportFailure = 255
+
+// Exit codes of `spawn status --check-complete`, as its flag help documents
+// them; spored's own `status --check-complete` uses the same four.
+const (
+	checkCompleteDone    = 0
+	checkCompleteFailed  = 1
+	checkCompleteRunning = 2
+	checkCompleteError   = 3
+)
+
+// ssmCheckCompleteCommand asks spored for the completion state over SSM, which
+// runs as root and so needs no sudo.
+const ssmCheckCompleteCommand = "/usr/local/bin/spored status --check-complete"
+
+// sshExitStatus turns the error from running ssh into ssh's exit status. err is
+// non-nil only when ssh could not be run at all (no ssh binary, say).
+func sshExitStatus(runErr error) (int, error) {
+	if runErr == nil {
+		return 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return exitErr.ExitCode(), nil
+	}
+	return -1, runErr
+}
+
+// checkCompleteViaSSH is `spawn status --check-complete` for a running
+// instance spawn holds a key and a public IP for. It asks spored over SSH and
+// returns its exit code; if ssh could not run spored at all (ssh's own exit
+// status 255, or ssh would not start), it asks spored over SSM instead.
+//
+// Why the fallback (#1493): the SSH user comes from the spawn:local-username
+// tag, and a bootstrap that fails before it creates that user leaves nobody for
+// the key to log in as. spored has the failed record and exits 1, but spawn
+// reported 3 (error), so a caller polling for completion, which is the
+// documented way to keep a failed instance, never saw "failed". SSM runs as
+// root and needs no login user, key or public IP, which is why `spawn connect`
+// and keyless `spawn status` already use it.
+//
+// runSSH runs `spored status --check-complete` over SSH and returns ssh's exit status, its output
+// for a diagnostic, and an error only if ssh could not run. run is
+// (*aws.Client).RunShellScript in production.
+func checkCompleteViaSSH(ctx context.Context, runSSH func() (int, string, error), run ssmShellRunner, instance *aws.InstanceInfo, stderr io.Writer) int {
+	code, out, err := runSSH()
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "failed to run ssh: %v\n", err)
+	case code == sshTransportFailure:
+		fmt.Fprintf(stderr, "ssh: %s\n", strings.TrimSpace(out))
+	default:
+		// The remote command ran, and this is its answer.
+		return code
+	}
+	fmt.Fprintf(stderr, "status: SSH could not reach spored on %s; asking over SSM instead\n", instance.InstanceID)
+	return checkCompleteOverSSM(ctx, run, instance, stderr)
+}
+
+// checkCompleteOverSSM runs ssmCheckCompleteCommand over SSM RunCommand and
+// returns spawn's exit code for it; an SSM-level failure is 3 (error).
+func checkCompleteOverSSM(ctx context.Context, run ssmShellRunner, instance *aws.InstanceInfo, stderr io.Writer) int {
+	res, err := run(ctx, instance.Region, instance.InstanceID, ssmCheckCompleteCommand, statusSSMTimeout)
+	if err != nil {
+		// Couldn't reach the instance over SSM (no agent / no profile / timeout).
+		fmt.Fprintf(stderr, "status (ssm): %v\n", err)
+		return checkCompleteError
+	}
+	return checkCompleteCodeFromSSM(res, stderr)
+}
+
+// checkCompleteCodeFromSSM maps an SSM invocation of ssmCheckCompleteCommand to
+// spawn's exit code. spored's 0/1/2/3 comes back as the ResponseCode. Anything
+// else is not spored's answer (a timed-out or cancelled invocation reports -1,
+// a missing spored 127), so it is 3 (error): passing it through would hand a
+// polling caller a code the contract does not have.
+func checkCompleteCodeFromSSM(res *aws.SSMRunResult, stderr io.Writer) int {
+	switch code := int(res.ResponseCode); code {
+	case checkCompleteDone, checkCompleteFailed, checkCompleteRunning, checkCompleteError:
+		return code
+	default:
+		fmt.Fprintf(stderr, "status (ssm): spored status --check-complete ended %s with code %d\n", res.Status, code)
+		return checkCompleteError
+	}
 }
 
 // emitStatus writes spored's status output and spawn's own annotations to the
