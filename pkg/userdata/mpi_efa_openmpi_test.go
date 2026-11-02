@@ -34,14 +34,19 @@ func markedMpirun(marker string) string {
 // installs the marked mpirun at <host root>/opt/amazon/openmpi/bin, as the
 // real installer does at /opt/amazon/openmpi; or, with openmpi=false, installs
 // nothing there (an installer run with --minimal or --mpi=none).
+//
+// On an apt-get base it fails as the real installer did on a stock Ubuntu
+// AMI (live, spawn#1491) unless 'apt-get update' ran first: it apt-installs
+// its dependencies and the image's indexes are stale.
 func efaInstallerTar(openmpi bool) string {
+	const staleApt = `if command -v apt-get >/dev/null && ! grep -q "^apt-get update" "$STUB_ROOT/apt.log" 2>/dev/null; then echo "E: Unable to locate package environment-modules" >&2; exit 1; fi`
 	install := ""
 	if openmpi {
 		install = `d="$(cd ../.. && pwd)/opt/amazon/openmpi/bin"; mkdir -p "$d"; cat "$STUB_ROOT/efa-mpirun" > "$d/mpirun"; chmod +x "$d/mpirun"`
 	}
 	return `#!/bin/bash
 mkdir -p aws-efa-installer
-printf '#!/bin/bash\necho "efa_installer.sh $*" >> "$STUB_ROOT/efa.log"\n%s\n' '` + install + `' > aws-efa-installer/efa_installer.sh
+printf '#!/bin/bash\necho "efa_installer.sh $*" >> "$STUB_ROOT/efa.log"\n%s\n%s\n' '` + staleApt + `' '` + install + `' > aws-efa-installer/efa_installer.sh
 chmod +x aws-efa-installer/efa_installer.sh
 `
 }
@@ -177,4 +182,34 @@ func TestMPIWithEFAFailsClosedWithoutTheInstallersOpenMPI(t *testing.T) {
 	if log, _ := r.read(t, "var/log/spawn-command.log"); !strings.Contains(log, "no Open MPI at "+r.root+"/opt/amazon/openmpi after the EFA installer") {
 		t.Errorf("the failure does not name the missing Open MPI:\n%s", log)
 	}
+}
+
+// On Ubuntu the installer needs fresh apt indexes, and with --efa the Open
+// MPI install that refreshed them is skipped: every Ubuntu --efa member
+// failed closed in the installer (live, spawn#1491). The update must run, and
+// a busy lock is retried with the same bound as the Open MPI install.
+func TestMPIWithEFARefreshesAptIndexes(t *testing.T) {
+	r := efaCohort(t, true, sandboxOpts{noMPI: true, apt: true, stubs: map[string]string{"apt-get": strings.Replace(failingApt, "FAILS", "2", 1)}})
+	if r.rc != 0 {
+		t.Fatalf("rank 0 exited %d with --efa on an apt base", r.rc)
+	}
+	// The sandbox runs all 3 members against one stub counter: rank 0's two
+	// busy locks, then one successful update per member.
+	if u := aptCalls(t, r, "update"); u != 5 {
+		t.Errorf("apt-get update ran %d times, want 5 (two busy locks, then one per member)", u)
+	}
+	if log, _ := r.read(t, "efa.log"); !strings.Contains(log, "efa_installer.sh -y -g") {
+		t.Errorf("the EFA installer did not run: %q", log)
+	}
+}
+
+func TestMPIWithEFAAptGivesUpAndFailsClosed(t *testing.T) {
+	r := efaCohort(t, true, sandboxOpts{noMPI: true, apt: true, stubs: map[string]string{"apt-get": strings.Replace(failingApt, "FAILS", "1000", 1)}})
+	if u := aptCalls(t, r, "update"); u != 10 {
+		t.Errorf("apt-get update ran %d times, want the bound of 10", u)
+	}
+	if log, ok := r.read(t, "efa.log"); ok {
+		t.Errorf("the EFA installer ran without fresh indexes: %q", log)
+	}
+	assertSetupFailed(t, r, 1)
 }

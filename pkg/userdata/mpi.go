@@ -368,6 +368,11 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //     /opt/amazon/openmpi5 by default, since installer 1.30.0; 4.1 is the one
 //     AWS's guide puts on PATH). An image that already carries a distribution
 //     Open MPI keeps it, but out of this script's PATH.
+//   - On apt-get bases the installer apt-installs its own dependencies, so
+//     'apt-get update' runs first, retried with the Open MPI install's bound.
+//     That install ran the only update, and a stock Ubuntu AMI's indexes are
+//     stale: live, every Ubuntu --efa member failed in the installer with
+//     'Unable to locate package environment-modules' until this was added.
 //   - mpi.sh, for --efa, puts /opt/amazon/openmpi/bin and /opt/amazon/efa/bin
 //     (fi_info, fi_pingpong) first, and /opt/amazon/openmpi/lib64 and /lib
 //     (AL and Ubuntu lay it out differently) first in LD_LIBRARY_PATH, keeping
@@ -471,6 +476,18 @@ cd /tmp/ || exit 1
 curl -O https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz
 tar -xf aws-efa-installer-latest.tar.gz
 cd aws-efa-installer || exit 1
+if command -v apt-get >/dev/null; then
+  # The installer apt-installs its dependencies (environment-modules among
+  # them) and needs fresh indexes: a stock Ubuntu AMI's are stale, and with
+  # --efa the Open MPI install above, which ran the only update, is skipped
+  # (#1491). Same bound as that install; spawn_mpi_exit records a failure.
+  SPAWN_APT=0
+  until apt-get update; do
+    SPAWN_APT=$((SPAWN_APT + 1))
+    [ "$SPAWN_APT" -lt 10 ] || exit 1
+    sleep 15
+  done
+fi
 ./efa_installer.sh -y -g
 # --efa runs the installer's Open MPI (#1491): see mpi.go.
 [ -x /opt/amazon/openmpi/bin/mpirun ] || { echo "spawn: no Open MPI at /opt/amazon/openmpi after the EFA installer" | tee -a /var/log/spawn-command.log >&2; exit 1; }
