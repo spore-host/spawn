@@ -24,7 +24,9 @@ func TestUserData_Shellcheck(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				shellcheckgate.Check(t, "pkg/userdata.GenerateMPIUserData", script)
+				// The template, by name: its rank wrapper (#1479) is a nested
+				// #!/bin/bash here-doc, which makes it a discovered generator.
+				shellcheckgate.Check(t, "pkg/userdata.mpiUserDataTemplate", script)
 			})
 		}
 	})

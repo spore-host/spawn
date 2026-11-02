@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An `--mpi-command` rank ends when its command's own process exits, not when the last process holding its output does** (#1479, the `--mpi-command` twin of #1459).
+  mpirun ran each rank as `bash /etc/spawn/mpi-command`, and Open MPI keeps a rank, and so the job, running until the I/O-forwarding channels it gave the rank close. A background job the rank never waited for (`sleep 600 &`, an un-waited `aws s3 sync ... &`) inherits them, so mpirun, `/tmp/SPAWN_EXITCODE` and every member's `--on-complete` waited out its whole lifetime: 600 s on a live 2-node run, bounded only by the TTL.
+  - **Now** every member writes a per-rank wrapper, `/etc/spawn/mpi-rank`, and mpirun runs it instead of the command. It runs the command with stdout and stderr on a FIFO a reader copies to the rank's output, and when the command exits gives that reader the same 10 s drain as `--command`, so the rank's last lines are forwarded. With nothing holding the output there is no wait. Past 10 s it logs `spawn: rank N: not waiting for processes still holding --mpi-command's output after 10s; they run on:` with their PIDs and command lines (in rank 0's `/var/log/spawn-command.log`) and exits, and mpirun sees the rank end.
+  - **The exit code is unchanged**: a rank exits with its command's code, 128+n for a signal, and mpirun reports it as before. When a rank's shell is killed by signal n, mpirun's message now names exit code 128+n rather than the signal; the code mpirun returns (128+n) is the same. A rank's stderr is merged into its stdout at the rank instead of in rank 0's log, which already held one merged stream.
+  - **A forgotten background job is now cut off** when `--on-complete` terminates the cohort: `wait` for any the result depends on. A straggler that writes again after the drain gets SIGPIPE.
+  - Verified with a real `mpirun -np 2` on one host under Open MPI 4.1.2 (the AL2023 package), 4.0.1 (AL2, bash 4.2) and 5.0. The published bootstrap body does not change; the MPI user data grows by about 360 gzipped bytes.
+
 ## [0.154.0] - 2026-11-01
 
 ### Added
