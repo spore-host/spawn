@@ -405,7 +405,7 @@ func TestBootstrapUsesAWSOnlyAfterProvidingIt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The first fail-closed spawn_need_aws: `spawn_need_aws || <exit or retire>`.
+		// The first fail-closed spawn_need_aws: `spawn_need_aws REGION || <exit or retire>`.
 		var provided uint
 		found := false
 		syntax.Walk(f, func(n syntax.Node) bool {
@@ -414,7 +414,7 @@ func TestBootstrapUsesAWSOnlyAfterProvidingIt(t *testing.T) {
 				return true
 			}
 			c, ok := b.X.Cmd.(*syntax.CallExpr)
-			if !ok || len(c.Args) != 1 || c.Args[0].Lit() != "spawn_need_aws" {
+			if !ok || len(c.Args) == 0 || c.Args[0].Lit() != "spawn_need_aws" {
 				return true
 			}
 			stops := false
