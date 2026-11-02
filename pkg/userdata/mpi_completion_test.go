@@ -157,7 +157,7 @@ func TestMPIPeerReadinessFailureSignalsReachablePeers(t *testing.T) {
 	if !ok || prec.Status != "failed" {
 		t.Errorf("reachable peer %s record = %+v (exists=%v), want status=failed", peerA, prec, ok)
 	}
-	if log, _ := r.read(t, "var/log/spawn-command.log"); !strings.Contains(log, "never accepted SSH") {
+	if log, _ := r.read(t, "var/log/spawn-command.log"); !strings.Contains(log, "peer(s) not ready") {
 		t.Errorf("the readiness failure is not reported in /var/log/spawn-command.log:\n%s", log)
 	}
 }

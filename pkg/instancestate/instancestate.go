@@ -80,7 +80,8 @@ var Paths = []string{
 	// which flushes to the SOURCE's results prefix.
 	"/etc/spawn/command",
 	"/etc/spawn/mpi-command",
-	"/etc/spawn/mpi-rank", // the --mpi-command rank wrapper (#1479), rewritten each launch
+	"/etc/spawn/mpi-rank",       // the --mpi-command rank wrapper (#1479), rewritten each launch
+	"/etc/spawn/mpi-node-ready", // a member's MPI setup finished (#1486); holds the cohort ID
 	"/etc/spawn/task-flush.sh",
 	// What the bootstrap stub fetched for the launch.
 	"/etc/spawn/staged-files.sh",

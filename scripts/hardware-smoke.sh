@@ -346,7 +346,7 @@ if [ -n "$RANK0" ]; then
   peer_wait=$(ssm "$RANK0" "cat /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null" 2>/dev/null)
   peer_wait="${peer_wait//[^0-9]/}"
   if [ -n "$peer_wait" ]; then
-    echo "     peer readiness: all peers accepted SSH after ${peer_wait}s"
+    echo "     peer readiness: all peers ready (SSH and MPI setup) after ${peer_wait}s"
   else
     echo "     peer readiness: marker absent (pre-#752 spored, or the poll did not run)"
   fi
