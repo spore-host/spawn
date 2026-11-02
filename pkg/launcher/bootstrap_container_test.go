@@ -79,7 +79,9 @@ type containerBootRun struct {
 	rc   int
 }
 
-func (r containerBootRun) read(name string) string { return string(readOr(filepath.Join(r.root, name))) }
+func (r containerBootRun) read(name string) string {
+	return string(readOr(filepath.Join(r.root, name)))
+}
 
 // containerBoot runs the inline bootstrap for cfg in image. withAWS puts the
 // tag-serving aws stand-in on PATH; without it the image has no aws CLI.
