@@ -431,6 +431,18 @@ func TestBootstrapUsesAWSOnlyAfterProvidingIt(t *testing.T) {
 			}
 			return true
 		})
+		// ...and it must be defined by then: the stub fetches staged files
+		// before the body, which defines it, has been fetched.
+		defined := false
+		syntax.Walk(f, func(n syntax.Node) bool {
+			if fd, ok := n.(*syntax.FuncDecl); ok && fd.Name.Value == "spawn_need_aws" && fd.Pos().Offset() < provided {
+				defined = true
+			}
+			return true
+		})
+		if found && !defined {
+			t.Errorf("%s: calls spawn_need_aws (offset %d) before defining it: the call fails with 127", name, provided)
+		}
 		calls, guarded := toolCalls(t, name, script, false)
 		isGuarded := map[toolCall]bool{}
 		for _, g := range guarded {
