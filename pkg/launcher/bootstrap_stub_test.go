@@ -318,19 +318,21 @@ func calleeName(e ast.Expr) string {
 
 // stubServer is a stand-in for IMDS and the spawn-binaries buckets.
 type stubServer struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	objs map[string][]byte // "<region>/<key>" -> content
-	hits map[string]int
+	srv     *httptest.Server
+	mu      sync.Mutex
+	objs    map[string][]byte // "<region>/<key>" -> content
+	hits    map[string]int
+	missing map[string]bool // IMDS paths answered 404
 }
 
 func newStubServer(t *testing.T, region string) *stubServer {
 	t.Helper()
-	s := &stubServer{objs: map[string][]byte{}, hits: map[string]int{}}
+	s := &stubServer{objs: map[string][]byte{}, hits: map[string]int{}, missing: map[string]bool{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.hits[r.URL.Path]++
 		body, ok := s.objs[strings.TrimPrefix(r.URL.Path, "/b/")]
+		missing := s.missing[r.URL.Path]
 		s.mu.Unlock()
 		switch {
 		case r.URL.Path == "/imds/latest/api/token":
@@ -339,6 +341,9 @@ func newStubServer(t *testing.T, region string) *stubServer {
 			body, ok = []byte(region), true
 		case r.URL.Path == "/imds/latest/meta-data/instance-id":
 			body, ok = []byte("i-0test"), true
+		}
+		if missing {
+			body, ok = nil, false
 		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -398,7 +403,7 @@ func newBootSandbox(t *testing.T, srv *stubServer, aws awsMode, standIns map[str
 			t.Fatal(err)
 		}
 	}
-	for _, tool := range []string{"bash", "curl", "openssl", "base64", "cut", "rm", "mkdir", "cat", "uname", "mktemp", "awk", "chmod", "mv", "dirname", "tr", "sed", "grep", "head", "cp", "shasum", "perl", "env", "tee", "touch", "date", "mkfifo"} {
+	for _, tool := range []string{"bash", "curl", "openssl", "base64", "cut", "rm", "mkdir", "cat", "uname", "mktemp", "awk", "chmod", "mv", "dirname", "tr", "sed", "grep", "head", "cp", "shasum", "perl", "env", "tee", "touch", "date", "mkfifo", "python3"} {
 		if p, err := exec.LookPath(tool); err == nil {
 			if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
 				t.Fatal(err)
@@ -423,6 +428,9 @@ func newBootSandbox(t *testing.T, srv *stubServer, aws awsMode, standIns map[str
 	}
 	for name, body := range standIns {
 		_ = os.Remove(filepath.Join(bin, name))
+		if body == "" {
+			continue // "" removes the tool: absent from the image
+		}
 		writeExec(t, filepath.Join(bin, name), body)
 	}
 	return &bootSandbox{t: t, dir: dir, srv: srv}
@@ -439,6 +447,7 @@ func (sb *bootSandbox) run(script string) (string, error) {
 		"/dev/console", filepath.Join(sb.dir, "console"),
 		"/usr/local/bin/spored", filepath.Join(sb.dir, "spored"),
 		"http://169.254.169.254", sb.srv.srv.URL+"/imds",
+		"https://awscli.amazonaws.com/", sb.srv.srv.URL+"/b/awscli/",
 		"https://spawn-binaries-", sb.srv.srv.URL+"/b/",
 		// The regional names the stub and the body use (#1436); a global
 		// .s3.amazonaws.com name is left alone, so it 404s here.
@@ -699,6 +708,14 @@ func fullBoot(t *testing.T, cfg BootstrapConfig, failSystemctl string, opts ...b
 type bootOpts struct {
 	standIns map[string]string
 	appended string
+	// imdsMissing are IMDS paths (e.g. "/latest/meta-data/instance-id") the
+	// stand-in IMDS answers 404.
+	imdsMissing []string
+	// edit rewrites the rendered script before it runs (e.g. to pin a test
+	// AWS CLI zip's sha256).
+	edit func(string) string
+	// setup runs against the stand-in bucket before the boot.
+	setup func(*stubServer)
 }
 
 // fullBootPinned is fullBoot for a bootstrap pinned to spored version pin
@@ -752,6 +769,15 @@ func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publi
 			standIns[name] = body
 		}
 		script += o.appended
+		for _, p := range o.imdsMissing {
+			srv.missing["/imds"+p] = true
+		}
+		if o.edit != nil {
+			script = o.edit(script)
+		}
+		if o.setup != nil {
+			o.setup(srv)
+		}
 	}
 	sb := newBootSandbox(t, srv, awsTerminates, standIns)
 	out, err := sb.run(script)

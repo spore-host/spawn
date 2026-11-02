@@ -682,8 +682,8 @@ const (
 // /usr/local/bin/aws). Ubuntu has no unzip, so the zip is unpacked with
 // python3, which cloud-init itself runs on, keeping the modes the installer
 // needs. The zip's name carries the architecture as uname -m prints it. Any
-// failure returns 1, having said why (curl, sha256sum -c and python3 report
-// their own errors), and the callers fail closed. Filled in by
+// failure returns 1, having said why (curl and python3 report their own
+// errors), and the callers fail closed. Filled in by
 // awsCLIInstallFunc: the version, then the x86_64 and aarch64 sha256.
 const awsCLIInstallTemplate = `
 # spawn_need_aws: an aws CLI, installed when the image has none (#1490).
@@ -695,7 +695,7 @@ spawn_need_aws() {
     rm -rf /tmp/spawn-awscli
     mkdir -p /tmp/spawn-awscli
     curl -fsS --connect-timeout 10 --max-time 600 --retry 3 -o /tmp/spawn-awscli/c.zip "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-%[1]s.zip" &&
-        echo "$h  /tmp/spawn-awscli/c.zip" | sha256sum -c --quiet &&
+        { [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ] || { echo "spawn: the AWS CLI download is not AWS CLI %[1]s (sha256)" >&2; false; }; } &&
         python3 -c 'import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1]);[os.chmod(z.extract(i,sys.argv[2]),i.external_attr>>16&511 or 493) for i in z.infolist()]' /tmp/spawn-awscli/c.zip /tmp/spawn-awscli &&
         /tmp/spawn-awscli/aws/install >/dev/null &&
         command -v aws >/dev/null 2>&1 || r=1
@@ -1220,7 +1220,9 @@ if [ "$TIMEOUT_SECONDS" -gt 0 ]; then
     if ! grep -q "^ClientAliveInterval" /etc/ssh/sshd_config; then
         echo "ClientAliveInterval $SSH_INTERVAL" >> /etc/ssh/sshd_config
         echo "ClientAliveCountMax 3" >> /etc/ssh/sshd_config
-        systemctl reload sshd 2>/dev/null || service sshd reload 2>/dev/null || true
+        # systemctl only: every supported base runs systemd, and the service
+        # fallback was a tool the bases are not all known to ship (#1490).
+        systemctl reload sshd 2>/dev/null || true
     fi
 
     # Shell timeout (auto-logout idle shells)
@@ -1679,7 +1681,8 @@ echo "✅ Login banner created"
 # was after the --command had started and before spored did, so the workload
 # ran on an instance with no TTL (#1274). spored is started above now, and a
 # failure here is reported, not fatal.
-if dnf install -y acpid 2>/dev/null || yum install -y acpid 2>/dev/null; then
+# Checked for first: Ubuntu has neither package manager (#1490).
+if { command -v dnf >/dev/null 2>&1 && dnf install -y acpid 2>/dev/null; } || { command -v yum >/dev/null 2>&1 && yum install -y acpid 2>/dev/null; }; then
     systemctl enable --now acpid 2>/dev/null || echo "acpid installed but not started; stop/terminate will not shut down gracefully"
 else
     echo "acpid not installed; stop/terminate will not shut down gracefully"
