@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.155.0] - 2026-11-02
+
 ### Added
 
 - **`--mpi` installs Open MPI on an Ubuntu `--ami`** (#1487). The MPI user data installed Open MPI only with `yum`, so without `--skip-mpi-install` every Ubuntu member failed at `yum: command not found`; since #1485 this failure is recorded and the cohort terminates. It now detects the package manager with `command -v`. `yum` is tried first, so AL2 and AL2023 are unchanged. Otherwise it uses `apt-get`, installing Ubuntu's `openmpi-bin` and `libopenmpi-dev` with `--no-install-recommends`: Open MPI 4.1.2 on 22.04, 4.1.6 on 24.04, and `mpirun` in `/usr/bin`.
@@ -13247,7 +13249,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.154.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.155.0...HEAD
+[0.155.0]: https://github.com/spore-host/spawn/compare/v0.154.0...v0.155.0
 [0.154.0]: https://github.com/spore-host/spawn/compare/v0.153.0...v0.154.0
 [0.153.0]: https://github.com/spore-host/spawn/compare/v0.152.0...v0.153.0
 [0.152.0]: https://github.com/spore-host/spawn/compare/v0.151.0...v0.152.0
