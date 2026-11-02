@@ -750,6 +750,10 @@ func TestEveryMainPackageIsAPrincipal(t *testing.T) {
 		// Run by the weekly AWS CLI pin workflow with GITHUB_TOKEN only; it edits
 		// two files in the checkout and calls no AWS API.
 		"scripts/awsclipin": "the AWS CLI pin rewriter (#1495), which calls no AWS API",
+		// Its EFA installer sibling (#1505): run by the weekly EFA pin workflow
+		// with GITHUB_TOKEN only, and by the release's verify step to read the
+		// pin; it reads and edits two files and calls no AWS API.
+		"scripts/efapin": "the EFA installer pin rewriter (#1505), which calls no AWS API",
 		// It does run as an identity, GitHubActions-spawn-lambda-deploy, but it
 		// calls AWS only through the `aws` CLI, which this SDK call-graph
 		// analysis cannot see. Its own gate does the same job for it:

@@ -1,0 +1,106 @@
+name: EFA installer pin
+
+# Moves the EFA installer that --efa runs as root (efaInstallerVersion and
+# efaInstallerSHA256 in pkg/userdata/efa.go, #1505) when AWS publishes a newer
+# one, by opening a PR. Dependabot cannot see that pin. The sibling of
+# awscli-pin.yml (#1495), with the same limits.
+#
+# scripts/efa-pin.sh bump does the work: newest version in AWS's EFA release
+# notes, the tarball and its .sig, gpg verification against AWS's EFA key
+# committed in scripts/efapin/aws-efa-installer.key (fingerprint
+# 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC), the sha256, and the edit.
+#
+# Moving the pin changes the MPI user data --efa renders (not the published
+# bootstrap body), so the PR is reviewed, merged and released like any other.
+# Read AWS's release notes for dropped distributions first: 1.50.0 dropped
+# Amazon Linux 2 (#1504).
+#
+# Only GITHUB_TOKEN. A PR it opens does not trigger CI (close and reopen it to
+# run the checks), and GitHub refuses to let it open a PR at all while "Allow
+# GitHub Actions to create and approve pull requests" is off, as it is for this
+# org. On that refusal, and only that one (scripts/efapin pr-refused), the run
+# opens an issue, or updates the open one with the same title, holding the
+# compare link, the verified version, its sha256 and the signing key's
+# fingerprint. Any other failure (push, gh, gpg) fails the run.
+
+on:
+  schedule:
+    - cron: '43 6 * * 1' # weekly, Monday 06:43 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: efa-pin
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump the EFA installer pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Check the key and look for a newer EFA installer
+        id: bump
+        run: scripts/efa-pin.sh bump
+      - name: Open a PR (or, if GitHub refuses, an issue)
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM: ${{ steps.bump.outputs.from }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          SHA256: ${{ steps.bump.outputs.sha256 }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.ref_name }}
+        run: |
+          branch="bot/efa-installer-$VERSION"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch already exists; an earlier run opened its PR or issue"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add pkg/userdata/efa.go CHANGELOG.md
+          git commit -m "chore(mpi): EFA installer $FROM -> $VERSION (#1505)"
+          git push origin "$branch"
+          compare="https://github.com/$REPO/compare/$BASE...$branch?expand=1"
+          body="Moves the EFA installer that \`--efa\` runs from $FROM to $VERSION.
+
+          The tarball's signature verified against AWS's EFA installer key (4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC, scripts/efapin/aws-efa-installer.key) before its sha256 ($SHA256) was pinned; the run's log has the output. Read https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html for dropped distributions before merging.
+
+          Opened by .github/workflows/efa-pin.yml with GITHUB_TOKEN, so CI has not run: close and reopen this PR to run it."
+          if out=$(gh pr create --repo "$REPO" --base "$BASE" --head "$branch" \
+            --title "chore(mpi): EFA installer $FROM -> $VERSION" --body "$body" 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out" >&2
+          # Only GitHub's "not permitted to create or approve pull requests"
+          # falls back to an issue; anything else fails the run.
+          if ! printf '%s' "$out" | go -C scripts run ./efapin pr-refused; then
+            echo "::error::gh pr create failed for $branch: $out"
+            exit 1
+          fi
+          title=$(go -C scripts run ./efapin issue-title --from "$FROM" --version "$VERSION")
+          go -C scripts run ./efapin issue-body --from "$FROM" --version "$VERSION" \
+            --sha256 "$SHA256" --compare "$compare" >"$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --repo "$REPO" --state open --search "in:title EFA installer pin bump available" \
+            --json number,title | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$REPO" --body-file "$RUNNER_TEMP/issue.md"
+            echo "::warning::GitHub refused the PR; updated issue #$existing with the compare link"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+            echo "::warning::GitHub refused the PR; opened an issue with the compare link"
+          fi
