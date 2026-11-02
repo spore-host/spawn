@@ -329,6 +329,39 @@ func TestReleaseMirrorRefusesAnUnverifiedAWSCLI(t *testing.T) {
 	}
 }
 
+// TestReleaseMirrorRequiresThePinnedSigner tests the VALIDSIG fingerprint
+// check where it lives (rule 2). Through the script it is unreachable while
+// the one-primary-key check holds, so this disables that check in the
+// sandbox's copy, imports a second key, and signs with it: gpg calls the
+// signature good, and the fingerprint check alone must refuse it.
+func TestReleaseMirrorRequiresThePinnedSigner(t *testing.T) {
+	sb := newMirrorSandbox(t)
+	const keyCheck = `if [ "$fprs" != "$AWSCLI_KEY_FPR" ]; then`
+	src, err := os.ReadFile(filepath.Join(sb.dir, mirrorScript))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(src), keyCheck) != 1 {
+		t.Fatalf("%s no longer has the key check %q this test disables", mirrorScript, keyCheck)
+	}
+	sb.write(mirrorScript, strings.Replace(string(src), keyCheck, "if false; then", 1))
+	sb.write("scripts/awsclipin/aws-cli-team.asc", sb.gpg.run("--armor", "--export", sb.fpr, sb.other))
+	p := launcher.AWSCLIPins()[0]
+	sb.origin(filepath.Base(p.MirrorKey), sb.zips[p.MirrorKey], sb.other)
+	out, err := sb.runMirror(mirrorStepName)
+	if err == nil {
+		t.Fatalf("a zip signed by a key other than the pinned one was mirrored\n%s", out)
+	}
+	if !strings.Contains(out, "no VALIDSIG by "+sb.fpr) {
+		t.Errorf("the refusal is not the fingerprint check's\n%s", out)
+	}
+	for _, b := range sb.publishedBuckets() {
+		if got := sb.mirrored(b); len(got) != 0 {
+			t.Errorf("%s got %v from a step that refused", b, got)
+		}
+	}
+}
+
 // TestReleaseMirrorDeletesOldVersions: the mirror's deleter keeps the pinned
 // version and the two newest others, deletes older ones, and leaves keys not
 // of its own name form alone.
@@ -400,7 +433,7 @@ func TestReleaseMirrorVerifyCatchesABadCopy(t *testing.T) {
 			spoil(sb, filepath.Join(sb.mirror, "spawn-binaries-ap-northeast-1", launcher.AWSCLIPins()[1].MirrorKey))
 			out, err := sb.runMirror(mirrorVerifyStepName)
 			if err == nil {
-				t.Fatalf("verify passed with an %s copy\n%s", tc, out)
+				t.Fatalf("verify passed with a copy that is %s\n%s", tc, out)
 			}
 			if !strings.Contains(out, "::error::s3://spawn-binaries-ap-northeast-1/") {
 				t.Errorf("verify does not name the bad copy\n%s", out)

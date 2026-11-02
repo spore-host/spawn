@@ -773,6 +773,10 @@ const ReadyDir
 const ReadyGateTimeoutSecs
 const RequiredGatesFile
 const StorageReadyGate
+field AWSCLIPin.Arch string
+field AWSCLIPin.MirrorKey string
+field AWSCLIPin.SHA256 string
+field AWSCLIPin.Version string
 field BootstrapConfig.Command string
 field BootstrapConfig.CompletionFile string
 field BootstrapConfig.ContainerScript string
@@ -799,6 +803,7 @@ field Options.Username string
 field StagedFiles.Region string
 field StagedFiles.SHA256 string
 field StagedFiles.URI string
+func AWSCLIPins() []AWSCLIPin
 func BootstrapBody() string
 func BootstrapBodyKey(version string) string
 func BuildLinuxBootstrap(cfg BootstrapConfig) (string, error)
@@ -810,6 +815,7 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 func PublishedBodyVersion() string
 func SporedVersion() string
 func StagedFilesObject(command, taskFlushScript string) []byte
+type AWSCLIPin struct
 type BootstrapConfig struct
 type Options struct
 type StagedFiles struct
