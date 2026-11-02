@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// readinessProbe is the per-peer login the readiness loop runs.
-const readinessProbe = `"$PEER_IP" true`
+// readinessProbe is the per-peer login the readiness loop runs: a BatchMode
+// SSH that tests the member's MPI readiness marker (#1486).
+const readinessProbe = `"$PEER_IP" 'grep -qxF `
 
 // Rank 0 must wait for every peer to accept a non-interactive SSH before
 // mpirun, not sleep a constant (#752).

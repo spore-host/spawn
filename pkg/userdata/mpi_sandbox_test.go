@@ -41,6 +41,11 @@ type sandboxOpts struct {
 	setup func(t *testing.T, root string)
 	// container runs the script in amazonlinux:2.
 	container bool
+	// peerScriptAt is, per peer IP, the login at which that peer's own MPI
+	// script runs (see sandboxSSH); 0 or absent is the first.
+	peerScriptAt map[string]int
+	// noPeerScripts runs no peer's MPI script, so no peer is ever ready.
+	noPeerScripts bool
 }
 
 type sandboxRun struct {
@@ -62,6 +67,13 @@ func relocate(script, root string) string {
 	return strings.NewReplacer(pairs...).Replace(script)
 }
 
+// sandboxSSH runs a command on a member: on this one (STUB_SELF) as given, and
+// on a peer with /tmp/ moved to hosts/<ip>/ and /etc/ to hosts/<ip>/etc/. A
+// peer accepts SSH at once, but its own MPI script (hosts/<ip>.sh, see
+// peerScripts) runs only at its hosts/<ip>.at'th login (default the first),
+// before that login's command: the peer's files appear after SSH accepts, as
+// on EC2, where rank 0's key reaches a peer over SSM ahead of its bootstrap
+// (#1486). Logins are counted, not timed.
 const sandboxSSH = `#!/bin/bash
 host=""
 while [ $# -gt 0 ]; do
@@ -73,10 +85,46 @@ while [ $# -gt 0 ]; do
 done
 echo "$host $*" >> "$STUB_ROOT/ssh.log"
 [ "$host" = "$STUB_UNREACHABLE" ] && exit 255
-[ "$*" = "true" ] && exit 0
-mkdir -p "$STUB_ROOT/hosts/$host"
+h="$STUB_ROOT/hosts/$host"
 cmd="$*"
-exec bash -c "${cmd//$STUB_ROOT\/tmp\//$STUB_ROOT/hosts/$host/}"
+if [ "$host" != "$STUB_SELF" ]; then
+  if [ -f "$h.sh" ]; then
+    n=$(($(cat "$h.n" 2>/dev/null || echo 0) + 1))
+    echo "$n" > "$h.n"
+    if [ "$n" -ge "$(cat "$h.at" 2>/dev/null || echo 1)" ]; then
+      bash "$h.sh" > "$h.log" 2>&1 || echo "peer $host: its MPI script failed" >&2
+      rm -f "$h.sh"
+    fi
+  fi
+  mkdir -p "$h"
+  cmd="${cmd//$STUB_ROOT\/tmp\//$h/}"
+  cmd="${cmd//$STUB_ROOT\/etc\//$h/etc/}"
+fi
+[ "$cmd" = "true" ] && exit 0
+exec bash -c "$cmd"
+`
+
+// sandboxMpirun stands in for mpirun as far as where the ranks run: it runs
+// the program it was given (the words after -hostfile FILE) once per hostfile
+// line, as rank N, on that member's files (hosts/<ip>/etc/ for a peer), and
+// exits with the first failing rank's status, as Open MPI aborts the job on
+// one. Then it prints its marker lines and exits MPIRC if every rank passed.
+const sandboxMpirun = `#!/bin/bash
+echo "mpirun $*" >> "$STUB_ROOT/mpirun.log"
+while [ $# -gt 0 ] && [ "$1" != -hostfile ]; do shift; done
+hf=$2
+shift 2
+n=0 rc=0
+for ip in $(awk '{print $1}' "$hf"); do
+  prog="$*"
+  [ "$ip" = "$STUB_SELF" ] || prog="${prog//$STUB_ROOT\/etc\//$STUB_ROOT/hosts/$ip/etc/}"
+  OMPI_COMM_WORLD_RANK=$n bash -c "$prog" || { r=$?; [ "$rc" -ne 0 ] || rc=$r; }
+  n=$((n + 1))
+done
+[ "$rc" -eq 0 ] || exit "$rc"
+echo rank-output-from-mpirun
+echo rank-stderr >&2
+exit $MPIRC
 `
 
 func sandboxStubs(o sandboxOpts) map[string]string {
@@ -89,7 +137,7 @@ while [ $# -gt 0 ]; do case "$1" in -f) f=$2; shift 2 ;; *) shift ;; esac; done
 echo private > "$f"; echo "ssh-rsa AAAAstub spawn-mpi-cohort" > "$f.pub"
 `,
 		"yum":    "#!/bin/bash\necho \"yum $*\" >> \"$STUB_ROOT/yum.log\"\n",
-		"mpirun": "#!/bin/bash\necho rank-output-from-mpirun\necho rank-stderr >&2\nexit " + strconv.Itoa(o.mpiRC) + "\n",
+		"mpirun": sandboxMpirun,
 	}
 	if o.noMPI {
 		delete(s, "mpirun")
@@ -191,6 +239,9 @@ func runSandbox(t *testing.T, o sandboxOpts) sandboxRun {
 		}
 		path = filepath.Join(root, "bin") + ":" + filepath.Join(root, "base")
 	}
+	if o.cfg.JobArrayIndex == 0 && !o.noPeerScripts {
+		peerScripts(t, o, root)
+	}
 	if o.setup != nil {
 		o.setup(t, root)
 	}
@@ -198,7 +249,8 @@ func runSandbox(t *testing.T, o sandboxOpts) sandboxRun {
 	if err := os.WriteFile(file, []byte("set -e\necho \"sandbox bash $BASH_VERSION\"\n"+relocate(script, root)), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"PATH=" + path, "STUB_ROOT=" + root, "STUB_UNREACHABLE=" + o.unreachable, "INSTANCE_ID=i-self", "HOME=" + root}
+	env := []string{"PATH=" + path, "STUB_ROOT=" + root, "STUB_UNREACHABLE=" + o.unreachable, "INSTANCE_ID=i-self", "HOME=" + root,
+		"STUB_SELF=" + o.self, "MPIRC=" + strconv.Itoa(o.mpiRC)}
 
 	var cmd *exec.Cmd
 	if o.container {
@@ -224,4 +276,41 @@ func runSandbox(t *testing.T, o sandboxOpts) sandboxRun {
 		t.Fatalf("the container run did not run under AL2's bash 4.2")
 	}
 	return sandboxRun{mpiRun: mpiRun{root: root}, rc: rc, out: string(out)}
+}
+
+// peerScripts writes, for rank 0's run, each other member's own rendered MPI
+// script (its rank, the same cohort) relocated under hosts/<ip>/, with that
+// member's copy of the peers file, for sandboxSSH to run. A peer then writes
+// its files, and its readiness marker, the way its own user data does.
+func peerScripts(t *testing.T, o sandboxOpts, root string) {
+	t.Helper()
+	for i, ip := range o.peers {
+		if ip == o.self {
+			continue
+		}
+		cfg := o.cfg
+		cfg.JobArrayIndex = i
+		script, err := GenerateMPIUserData(cfg)
+		if err != nil {
+			t.Fatalf("GenerateMPIUserData(rank %d): %v", i, err)
+		}
+		h := filepath.Join(root, "hosts", ip)
+		for _, d := range []string{"tmp", "var/log", "etc/spawn", "etc/profile.d", "root", "run"} {
+			if err := os.MkdirAll(filepath.Join(h, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(h, "etc/spawn/job-array-peers.json"), sandboxPeers(t, o.peers), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		body := "set -e\nexport INSTANCE_ID=i-" + strconv.Itoa(i) + " HOME=" + h + "\n" + relocate(script, h)
+		if err := os.WriteFile(h+".sh", []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if at := o.peerScriptAt[ip]; at > 0 {
+			if err := os.WriteFile(h+".at", []byte(strconv.Itoa(at)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 }

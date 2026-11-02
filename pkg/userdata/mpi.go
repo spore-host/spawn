@@ -55,6 +55,11 @@ const MPIClusterKeyStripOwnerFile = "/var/lib/spawn/root-ak-owner"
 // /root/.ssh/id_rsa. A different (or no) ID means the key came with the image.
 const MPIClusterKeyOwnerFile = "/root/.ssh/spawn-mpi-key-owner"
 
+// MPINodeReadyFile is written by every member as the last step of its MPI
+// setup, holding the job array ID; rank 0 starts mpirun only once every member
+// has it (spawn#1486).
+const MPINodeReadyFile = "/etc/spawn/mpi-node-ready"
+
 // defaultCompletionFile is the completion sentinel used when no
 // --completion-file is given. It matches the flag default and spored's own.
 const defaultCompletionFile = "/tmp/SPAWN_COMPLETE"
@@ -73,6 +78,12 @@ type mpiTemplateData struct {
 	// MPIClusterKeyOwnerFile, so the script and pkg/mpicohort cannot disagree.
 	KeyComment   string
 	KeyOwnerFile string
+	// NodeReadyFile is MPINodeReadyFile; NodeReadyID is what this cohort writes
+	// to it (the job array ID, shell-quoted), and RemoteReadyProbe the command
+	// rank 0 hands to ssh to test a member for it, quoted for both shells.
+	NodeReadyFile    string
+	NodeReadyID      string
+	RemoteReadyProbe string
 }
 
 func newMPITemplateData(config MPIConfig) mpiTemplateData {
@@ -82,12 +93,16 @@ func newMPITemplateData(config MPIConfig) mpiTemplateData {
 	}
 	q := security.ShellQuote(p)
 	remote := `mkdir -p "$(dirname -- ` + q + `)" || true; cat > ` + q
+	id := security.ShellQuote(config.JobArrayID)
 	return mpiTemplateData{
 		MPIConfig:             config,
 		CompletionPath:        q,
 		RemoteCompletionWrite: security.ShellQuote(remote),
 		KeyComment:            MPIClusterKeyComment,
 		KeyOwnerFile:          MPIClusterKeyOwnerFile,
+		NodeReadyFile:         MPINodeReadyFile,
+		NodeReadyID:           id,
+		RemoteReadyProbe:      security.ShellQuote("grep -qxF " + id + " " + MPINodeReadyFile),
 	}
 }
 
@@ -284,6 +299,30 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //     timeout; and a bootstrap failure before this script starts runs no trap
 //     of this script's.
 //
+// Peer readiness (spawn#1486). Rank 0's gate (#752) used to test only that each
+// member accepted a BatchMode SSH login. That proves sshd is up and rank 0's key
+// is authorized, but the key reaches a peer over SSM from the control plane,
+// independently of, and usually before, the peer's own bootstrap reaching its
+// MPI files. mpirun then exec'd /etc/spawn/mpi-rank on a peer that had not
+// written it yet: exit 127 and a failed job on a healthy cohort, 0.9 s late on
+// AL2 live, 0.14 s from it on AL2023.
+//
+//   - Every member writes MPINodeReadyFile as the LAST step of this script
+//     outside the rank-0 block, after the install, EFA, mpi.sh, the key setup,
+//     the hostfile and the --mpi-command files, so one marker covers everything
+//     a rank reads on that member, including what a later change adds before it.
+//     mpi_peer_ready_test.go discovers the files the rank path reads (the
+//     mpirun line's program and, transitively, what each reads that this script
+//     writes) and requires each to be written before the marker.
+//   - The gate's probe is 'grep -qxF <job array ID> MPINodeReadyFile' over the
+//     same BatchMode SSH, so it still proves SSH too. The ID rather than a bare
+//     'test -f': an image of a member carries its parent cohort's marker (and
+//     its mpi-rank and mpi-command), and the SSM key can arrive before this
+//     script's 'rm -f' of it (and before spored's #1241 sweep) runs.
+//   - Rank 0 probes itself as well; it has written its own marker by then.
+//   - The wait keeps its 600 s bound and exits 1, which spawn_mpi_exit records
+//     as an "mpi-bootstrap" failure on every reachable member (#1483).
+//
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
@@ -325,7 +364,7 @@ spawn_mpi_exit() {
   if declare -F spawn_exit_guard >/dev/null; then (exit "$rc"); spawn_exit_guard; fi
 }
 trap spawn_mpi_exit EXIT
-rm -f /tmp/mpi-hostfile
+rm -f /tmp/mpi-hostfile {{.NodeReadyFile}}
 {{- if not .SkipInstall}}
 # Check if MPI is already installed
 if ! command -v mpirun &> /dev/null; then
@@ -462,10 +501,12 @@ rm -f $F
 exit $R
 EOFMPIRANK
 {{end}}
+# This member's last step: rank 0 waits for it on every member (#1486).
+printf '%s\n' {{.NodeReadyID}} > {{.NodeReadyFile}}
 # shellcheck disable=SC2050  # the rank is fixed at render time: one script per member
 if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   # Every peer must accept a non-interactive SSH before mpirun, which SSHes to
-  # all of them (#752).
+  # all of them (#752), and have finished its MPI setup (#1486): see mpi.go.
   #
   # This was a bare 'sleep 10', with no comment. The peers file waited for
   # above means the CONTROLLER resolved every peer's IP — it says nothing
@@ -487,11 +528,11 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
     NOT_READY=0
     for PEER_IP in $(awk '{print $1}' /tmp/mpi-hostfile); do
       ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-          "$PEER_IP" true 2>/dev/null || NOT_READY=$((NOT_READY + 1))
+          "$PEER_IP" {{.RemoteReadyProbe}} 2>/dev/null || NOT_READY=$((NOT_READY + 1))
     done
     [ "$NOT_READY" -eq 0 ] && break
     if [ "$SPAWN_PEERS_READY_WAITED" -ge 600 ]; then
-      echo "spawn: $NOT_READY peer(s) never accepted SSH after ${SPAWN_PEERS_READY_WAITED}s; MPI cannot start" | tee -a /var/log/spawn-command.log >&2
+      echo "spawn: $NOT_READY peer(s) not ready (no SSH, or MPI setup unfinished) after ${SPAWN_PEERS_READY_WAITED}s; MPI cannot start" | tee -a /var/log/spawn-command.log >&2
       exit 1 # spawn_mpi_exit records it, on every member
     fi
     sleep 5
@@ -502,7 +543,7 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   # /var/log/cloud-init-output.log — a 4-node hardware run looked for the line
   # there and found nothing, while mpirun's own output was present. A marker
   # file removes the ambiguity about whether the poll ran and for how long.
-  echo "spawn: all peers accepted SSH after ${SPAWN_PEERS_READY_WAITED}s"
+  echo "spawn: all peers ready after ${SPAWN_PEERS_READY_WAITED}s"
   echo "${SPAWN_PEERS_READY_WAITED}" > /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null || true
 {{if .MPICommand}}
   set +e
