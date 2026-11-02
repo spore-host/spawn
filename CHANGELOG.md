@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **A forgotten background job is now cut off** when `--on-complete` terminates the cohort: `wait` for any the result depends on. A straggler that writes again after the drain gets SIGPIPE.
   - Verified with a real `mpirun -np 2` on one host under Open MPI 4.1.2 (the AL2023 package), 4.0.1 (AL2, bash 4.2) and 5.0. The published bootstrap body does not change; the MPI user data grows by about 360 gzipped bytes.
 
+### Fixed
+
+- **`--mpi-command` starts as root on Open MPI 4.0.1, the Amazon Linux 2 package** (#1481). Rank 0 runs mpirun as root, and allowed that only through `OMPI_ALLOW_RUN_AS_ROOT` / `OMPI_ALLOW_RUN_AS_ROOT_CONFIRM` in `/etc/profile.d/mpi.sh`. Open MPI 4.0.1 ignores those variables, so on an AL2 `--ami` mpirun refused to run as root and every `--mpi-command` failed before any rank started (reproduced in an `amazonlinux:2` container; not yet on EC2). spawn's mpirun line now passes `--allow-run-as-root`, the one mechanism that works on every supported release: verified as root on 4.0.1 (AL2), 4.1.2 (AL2023, Ubuntu 22.04), 4.1.6 (Ubuntu 24.04) and 5.0.5 (Fedora 41), with no warning on any. The variables stay in `mpi.sh` for your own mpirun. The MPI user data grows by 13 gzipped bytes.
+
 ## [0.154.0] - 2026-11-01
 
 ### Added

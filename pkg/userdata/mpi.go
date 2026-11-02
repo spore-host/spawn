@@ -233,6 +233,24 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //     and 5.0) with 'mpirun -np 2' on one host; mpi_rank_wrapper_test.go runs
 //     it when mpirun is installed.
 //
+// Root (spawn#1481). The bootstrap runs as root, the SSH mesh above is root's,
+// and the peers' completion write goes through it, so mpirun runs as root by
+// design (the --mpi-command help says so). Open MPI refuses root unless told
+// otherwise, and the only mechanism every supported release accepts is the
+// --allow-run-as-root flag on the mpirun line. OMPI_ALLOW_RUN_AS_ROOT and
+// _CONFIRM in /etc/profile.d/mpi.sh are newer: AL2's Open MPI 4.0.1 ignores
+// them, so on an AL2 --ami mpirun refused every --mpi-command before any rank
+// started. Verified as root in containers, with this line's --mca and '-np 2':
+//
+//	Open MPI (image)                    env vars  flag  both
+//	4.0.1 (AL2)                         refused   ok    ok
+//	4.1.2 (AL2023, Ubuntu 22.04)        ok        ok    ok
+//	4.1.6 (Ubuntu 24.04)                ok        ok    ok
+//	5.0.5 (Fedora 41; PRRTE prterun)    ok        ok    ok
+//
+// No release warned about the flag. The variables stay in mpi.sh for a user's
+// own mpirun on a newer Open MPI. mpi_root_test.go gates both halves.
+//
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
@@ -437,7 +455,7 @@ if [ "{{.JobArrayIndex}}" -eq 0 ]; then
   echo "${SPAWN_PEERS_READY_WAITED}" > /var/log/spawn-mpi-peer-wait-seconds 2>/dev/null || true
 {{if .MPICommand}}
   set +e
-  mpirun --mca orte_base_help_aggregate 0 -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-rank 2>&1 | tee -a /var/log/spawn-command.log
+  mpirun --mca orte_base_help_aggregate 0 --allow-run-as-root -np $(({{.JobArraySize}} * SLOTS)) -hostfile /tmp/mpi-hostfile bash /etc/spawn/mpi-rank 2>&1 | tee -a /var/log/spawn-command.log
   spawn_mpi_done "${PIPESTATUS[0]}"
 {{end}}
 fi
