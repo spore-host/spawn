@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.156.0] - 2026-11-02
+
 ### Added
 
 - **A weekly workflow opens a PR when AWS publishes a newer EFA installer for `--efa`, and every release re-verifies the pinned one** (#1505). `.github/workflows/efa-pin.yml` runs `scripts/efa-pin.sh bump` every Monday: it reads the newest version from AWS's EFA release notes, downloads `aws-efa-installer-<version>.tar.gz` and its `.sig`, and pins a sha256 only for a tarball whose signature gpg verifies as made by AWS's EFA installer key `4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC` (from https://efa-installer.amazonaws.com/aws-efa-installer.key, the fingerprint the EC2 User Guide's EFA page gives), committed as `scripts/efapin/aws-efa-installer.key`. It rewrites the two constants in `pkg/userdata/efa.go` by name with go/parser and adds a CHANGELOG entry. Like the AWS CLI pin workflow (#1495) it uses only `GITHUB_TOKEN`, and when GitHub refuses the PR it opens an issue, "EFA installer pin bump available: <old> → <new>", with the compare link. The release workflow's new "Verify the pinned EFA installer" step (`scripts/efa-pin.sh verify`, before any AWS credentials or GoReleaser, no credentials of its own) fails the tag unless the pinned tarball's signature verifies against that key and its sha256 is the pinned one. The release now downloads the ~600 MB tarball once. The AWS CLI and EFA rewriters share `scripts/internal/pinkit` (go/parser rewrite, CHANGELOG insertion, PGP fingerprint); `scripts/awsclipin`'s behaviour is unchanged.
@@ -13283,7 +13285,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.155.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.156.0...HEAD
+[0.156.0]: https://github.com/spore-host/spawn/compare/v0.155.0...v0.156.0
 [0.155.0]: https://github.com/spore-host/spawn/compare/v0.154.0...v0.155.0
 [0.154.0]: https://github.com/spore-host/spawn/compare/v0.153.0...v0.154.0
 [0.153.0]: https://github.com/spore-host/spawn/compare/v0.152.0...v0.153.0
