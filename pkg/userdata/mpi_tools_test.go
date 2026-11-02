@@ -50,6 +50,7 @@ var mpiBaseTools = map[string]string{
 	"ssh-keygen": "openssh",
 	"curl":       "curl (curl-minimal on AL2023); EFA, and the instance ID when the bootstrap did not set INSTANCE_ID",
 	"tar":        "tar; EFA path only",
+	"sha256sum":  "coreutils; EFA path only (#1505)",
 }
 
 // mpiPackageManagers are on some bases only (#1487), so the script may run one
@@ -64,7 +65,7 @@ var mpiPackageManagers = map[string]string{
 var mpiInstalledTools = map[string]string{
 	"mpirun": "yum install -y openmpi openmpi-devel, apt-get install openmpi-bin libopenmpi-dev, or the image (--skip-mpi-install)",
 	// The EFA installer's own script, fetched and unpacked by the EFA block.
-	"./efa_installer.sh": "aws-efa-installer-latest.tar.gz",
+	"./efa_installer.sh": "aws-efa-installer-<efaInstallerVersion>.tar.gz, once its sha256 is the pinned one (#1505)",
 }
 
 // mpiConfigMatrix renders every shape of the MPI user data: rank 0 and a peer,

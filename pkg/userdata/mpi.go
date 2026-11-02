@@ -111,7 +111,7 @@ func newMPITemplateData(config MPIConfig) mpiTemplateData {
 		NodeReadyID:           id,
 		RemoteReadyProbe:      security.ShellQuote("grep -qxF " + id + " " + MPINodeReadyFile),
 		EFAVersion:            efaInstallerVersion,
-		EFASHA256:             efaInstallerSHA256,
+		EFASHA256:             efaPinnedSHA256,
 		EFASources:            strings.Join(efaInstallerSources(config.Region), " "),
 	}
 }
@@ -483,16 +483,6 @@ if (. /etc/os-release 2>/dev/null && [ "$ID" = amzn ] && [ "$VERSION_ID" = 2 ]);
   exit 1
 fi
 echo "Installing EFA installer {{.EFAVersion}}..."
-rm -rf /tmp/spawn-efa && mkdir -p /tmp/spawn-efa && cd /tmp/spawn-efa || exit 1
-for u in {{.EFASources}}; do
-  if curl -fsS --connect-timeout 10 --max-time 1800 --retry 3 -o e.tgz "$u"; then
-    [ "$(sha256sum e.tgz | cut -d ' ' -f 1)" = {{.EFASHA256}} ] && break
-    echo "spawn: EFA installer from $u: sha256 mismatch" >&2
-  fi
-  rm -f e.tgz
-done
-[ -f e.tgz ] || { echo "spawn: no EFA installer {{.EFAVersion}} with the pinned sha256" | tee -a /var/log/spawn-command.log >&2; exit 1; }
-tar -xzf e.tgz && rm -f e.tgz && cd aws-efa-installer || exit 1
 if command -v apt-get >/dev/null; then
   # The installer apt-installs its dependencies (environment-modules among
   # them) and needs fresh indexes: a stock Ubuntu AMI's are stale, and with
@@ -505,7 +495,22 @@ if command -v apt-get >/dev/null; then
     sleep 15
   done
 fi
-if ./efa_installer.sh -y -g; then r=0; else r=$?; fi
+rm -rf /tmp/spawn-efa && mkdir -p /tmp/spawn-efa && cd /tmp/spawn-efa || exit 1
+r=1
+for u in {{.EFASources}}; do
+  if curl -fsS --connect-timeout 10 --max-time 1800 --retry 3 -o e.tgz "$u"; then
+    [ "$(sha256sum e.tgz | cut -d ' ' -f 1)" = {{.EFASHA256}} ] && { r=0; break; }
+    echo "spawn: EFA installer from $u: sha256 mismatch" >&2
+  fi
+  rm -f e.tgz
+done
+if [ "$r" -ne 0 ]; then
+  echo "spawn: no EFA installer {{.EFAVersion}} with the pinned sha256" | tee -a /var/log/spawn-command.log >&2
+elif tar -xzf e.tgz && rm -f e.tgz && cd aws-efa-installer; then
+  ./efa_installer.sh -y -g || r=$?
+else
+  r=1
+fi
 cd /tmp/ && rm -rf /tmp/spawn-efa
 [ "$r" -eq 0 ] || exit "$r"
 # --efa runs the installer's Open MPI (#1491): see mpi.go.

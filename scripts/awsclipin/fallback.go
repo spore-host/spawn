@@ -5,8 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
+
+	"github.com/spore-host/spawn/scripts/internal/pinkit"
 )
 
 // When GitHub will not let GITHUB_TOKEN open the bump PR, the workflow opens
@@ -24,15 +25,9 @@ import (
 // own message.
 var errNotRefused = errors.New("not GitHub's refusal to let Actions create pull requests")
 
-// prRefusal matches GitHub's message when the repository (or its org) has
-// "Allow GitHub Actions to create and approve pull requests" off:
-// "GitHub Actions is not permitted to create or approve pull requests."
-var prRefusal = regexp.MustCompile(`(?i)\bnot permitted to create or approve pull requests\b`)
-
-// prRefused reports whether gh's output is that refusal and nothing else can
-// be read into it: a failed push, a missing branch, an auth or network error
-// all say something different, and all of them must fail the run.
-func prRefused(ghOutput string) bool { return prRefusal.MatchString(ghOutput) }
+// prRefused reports whether gh's output is GitHub's refusal to let Actions
+// create pull requests, and nothing else (pinkit.PRRefused).
+func prRefused(ghOutput string) bool { return pinkit.PRRefused(ghOutput) }
 
 func issueTitle(from, version string) string {
 	return fmt.Sprintf("AWS CLI pin bump available: %s → %s", from, version)

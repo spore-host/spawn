@@ -1,8 +1,14 @@
 package userdata
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -29,40 +35,127 @@ func markedMpirun(marker string) string {
 	return "#!/bin/bash\necho " + marker + " >> \"$STUB_ROOT/which-mpirun\"\n" + strings.TrimPrefix(sandboxMpirun, "#!/bin/bash\n")
 }
 
-// efaInstallerTar stands in for tar -xf aws-efa-installer-latest.tar.gz: it
-// unpacks an efa_installer.sh that, run from <host root>/tmp/aws-efa-installer,
-// installs the marked mpirun at <host root>/opt/amazon/openmpi/bin, as the
-// real installer does at /opt/amazon/openmpi; or, with openmpi=false, installs
-// nothing there (an installer run with --minimal or --mpi=none).
+// efaInstallerScript is the stand-in efa_installer.sh packed into the served
+// tarball: it logs its arguments to this member's $HOME/efa.log and, with
+// openmpi, installs the marked mpirun at <host root>/opt/amazon/openmpi/bin,
+// as the real installer does at /opt/amazon/openmpi; with openmpi=false it
+// installs nothing there (an installer run with --minimal or --mpi=none). It
+// runs from <host root>/tmp/spawn-efa/aws-efa-installer.
 //
 // On an apt-get base it fails as the real installer did on a stock Ubuntu
 // AMI (live, spawn#1491) unless 'apt-get update' ran first: it apt-installs
 // its dependencies and the image's indexes are stale.
-func efaInstallerTar(openmpi bool) string {
-	const staleApt = `if command -v apt-get >/dev/null && ! grep -q "^apt-get update" "$STUB_ROOT/apt.log" 2>/dev/null; then echo "E: Unable to locate package environment-modules" >&2; exit 1; fi`
+func efaInstallerScript(openmpi bool) string {
+	const staleApt = `if command -v apt-get >/dev/null && ! grep -q "^apt-get update" "$STUB_ROOT/apt.log" 2>/dev/null; then echo "E: Unable to locate package environment-modules" >&2; exit 1; fi` + "\n"
 	install := ""
 	if openmpi {
-		install = `d="$(cd ../.. && pwd)/opt/amazon/openmpi/bin"; mkdir -p "$d"; cat "$STUB_ROOT/efa-mpirun" > "$d/mpirun"; chmod +x "$d/mpirun"`
+		install = `d="$(cd ../../.. && pwd)/opt/amazon/openmpi/bin"; mkdir -p "$d"; cat "$STUB_ROOT/efa-mpirun" > "$d/mpirun"; chmod +x "$d/mpirun"` + "\n"
 	}
-	return `#!/bin/bash
-mkdir -p aws-efa-installer
-printf '#!/bin/bash\necho "efa_installer.sh $*" >> "$STUB_ROOT/efa.log"\n%s\n%s\n' '` + staleApt + `' '` + install + `' > aws-efa-installer/efa_installer.sh
-chmod +x aws-efa-installer/efa_installer.sh
-`
+	return "#!/bin/bash\necho \"efa_installer.sh $*\" >> \"$HOME/efa.log\"\n" + staleApt + install
 }
 
-// efaCohort runs rank 0 of a healthy 3-member --mpi-command cohort.
+// efaTarball is a real gzipped tarball laid out as AWS's is: one
+// aws-efa-installer/ directory holding efa_installer.sh.
+func efaTarball(t *testing.T, installer string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, h := range []*tar.Header{
+		{Name: "aws-efa-installer/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "aws-efa-installer/efa_installer.sh", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(installer))},
+	} {
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tw.Write([]byte(installer)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// pinEFATarball makes b the tarball the rendered user data accepts, for this
+// test: the pinned sha256 becomes b's. The pinned VERSION, and so every URL,
+// stays the real one.
+func pinEFATarball(t *testing.T, b []byte) {
+	t.Helper()
+	old := efaPinnedSHA256
+	sum := sha256.Sum256(b)
+	efaPinnedSHA256 = hex.EncodeToString(sum[:])
+	t.Cleanup(func() { efaPinnedSHA256 = old })
+}
+
+// efaCurl serves URLs from <root>/serve/<url with every byte outside
+// [A-Za-z0-9.] as _> and fails like curl -f (22) for any other, logging every
+// URL it was asked for, in order, to this member's $HOME/curl.log (the sandbox
+// root for rank 0, hosts/<ip> for a peer).
+const efaCurl = `#!/bin/bash
+out="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o | --connect-timeout | --max-time | --retry) [ "$1" = -o ] && out=$2; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+echo "$url" >> "$HOME/curl.log"
+f="$STUB_ROOT/serve/$(printf %s "$url" | tr -c 'A-Za-z0-9.' _)"
+[ -f "$f" ] || exit 22
+cat "$f" > "$out"
+`
+
+var notServeName = regexp.MustCompile(`[^A-Za-z0-9.]`)
+
+// serve makes the stand-in curl return b for url.
+func serve(t *testing.T, root, url string, b []byte) {
+	t.Helper()
+	d := filepath.Join(root, "serve")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, notServeName.ReplaceAllString(url, "_")), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The pinned tarball's two sources, for the sandbox's region.
+var (
+	efaMirrorURL = "https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com/spawn/efa/aws-efa-installer-" + efaInstallerVersion + ".tar.gz"
+	efaOriginURL = "https://efa-installer.amazonaws.com/aws-efa-installer-" + efaInstallerVersion + ".tar.gz"
+)
+
+// efaCohort runs rank 0 of a healthy 3-member --mpi-command cohort. Unless
+// o.setup serves otherwise, the origin serves a good, pinned tarball whose
+// installer installs Open MPI, and the mirror serves nothing.
 func efaCohort(t *testing.T, efa bool, o sandboxOpts) sandboxRun {
 	t.Helper()
-	o.cfg = MPIConfig{Region: "us-east-1", JobArrayID: "arr-1", JobArrayIndex: 0, JobArraySize: 3, MPICommand: "hostname", EFAEnabled: efa}
+	good := efaTarball(t, efaInstallerScript(true))
+	pinEFATarball(t, good)
+	return efaCohortServing(t, efa, o, map[string][]byte{efaOriginURL: good})
+}
+
+// efaCohortServing is efaCohort with the URLs served given, and the pin left
+// as the caller set it. o.cfg.Region, if set, is the launch region (default
+// us-east-1); the rest of o.cfg is replaced.
+func efaCohortServing(t *testing.T, efa bool, o sandboxOpts, served map[string][]byte) sandboxRun {
+	t.Helper()
+	region := o.cfg.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+	o.cfg = MPIConfig{Region: region, JobArrayID: "arr-1", JobArrayIndex: 0, JobArraySize: 3, MPICommand: "hostname", EFAEnabled: efa}
 	o.peers, o.self = []string{rank0IP, peerA, peerB}, rank0IP
 	if o.stubs == nil {
 		o.stubs = map[string]string{}
 	}
-	if _, ok := o.stubs["tar"]; !ok {
-		o.stubs["tar"] = efaInstallerTar(true)
-	}
-	o.stubs["curl"] = "#!/bin/bash\necho \"curl $*\" >> \"$STUB_ROOT/curl.log\"\n: > aws-efa-installer-latest.tar.gz\n"
+	o.stubs["curl"] = efaCurl
 	if _, ok := o.stubs["mpirun"]; !ok && !o.noMPI {
 		o.stubs["mpirun"] = markedMpirun(distroMarker)
 	}
@@ -70,6 +163,9 @@ func efaCohort(t *testing.T, efa bool, o sandboxOpts) sandboxRun {
 	o.setup = func(t *testing.T, root string) {
 		if err := os.WriteFile(filepath.Join(root, "efa-mpirun"), []byte(markedMpirun(efaMarker)), 0o755); err != nil {
 			t.Fatal(err)
+		}
+		for u, b := range served {
+			serve(t, root, u, b)
 		}
 		if prev != nil {
 			prev(t, root)
@@ -174,7 +270,9 @@ func TestMPIWithoutEFARunsTheDistributionsOpenMPI(t *testing.T) {
 // An EFA installer that leaves no /opt/amazon/openmpi must fail the member
 // closed, not let PATH fall through to the distribution's mpirun.
 func TestMPIWithEFAFailsClosedWithoutTheInstallersOpenMPI(t *testing.T) {
-	r := efaCohort(t, true, sandboxOpts{stubs: map[string]string{"tar": efaInstallerTar(false)}})
+	noMPI := efaTarball(t, efaInstallerScript(false))
+	pinEFATarball(t, noMPI)
+	r := efaCohortServing(t, true, sandboxOpts{}, map[string][]byte{efaOriginURL: noMPI})
 	assertSetupFailed(t, r, 1)
 	if got := whichMpirun(t, r); got != "" {
 		t.Errorf("mpirun %q ran although the EFA installer installed no Open MPI", got)

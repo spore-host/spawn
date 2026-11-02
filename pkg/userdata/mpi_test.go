@@ -105,9 +105,9 @@ func TestGenerateMPIUserData_EFAEnabled(t *testing.T) {
 
 	// Check EFA-specific sections
 	expectedEFASections := []string{
-		"Installing EFA driver",
-		"curl -O https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz",
-		"./efa_installer.sh -y -g",
+		"Installing EFA installer " + efaInstallerVersion,
+		"'https://efa-installer.amazonaws.com/aws-efa-installer-" + efaInstallerVersion + ".tar.gz'",
+		"./efa_installer.sh -y -g || r=$?",
 		"export FI_PROVIDER=efa",
 		"export FI_EFA_USE_DEVICE_RDMA=1",
 	}

@@ -32,6 +32,11 @@ const (
 	efaInstallerSHA256  = "83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c"
 )
 
+// efaPinnedSHA256 is the sha256 the user data checks: efaInstallerSHA256. A
+// variable only so the sandbox tests can serve a stand-in tarball;
+// TestEFAPinIsTheGoSourceOfTruth holds the rendered script to the constant.
+var efaPinnedSHA256 = efaInstallerSHA256
+
 // efaInstallerOrigin is where AWS publishes the installer.
 const efaInstallerOrigin = "https://efa-installer.amazonaws.com/"
 

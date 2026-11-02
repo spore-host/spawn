@@ -11,6 +11,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,3 +157,13 @@ func AddUnreleasedChanged(cl []byte, entry string) ([]byte, error) {
 	out = append(out, lines[at:]...)
 	return []byte(strings.Join(out, "\n")), nil
 }
+
+// prRefusal matches GitHub's message when the repository (or its org) has
+// "Allow GitHub Actions to create and approve pull requests" off:
+// "GitHub Actions is not permitted to create or approve pull requests."
+var prRefusal = regexp.MustCompile(`(?i)\bnot permitted to create or approve pull requests\b`)
+
+// PRRefused reports whether gh's output is that refusal and nothing else can
+// be read into it: a failed push, a missing branch, an auth or network error
+// all say something different, and all of them must fail a bump run.
+func PRRefused(ghOutput string) bool { return prRefusal.MatchString(ghOutput) }

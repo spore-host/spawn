@@ -59,6 +59,17 @@ jobs:
       - name: Release version guard
         run: scripts/check-release-version.sh "${GITHUB_REF_NAME}"
 
+      # Hard-fail the tag unless the EFA installer this build pins for --efa
+      # (pkg/userdata/efa.go, #1505) is the one AWS signed: its detached .sig
+      # must verify against AWS's EFA key committed in
+      # scripts/efapin/aws-efa-installer.key, with the pinned fingerprint, and
+      # its sha256 must be the pinned one. The instance checks only that
+      # sha256, so this is where the signature is checked for what ships. No
+      # AWS credentials: it reads efa-installer.amazonaws.com, into a temp
+      # directory outside the checkout that it removes (about 600 MB).
+      - name: Verify the pinned EFA installer
+        run: scripts/efa-pin.sh verify
+
       # The static Linux bootstrap body (#1274), published BEFORE GoReleaser
       # publishes the CLI and the taps. A release build of spawn puts only a stub
       # in user data; the stub fetches spawn/versions/<v>/bootstrap.sh from the
