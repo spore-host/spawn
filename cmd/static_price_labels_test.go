@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/cost"
 	"github.com/spore-host/spawn/pkg/testutil"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
@@ -56,6 +58,15 @@ var staticPriceRenderers = map[string]func(t *testing.T, dp aws.DisplayPrice) st
 			t.Fatalf("renderServiceDryRun: %v", err)
 		}
 		return b.String()
+	},
+	"renderCostBreakdown": func(t *testing.T, dp aws.DisplayPrice) string {
+		b := &cost.CostBreakdown{
+			TotalCost: 0.34, ComputeCost: 0.34, RunningHours: 2, TotalHours: 2,
+			StaticPriceNotes: truffleaws.StaticPriceNotes([]truffleaws.PriceOrigin{dp.Origin()}),
+		}
+		var out bytes.Buffer
+		renderCostBreakdown(&out, "sweep-static", b)
+		return out.String()
 	},
 	"sweepPricer.SourceSummary": func(t *testing.T, dp aws.DisplayPrice) string {
 		withSweepRowPricer(t, func(context.Context, string, string) (aws.DisplayPrice, error) { return dp, nil })
@@ -132,5 +143,38 @@ func TestLaunchDryRunJSONCarriesThePriceOrigin(t *testing.T) {
 		if got[key] != want {
 			t.Errorf("%s = %v, want %q\n%s", key, got[key], want, out.String())
 		}
+	}
+}
+
+// TestCostBreakdownWithLiveRatesHasNoStaticNote: the static note appears only
+// when a rate was static.
+func TestCostBreakdownWithLiveRatesHasNoStaticNote(t *testing.T) {
+	var out bytes.Buffer
+	renderCostBreakdown(&out, "sweep-live", &cost.CostBreakdown{TotalCost: 0.34, ComputeCost: 0.34, RunningHours: 2, TotalHours: 2})
+	if strings.Contains(out.String(), "static") {
+		t.Errorf("a live-priced breakdown mentions a static rate:\n%s", out.String())
+	}
+}
+
+// TestSingleInstanceCostReportSaysAStaticRateIsStatic: an instance launched on
+// a static rate records only spawn:price-source=static, not the date or the
+// reason (spawn#1512), so the report must say it is static and that both are
+// unknown, never present the rate as current (#1510). A live rate gets no
+// warning.
+func TestSingleInstanceCostReportSaysAStaticRateIsStatic(t *testing.T) {
+	inst := &aws.InstanceInfo{
+		Name: "box", InstanceID: "i-0abc123", InstanceType: "m5.large", State: "running",
+		LaunchTime: costTestNow.Add(-2 * time.Hour),
+		Tags:       map[string]string{"spawn:price-per-hour": "0.0960", aws.PriceSourceTag: "static"},
+	}
+	out := singleInstanceCostReport(inst, costTestNow)
+	for _, want := range []string{"$0.0960/hr", "static", "collection date unknown", "reason not recorded"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	inst.Tags[aws.PriceSourceTag] = "live"
+	if out := singleInstanceCostReport(inst, costTestNow); strings.Contains(out, "static") {
+		t.Errorf("a live rate is reported as static:\n%s", out)
 	}
 }

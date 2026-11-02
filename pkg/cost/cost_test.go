@@ -319,8 +319,8 @@ func TestCalculateComputeCost(t *testing.T) {
 	t.Run("uses actual type over requested", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "t3.micro", RequestedType: "m5.large"}
 		p := &fakePricer{price: 0.0104}
-		cache := map[string]float64{}
-		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		cache := map[string]pricedRate{}
+		cost, _, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
 		if !priced || cost <= 0 {
 			t.Errorf("expected positive priced cost, got cost=%f priced=%v", cost, priced)
 		}
@@ -328,9 +328,9 @@ func TestCalculateComputeCost(t *testing.T) {
 	t.Run("falls back to requested type", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", RequestedType: "t3.micro"}
 		p := &fakePricer{price: 0.0104}
-		cache := map[string]float64{}
-		single, _ := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
-		double, _ := calculateComputeCost(context.Background(), p, cache, inst, 2.0)
+		cache := map[string]pricedRate{}
+		single, _, _ := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		double, _, _ := calculateComputeCost(context.Background(), p, cache, inst, 2.0)
 		if !approxEqual(double, 2*single) {
 			t.Errorf("2h cost %f ≠ 2× 1h cost %f", double, single)
 		}
@@ -338,8 +338,8 @@ func TestCalculateComputeCost(t *testing.T) {
 	t.Run("zero hours returns zero without calling the pricer", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "t3.micro"}
 		p := &fakePricer{price: 0.0104}
-		cache := map[string]float64{}
-		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 0)
+		cache := map[string]pricedRate{}
+		cost, _, priced := calculateComputeCost(context.Background(), p, cache, inst, 0)
 		if cost != 0 || !priced {
 			t.Errorf("expected (0, true) for 0 hours, got (%f, %v)", cost, priced)
 		}
@@ -353,8 +353,8 @@ func TestCalculateComputeCost(t *testing.T) {
 	t.Run("uses the real truffle rate, not a static guess", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "c8g.metal-48xl"}
 		p := &fakePricer{price: 7.6570}
-		cache := map[string]float64{}
-		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		cache := map[string]pricedRate{}
+		cost, _, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
 		if !priced {
 			t.Fatal("expected the instance to be priced")
 		}
@@ -368,8 +368,8 @@ func TestCalculateComputeCost(t *testing.T) {
 	t.Run("a pricer failure is unpriced, not a fabricated zero-rate success", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "brand-new.type"}
 		p := &fakePricer{err: errors.New("no on-demand price found")}
-		cache := map[string]float64{}
-		cost, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
+		cache := map[string]pricedRate{}
+		cost, _, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0)
 		if priced {
 			t.Error("expected priced=false when the pricer fails")
 		}
@@ -379,8 +379,8 @@ func TestCalculateComputeCost(t *testing.T) {
 	})
 	t.Run("a nil pricer (no AWS config) is unpriced, never a guess", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "t3.micro"}
-		cache := map[string]float64{}
-		cost, priced := calculateComputeCost(context.Background(), nil, cache, inst, 1.0)
+		cache := map[string]pricedRate{}
+		cost, _, priced := calculateComputeCost(context.Background(), nil, cache, inst, 1.0)
 		if priced || cost != 0 {
 			t.Errorf("cost=%f priced=%v, want (0, false) with no pricer available", cost, priced)
 		}
@@ -388,11 +388,11 @@ func TestCalculateComputeCost(t *testing.T) {
 	t.Run("caches the rate across calls for the same type and region", func(t *testing.T) {
 		inst := SweepInstance{Region: "us-east-1", ActualType: "m5.large"}
 		p := &fakePricer{price: 0.096}
-		cache := map[string]float64{}
-		if _, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0); !priced {
+		cache := map[string]pricedRate{}
+		if _, _, priced := calculateComputeCost(context.Background(), p, cache, inst, 1.0); !priced {
 			t.Fatal("expected the first call to price successfully")
 		}
-		if _, priced := calculateComputeCost(context.Background(), p, cache, inst, 3.0); !priced {
+		if _, _, priced := calculateComputeCost(context.Background(), p, cache, inst, 3.0); !priced {
 			t.Fatal("expected the second call to price successfully")
 		}
 		if p.calls != 1 {
