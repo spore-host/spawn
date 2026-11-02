@@ -79,10 +79,11 @@ func TestMPIWritesTheConfiguredCompletionFile(t *testing.T) {
 		wantLocal  int
 		wantRemote int
 	}{
-		// Peers-file timeout + spawn_mpi_done's own record; plus the peer send.
-		{"with --mpi-command", "hostname", 2, 1},
-		// Peers-file timeout + the bare readiness-failure record; no peer send.
-		{"without --mpi-command", "", 2, 0},
+		// One local write, spawn_mpi_put: every record, rank 0's result and
+		// every failure the exit trap records (#1483), goes through it. Plus
+		// spawn_mpi_done's send to the peers.
+		{"with --mpi-command", "hostname", 1, 1},
+		{"without --mpi-command", "", 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			script := renderMPI(t, mpiCfg(tc.cmd, customCompletion))
