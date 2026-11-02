@@ -387,6 +387,24 @@ LOCAL_SSH_KEY_BASE64=%s
 // so that STOPS the instance rather than terminating it: its volumes still
 // bill, but stopped is far cheaper than running, and the log line says which
 // happened.
+//
+// After spored is up (#1484) the guard no longer retires: spored enforces the
+// TTL. But the body runs on under set -e (the user, its key and sudoers, the
+// session timeout, the array, hostname and sweep setup, the MOTD) before it
+// launches the --command or hands over to what follows it, and a failure there
+// used to exit with no completion record, so --on-complete never fired and the
+// instance billed until its TTL or idle timeout. So an exit with a non-zero
+// status in that window writes the failed record the command path would,
+// {"status": "failed", "exit_code": <status>, "source": "bootstrap"}, to the
+// completion file, and spored acts on it exactly as on a failed --command:
+// --on-complete's action, or, with none set, nothing (the TTL and idle timeout
+// still bound it, and `spawn status --check-complete` reports the failure).
+// The window ends at SPAWN_HANDED_OFF=1, which the body sets right after it
+// launches the --command subshell (that subshell then owns the outcome) and at
+// its own end (the storage, container, custom user data, MPI and task-runner
+// scripts after it own theirs; the MPI user data's EXIT trap, #1483, writes its
+// own record and then calls this guard, which writes nothing). A clean exit, a
+// subshell and a Spot replacement's exit 0 write nothing.
 const fatalRetireFunc = `
 # spawn_fatal_retire <reason>: spored is not running, so nothing would enforce
 # this instance's TTL. Report why, then terminate it (#1274).
@@ -429,7 +447,9 @@ spawn_exit_guard() {
     # Only the bootstrap shell itself: a subshell, such as the backgrounded
     # --command, exits on its own terms and must never retire the instance.
     [ "${BASHPID:-$$}" = "$SPAWN_MAIN_PID" ] || return 0
-    [ "$SPAWN_SPORED_UP" = 1 ] && return 0
+    # spored is up, so it enforces the TTL; the body records a failure before
+    # it hands off (#1484).
+    [ "$SPAWN_SPORED_UP" = 1 ] && { [ "$rc" = 0 ] || [ -n "$SPAWN_HANDED_OFF" ] || spawn_boot_failed "$rc"; return 0; }
     spawn_fatal_retire "the bootstrap exited (status $rc) before spored started; last failed command: $SPAWN_LAST_FAILED"
 }
 trap spawn_exit_guard EXIT
@@ -1016,6 +1036,14 @@ systemctl daemon-reload
 systemctl enable spored
 systemctl start spored
 # From here a failure no longer retires the instance: spored enforces its TTL.
+# It records a failed completion instead, until the body hands off (#1484; see
+# fatalRetireFunc).
+spawn_boot_failed() {
+    mkdir -p "$(dirname -- "$SPAWN_CMD_COMPLETION_FILE")" || true
+    echo "{\"status\": \"failed\", \"exit_code\": $1, \"source\": \"bootstrap\"}" > "$SPAWN_CMD_COMPLETION_FILE" || true
+    echo "spawn: bootstrap failed (status $1, at $SPAWN_LAST_FAILED) after spored started; recording it (#1484)" | tee -a /var/log/spawn-command.log >&2 || true
+}
+SPAWN_HANDED_OFF=
 SPAWN_SPORED_UP=1
 
 echo "spored installation complete"
@@ -1110,10 +1138,10 @@ if [ "$TIMEOUT_SECONDS" -gt 0 ]; then
 
     # Shell timeout (auto-logout idle shells)
     # Set TMOUT for all users via /etc/profile.d/
+    # readonly, so users cannot unset it. These comments are outside the
+    # heredoc, which is data: they would ship in user data and land in the file.
     cat > /etc/profile.d/session-timeout.sh <<EOFTIMEOUT
 # Automatic logout for idle shells ($SESSION_TIMEOUT)
-# Prevents indefinite logins when users leave sessions idle
-# Note: readonly prevents users from unsetting it
 export TMOUT=$TIMEOUT_SECONDS
 readonly TMOUT
 EOFTIMEOUT
@@ -1148,7 +1176,6 @@ if [ "$JOB_ARRAY_ID" != "None" ]; then
     # Create job array environment file
     cat > /etc/profile.d/job-array.sh <<EOFJOBARRAY
 # Job Array Environment Variables
-# Available to all shells for coordinated distributed computing
 export JOB_ARRAY_ID="$JOB_ARRAY_ID"
 export JOB_ARRAY_NAME="$JOB_ARRAY_NAME"
 export JOB_ARRAY_SIZE="$JOB_ARRAY_SIZE"
@@ -1235,13 +1262,10 @@ if [ "$SWEEP_ID" != "None" ]; then
     # Create parameter sweep environment file
     cat > /etc/profile.d/spawn-params.sh <<EOFPARAMS
 # Parameter Sweep Environment Variables
-# Available to all shells for parameter sweep workloads
 export SWEEP_ID="$SWEEP_ID"
 export SWEEP_NAME="$SWEEP_NAME"
 export SWEEP_SIZE="$SWEEP_SIZE"
 export SWEEP_INDEX="$SWEEP_INDEX"
-
-# Parse and export PARAM_* environment variables from tags
 EOFPARAMS
 
     # Parse param tags and add exports. The value is single-quoted, not
@@ -1499,6 +1523,8 @@ JSONEOF
 {"status": "$CMD_STATE", "exit_code": $CMD_RC, "source": "command"}
 JSONEOF
     ) &
+    # The command's subshell owns the outcome now (#1484).
+    SPAWN_HANDED_OFF=1
 
     echo "▶️  --command started in the background (logs: /var/log/spawn-command.log)"
     echo "   Its exit code lands in /tmp/SPAWN_EXITCODE and drives --on-complete."
@@ -1601,4 +1627,7 @@ if dnf install -y acpid 2>/dev/null || yum install -y acpid 2>/dev/null; then
 else
     echo "acpid not installed; stop/terminate will not shut down gracefully"
 fi
+# The body is done: what runs next (storage, the container, custom user data,
+# MPI, the task runner) or a --command owns the outcome (#1484).
+SPAWN_HANDED_OFF=1
 `
