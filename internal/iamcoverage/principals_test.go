@@ -747,6 +747,9 @@ func TestEveryMainPackageIsAPrincipal(t *testing.T) {
 		// Run by the release workflow with no AWS credentials; it reads git and
 		// the Go module graph only. The scripts module has no AWS SDK dependency.
 		"scripts/deploychecklist": "the release deploy checklist (#1444), which calls no AWS API",
+		// Run by the weekly AWS CLI pin workflow with GITHUB_TOKEN only; it edits
+		// two files in the checkout and calls no AWS API.
+		"scripts/awsclipin": "the AWS CLI pin rewriter (#1495), which calls no AWS API",
 		// It does run as an identity, GitHubActions-spawn-lambda-deploy, but it
 		// calls AWS only through the `aws` CLI, which this SDK call-graph
 		// analysis cannot see. Its own gate does the same job for it:

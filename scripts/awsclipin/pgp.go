@@ -31,6 +31,7 @@ func keyFingerprint(armored string) (string, error) {
 	if len(pkt) > 0xffff {
 		return "", errors.New("public-key packet too long for a v4 fingerprint")
 	}
+	// nosemgrep
 	h := sha1.New() //nolint:gosec // see the import
 	h.Write([]byte{0x99, byte(len(pkt) >> 8), byte(len(pkt))})
 	h.Write(pkt)
