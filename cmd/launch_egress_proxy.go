@@ -25,8 +25,9 @@ import (
 // proxy's client security group. The proxy is never created without the
 // opt-in (owner decision, 2026-11-02).
 //
-// Members do not use the proxy yet: setting http_proxy in their bootstrap is
-// phase 4. Parameter sweeps (foreground and --detach), schedules and pools
+// Members fetch through it only around spawn's own fetches from outside AWS
+// (phase 4: pkg/userdata's EFA and apt steps, pkg/launcher's AWS CLI
+// install), never for the user's command. Parameter sweeps (foreground and --detach), schedules and pools
 // do not support it yet.
 
 // bootstrapEgressEnv sets --bootstrap-egress's default for one shell.
@@ -124,6 +125,10 @@ var egressProxyFindOrCreate = deploy.FindOrCreate
 // egressProxyMemberGroups is deploy.MemberGroups; a seam so tests need no AWS.
 var egressProxyMemberGroups = deploy.MemberGroups
 
+// egressProxyCheckMemberEgress is deploy.CheckMemberEgress; a seam so tests
+// need no AWS.
+var egressProxyCheckMemberEgress = deploy.CheckMemberEgress
+
 // egressProxyClient is the AWS side of find-or-create; a seam so tests need
 // no AWS.
 var egressProxyClient = func(awsClient *aws.Client, region string) deploy.Client {
@@ -171,6 +176,11 @@ func ensureEgressProxy(ctx context.Context, awsClient *aws.Client, config *aws.L
 	}
 	groups, err := egressProxyMemberGroups(ctx, client.Deps.EC2, n.VPCID, config.SecurityGroupIDs, result.Groups)
 	if err != nil {
+		return fail(err)
+	}
+	// A member whose own groups allow no egress to the proxy would stall in
+	// its bootstrap: refuse it now, before any member exists (#1515).
+	if err := egressProxyCheckMemberEgress(ctx, client.Deps.EC2, groups, result.Groups, result.Proxy.PrivateIP); err != nil {
 		return fail(err)
 	}
 	config.SecurityGroupIDs = groups

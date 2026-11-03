@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -415,4 +416,71 @@ func groupUsers(ctx context.Context, api EC2, groupID string) ([]string, error) 
 		}
 	}
 	return sortedKeys(users), nil
+}
+
+// ErrMemberEgress is wrapped by [CheckMemberEgress] when no group of a
+// member's allows it to reach the proxy.
+var ErrMemberEgress = errors.New("the member's security groups do not allow outbound traffic to the egress proxy")
+
+// CheckMemberEgress refuses member groups none of whose egress rules lets a
+// member reach the proxy at proxyIP on TCP [egressproxy.Port] (#1515 phase
+// 4): the clients group's ingress rule on the proxy admits it, but a member's
+// OWN outbound rules must also allow it, and a user's restrictive
+// --security-group-ids may not. Security groups are a union, so one rule in
+// one group is enough: all traffic or a TCP range holding the port, to the
+// clients group, the proxy group, or an IPv4 CIDR holding proxyIP (0.0.0.0/0
+// among them). A prefix-list destination is not counted, since its entries
+// are not read; the clients group itself has no rules. spawn's own groups
+// (the VPC default, the MPI, Windows and --efa-group groups) keep EC2's
+// allow-all egress and pass. The read is ec2:DescribeSecurityGroups, which
+// launch already uses.
+func CheckMemberEgress(ctx context.Context, api EC2, groupIDs []string, g Groups, proxyIP string) error {
+	ip, err := netip.ParseAddr(proxyIP)
+	if err != nil {
+		return fmt.Errorf("egress proxy IP %q: %w", proxyIP, err)
+	}
+	out, err := api.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: groupIDs})
+	if err != nil {
+		return fmt.Errorf("read the member security groups %s to check their egress to the proxy: %w",
+			strings.Join(groupIDs, ", "), err)
+	}
+	var named []string
+	for _, sg := range out.SecurityGroups {
+		for _, r := range rulesOf(sg.IpPermissionsEgress) {
+			if reachesProxy(r, g, ip) {
+				return nil
+			}
+		}
+		id := aws.ToString(sg.GroupId)
+		if id == g.ClientsID {
+			continue
+		}
+		named = append(named, fmt.Sprintf("%s (%s)", id, aws.ToString(sg.GroupName)))
+	}
+	sort.Strings(named)
+	return fmt.Errorf("%w at %s:%d: none of %s allows outbound tcp %d to %s, %s, %s or a CIDR holding %s. "+
+		"Add such an egress rule to one of them, or name a group that has one in --security-group-ids",
+		ErrMemberEgress, proxyIP, egressproxy.Port, strings.Join(named, ", "), egressproxy.Port,
+		g.ClientsID, g.ProxyID, proxyIP, proxyIP)
+}
+
+// reachesProxy reports whether egress rule r lets a member reach the proxy.
+func reachesProxy(r rule, g Groups, ip netip.Addr) bool {
+	switch r.proto {
+	case "-1":
+	case "tcp", "6":
+		if r.from > egressproxy.Port || r.to < egressproxy.Port {
+			return false
+		}
+	default:
+		return false
+	}
+	switch {
+	case r.group != "":
+		return r.group == g.ClientsID || r.group == g.ProxyID
+	case r.cidr != "":
+		p, err := netip.ParsePrefix(r.cidr)
+		return err == nil && p.Contains(ip)
+	}
+	return false
 }

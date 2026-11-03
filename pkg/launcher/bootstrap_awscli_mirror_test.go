@@ -94,8 +94,9 @@ func TestAWSCLIMirrorTriedFirstAndShaChecked(t *testing.T) {
 // spawn-binaries-.s3..amazonaws.com and quietly fall back to the origin, which
 // is the private-subnet failure this mirror exists for. Every call in every
 // rendered bootstrap must pass the region the script read: the instance's
-// ($REGION) or the staged files' bucket's ($SPAWN_ST_REGION, in the launch
-// region, and fetched before the body reads $REGION).
+// ($REGION), the staged files' bucket's ($SPAWN_ST_REGION, in the launch
+// region, and fetched before the body reads $REGION), or the launch region the
+// egress proxy's install names ($SPAWN_PX_REGION, #1515, also before the body).
 func TestEverySpawnNeedAWSCallNamesItsRegion(t *testing.T) {
 	calls := 0
 	for name, script := range toolMatrix(t) {
@@ -113,7 +114,7 @@ func TestEverySpawnNeedAWSCallNamesItsRegion(t *testing.T) {
 			if len(c.Args) == 2 {
 				_ = syntax.NewPrinter().Print(&arg, c.Args[1])
 			}
-			if a := arg.String(); a != `"$REGION"` && a != `"$SPAWN_ST_REGION"` {
+			if a := arg.String(); a != `"$REGION"` && a != `"$SPAWN_ST_REGION"` && a != `"$SPAWN_PX_REGION"` {
 				t.Errorf("%s: spawn_need_aws called with %d args (%q), want one region variable", name, len(c.Args)-1, a)
 			}
 			return true

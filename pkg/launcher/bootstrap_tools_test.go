@@ -120,7 +120,9 @@ func toolMatrix(t *testing.T) map[string]string {
 		"plugins":         {Username: "ec2-user", Plugins: stubConfigs()["plugins"].Plugins},
 		"launch config":   {Username: "ec2-user", LaunchConfig: []byte(`{"v":1}`), ReadsLaunchConfig: true},
 	}
+	cfgs["egress proxy"] = BootstrapConfig{Username: "ubuntu", Command: "echo hi", EgressProxy: &EgressProxy{Addr: "10.0.1.5:3128", Region: "us-east-1"}}
 	cfgs["staged task"] = staged(cfgs["task"])
+	cfgs["staged egress proxy"] = staged(cfgs["egress proxy"])
 	cfgs["staged command"] = staged(BootstrapConfig{Username: "ec2-user", Command: "echo hi"})
 	body := BootstrapBody()
 	out := map[string]string{}

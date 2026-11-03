@@ -18,6 +18,11 @@ func TestUserData_Shellcheck(t *testing.T) {
 			"efa, peer": {Region: "us-east-1", JobArrayID: "ja-1", JobArrayIndex: 2, JobArraySize: 4,
 				MPIProcessesPerNode: 8, MPICommand: "./sim", SkipInstall: true, EFAEnabled: true,
 				CompletionFile: "/var/run/my complete.json"},
+			// Through the egress proxy (#1515): spawn_px and apt's -o options.
+			"efa, egress proxy": {Region: "us-east-1", JobArrayID: "ja-1", JobArrayIndex: 0, JobArraySize: 2,
+				MPICommand: "./sim", EFAEnabled: true, EgressProxyAddr: "10.0.1.5:3128"},
+			"apt install, egress proxy": {Region: "us-east-1", JobArrayID: "ja-1", JobArrayIndex: 0, JobArraySize: 2,
+				MPICommand: "./sim", EgressProxyAddr: "10.0.1.5:3128"},
 		} {
 			t.Run(name, func(t *testing.T) {
 				script, err := GenerateMPIUserData(cfg)

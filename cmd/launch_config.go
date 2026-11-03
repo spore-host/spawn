@@ -907,7 +907,19 @@ func buildUserDataSeeded(plat *platform.Platform, config *aws.LaunchConfig, publ
 		CompletionFile:    config.CompletionFile,
 		LaunchConfig:      launchConfig,
 		ReadsLaunchConfig: readsLaunchConfig,
+		// The egress proxy ensureEgressProxy found or created (#1515): the
+		// AWS CLI install's origin fallback goes through it.
+		EgressProxy: launchEgressProxy(config),
 	})
+}
+
+// launchEgressProxy is the bootstrap's egress proxy for config: the one
+// ensureEgressProxy set, or nil.
+func launchEgressProxy(config *aws.LaunchConfig) *launcher.EgressProxy {
+	if config.EgressProxyAddr == "" {
+		return nil
+	}
+	return &launcher.EgressProxy{Addr: config.EgressProxyAddr, Region: config.Region}
 }
 
 // joinCustomUserData appends a config's own script to --user-data's, each on

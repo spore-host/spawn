@@ -34,6 +34,7 @@ import (
 	"strings"
 
 	"github.com/spore-host/spawn/internal/shellmin"
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/security"
@@ -167,6 +168,52 @@ type BootstrapConfig struct {
 	// at spawn/, which would ignore it (#1419). A release build installs its
 	// own version either way.
 	ReadsLaunchConfig bool
+	// EgressProxy, when set, is the spawn egress proxy a --no-public-ip
+	// --bootstrap-egress proxy launch found or created in its VPC (#1515
+	// phase 4). The only fetch of the bootstrap's own that leaves AWS is the
+	// AWS CLI zip on an image with none (stock Ubuntu): with this set, the
+	// per-launch part installs it first, before the body or the staged
+	// files, with http_proxy/https_proxy/no_proxy set for that one call, so
+	// the regional mirror is still fetched directly through the S3 endpoint
+	// (no_proxy names it) and only awscli.amazonaws.com goes through the
+	// proxy. Nothing else in the bootstrap is proxied, and the published
+	// body is unchanged: see [egressProxyAWSCLI]. nil renders exactly what
+	// it always has.
+	EgressProxy *EgressProxy
+}
+
+// EgressProxy is the egress proxy a launch's bootstrap fetches through.
+type EgressProxy struct {
+	// Addr is the proxy's private IP and port (aws.LaunchConfig.EgressProxyAddr).
+	Addr string
+	// Region is the launch region, which the AWS CLI mirror and no_proxy's
+	// S3 names carry.
+	Region string
+}
+
+// egressProxyAWSCLI is the per-launch call that installs the AWS CLI through
+// the egress proxy p, when the image has none. It runs spawn_need_aws, the
+// body's own function, with the proxy variables prefixed to that one call,
+// so curl inside it sees them and nothing after it does. It precedes the
+// body, whose own spawn_need_aws then finds the CLI installed and returns at
+// once. A failure is not fatal here: the body's call fails closed, with its
+// own message, as it always has.
+//
+// Why here and not in the body: the body is published and signed once per
+// release and must not carry per-launch text, and keeping the proxy out of it
+// leaves every launch without the proxy byte-identical. The cost is the
+// function's definition repeated in the stub-path user data (about 1 KB,
+// as the staged-files path already does).
+func egressProxyAWSCLI(p EgressProxy) (string, error) {
+	env, err := aws.EgressProxyEnv(p.Addr, p.Region)
+	if err != nil {
+		return "", fmt.Errorf("bootstrap: %w", err)
+	}
+	return fmt.Sprintf(`
+# The AWS CLI, with only its origin fallback through the egress proxy (#1515)
+SPAWN_PX_REGION=%s
+%s spawn_need_aws "$SPAWN_PX_REGION" || true
+`, p.Region, env), nil
 }
 
 // StagedFiles is a per-launch object holding a launch's command and task
@@ -313,9 +360,10 @@ func buildLinuxBootstrap(cfg BootstrapConfig, version, spored, body string) (str
 		// which defines them inside the fetched body, runs the same commands.
 		return prefix + bodyFuncs() + pre + bodyMain() + post, nil
 	}
-	if cfg.StagedFiles != nil {
+	if cfg.StagedFiles != nil || cfg.EgressProxy != nil {
 		// The staged files are fetched with the aws CLI before the body,
-		// which defines spawn_need_aws, has been fetched (#1490).
+		// which defines spawn_need_aws, has been fetched (#1490), and the
+		// egress proxy's AWS CLI install calls it there too (#1515).
 		pre = awsCLIInstallFunc() + pre
 	}
 	return prefix + pre + bodyStub(version, body) + post, nil
@@ -506,6 +554,13 @@ chmod 700 %s
 // the readiness gates, and spored reads plugins.json once at startup.
 func perLaunchPreBody(cfg BootstrapConfig) (string, error) {
 	var script string
+	if cfg.EgressProxy != nil {
+		block, err := egressProxyAWSCLI(*cfg.EgressProxy)
+		if err != nil {
+			return "", err
+		}
+		script += block
+	}
 	if st := cfg.StagedFiles; st != nil {
 		block, err := stagedFilesFetch(cfg, *st)
 		if err != nil {

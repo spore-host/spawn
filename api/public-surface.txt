@@ -654,6 +654,9 @@ func EFALaunchInterfaces(cfg LaunchConfig, capacity EFACapacity) ([]types.Instan
 func EFANetworkInterface(subnetID string, securityGroupIDs []string) types.InstanceNetworkInterfaceSpecification
 func EFANetworkInterfaces(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int) ([]types.InstanceNetworkInterfaceSpecification, error)
 func EFANetworkInterfacesWithSecondaryType(subnetID string, securityGroupIDs []string, capacity EFACapacity, n int, secondaryType string) ([]types.InstanceNetworkInterfaceSpecification, error)
+func EgressProxyEnv(addr, region string) (string, error)
+func EgressProxyNoProxy(region string) []string
+func EgressProxyURL(addr string) (string, error)
 func EvaluatePortIngress(groups []types.SecurityGroup, port int32) PortIngress
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
 func GenerateScopedDynamoDBPolicy(region, accountID string) string
@@ -800,6 +803,7 @@ field BootstrapConfig.Command string
 field BootstrapConfig.CompletionFile string
 field BootstrapConfig.ContainerScript string
 field BootstrapConfig.CustomUserData string
+field BootstrapConfig.EgressProxy *EgressProxy
 field BootstrapConfig.InlineBody bool
 field BootstrapConfig.LaunchConfig []byte
 field BootstrapConfig.Plugins []plugin.Declaration
@@ -811,6 +815,8 @@ field BootstrapConfig.StagedFiles *StagedFiles
 field BootstrapConfig.StorageScript string
 field BootstrapConfig.TaskFlushScript string
 field BootstrapConfig.Username string
+field EgressProxy.Addr string
+field EgressProxy.Region string
 field Options.ContainerScript string
 field Options.CustomUserData string
 field Options.Plugins []plugin.Declaration
@@ -836,6 +842,7 @@ func SporedVersion() string
 func StagedFilesObject(command, taskFlushScript string) []byte
 type AWSCLIPin struct
 type BootstrapConfig struct
+type EgressProxy struct
 type Options struct
 type StagedFiles struct
 var CallerVersion string

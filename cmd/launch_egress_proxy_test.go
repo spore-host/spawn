@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/egressproxy"
 	"github.com/spore-host/spawn/pkg/egressproxy/deploy"
+	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/progress"
 )
 
@@ -150,7 +152,8 @@ func stubPreflightViaProxy(t *testing.T, via bool) {
 func stubEgressProxy(t *testing.T, err error) *[]deploy.Request {
 	t.Helper()
 	var reqs []deploy.Request
-	prevFind, prevGroups, prevClient := egressProxyFindOrCreate, egressProxyMemberGroups, egressProxyClient
+	prevFind, prevGroups, prevClient, prevCheck := egressProxyFindOrCreate, egressProxyMemberGroups, egressProxyClient, egressProxyCheckMemberEgress
+	egressProxyCheckMemberEgress = func(context.Context, deploy.EC2, []string, deploy.Groups, string) error { return nil }
 	egressProxyClient = func(*aws.Client, string) deploy.Client {
 		return deploy.Client{Profile: func(context.Context) (string, error) { return "spored-instance-profile", nil }}
 	}
@@ -172,6 +175,7 @@ func stubEgressProxy(t *testing.T, err error) *[]deploy.Request {
 	}
 	t.Cleanup(func() {
 		egressProxyFindOrCreate, egressProxyMemberGroups, egressProxyClient = prevFind, prevGroups, prevClient
+		egressProxyCheckMemberEgress = prevCheck
 	})
 	return &reqs
 }
@@ -288,5 +292,97 @@ func TestSweepMemberGuardRefusesTheProxy(t *testing.T) {
 	cfg.BootstrapEgress = aws.BootstrapEgressNone
 	if err := sweepMemberGuard(cfg); err != nil {
 		t.Errorf("none refused: %v", err)
+	}
+}
+
+// A member whose own groups cannot reach the proxy on tcp 3128 is refused
+// before any member is created, naming the group (#1515 phase 4); the check
+// is given the member's groups and the proxy's address.
+func TestEnsureEgressProxyChecksMemberEgress(t *testing.T) {
+	keepLaunchGlobals(t)
+	stubPreflightViaProxy(t, true)
+	stubEgressProxy(t, nil)
+	type call struct {
+		groups []string
+		g      deploy.Groups
+		ip     string
+	}
+	var calls []call
+	refuse := fmt.Errorf("%w: none of sg-theirs (locked-down) allows outbound tcp 3128", deploy.ErrMemberEgress)
+	egressProxyCheckMemberEgress = func(_ context.Context, _ deploy.EC2, groups []string, g deploy.Groups, ip string) error {
+		calls = append(calls, call{groups, g, ip})
+		return refuse
+	}
+	cfg := &aws.LaunchConfig{Region: "us-east-1", SubnetID: "subnet-1", NoPublicIP: true, BootstrapEgress: aws.BootstrapEgressProxy,
+		SecurityGroupIDs: []string{"sg-theirs"}}
+	err := ensureEgressProxy(context.Background(), nil, cfg, progress.NewQuietProgress(), io.Discard)
+	if !errors.Is(err, deploy.ErrMemberEgress) || !strings.Contains(err.Error(), "sg-theirs") {
+		t.Fatalf("ensureEgressProxy = %v, want the member-egress refusal naming sg-theirs", err)
+	}
+	if len(calls) != 1 || strings.Join(calls[0].groups, ",") != "sg-theirs,sg-clients" || calls[0].ip != "10.0.1.5" ||
+		calls[0].g.ProxyID != "sg-proxy" {
+		t.Errorf("check calls %+v, want the member's groups with the clients group, and the proxy", calls)
+	}
+	if cfg.EgressProxyAddr != "" || strings.Join(cfg.SecurityGroupIDs, ",") != "sg-theirs" {
+		t.Errorf("a refused launch was given the proxy: addr %q groups %v", cfg.EgressProxyAddr, cfg.SecurityGroupIDs)
+	}
+}
+
+// Wired where it lives: the refusal stops `spawn launch` before RunInstances.
+func TestLaunchRefusesMemberGroupsThatCannotReachTheProxy(t *testing.T) {
+	f := &efaSubnetAWS{}
+	serveEFASubnetAWS(t, f)
+	withLogDir(t, false)
+	keepBootstrapEgressSource(t)
+	t.Setenv(bootstrapEgressEnv, "")
+	stubPreflightViaProxy(t, true)
+	stubEgressProxy(t, nil)
+	egressProxyCheckMemberEgress = func(context.Context, deploy.EC2, []string, deploy.Groups, string) error {
+		return fmt.Errorf("%w: none of sg-theirs (locked-down)", deploy.ErrMemberEgress)
+	}
+	setEFALaunchFlags(t, map[string]string{"efa": "false", "instance-type": "c7g.medium",
+		"no-public-ip": "true", "subnet-id": "subnet-1", "bootstrap-egress": "proxy",
+		"key-name": "k", "instance-profile": "my-profile", "security-group-ids": "sg-theirs"})
+	err := runLaunch(launchCmd, nil)
+	if !errors.Is(err, deploy.ErrMemberEgress) {
+		t.Fatalf("runLaunch = %v, want the member-egress refusal", err)
+	}
+	if n := f.count("RunInstances"); n != 0 {
+		t.Errorf("%d RunInstances after the member-egress refusal", n)
+	}
+}
+
+// The CLI hands the proxy to both halves of a member's user data: the
+// bootstrap (the AWS CLI install) and the MPI script (the EFA installer and
+// apt-get). Without a proxy address neither names one.
+func TestMemberUserDataCarriesTheProxy(t *testing.T) {
+	keepLaunchGlobals(t)
+	dir := t.TempDir()
+	pub := filepath.Join(dir, "id.pub")
+	if err := os.WriteFile(pub, []byte("ssh-ed25519 AAAAtest spawn\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plat := &platform.Platform{OS: "linux", HomeDir: dir, SSHPubKeyPath: pub}
+	mpiEnabled, efaEnabled, mpiCommand = true, true, "./sim"
+	for _, addr := range []string{"10.0.1.5:3128", ""} {
+		base := &aws.LaunchConfig{Region: "us-east-1", JobArrayCommand: "true", EgressProxyAddr: addr}
+		boot, err := buildUserData(plat, base, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base.UserData = encodeUserData(boot)
+		m, err := buildJobArrayMemberConfig(base, memberParams{name: "arr", size: 2, mpi: true}, "arr-1", 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		script, err := decodeUserData(m.UserData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hasBoot := strings.Contains(script, "SPAWN_PX_REGION=us-east-1\nhttp_proxy=http://10.0.1.5:3128 ")
+		hasMPI := strings.Contains(script, "spawn_px() { http_proxy=http://10.0.1.5:3128 ")
+		if want := addr != ""; hasBoot != want || hasMPI != want {
+			t.Errorf("addr %q: the bootstrap's AWS CLI install proxied %v, the MPI script %v; want %v", addr, hasBoot, hasMPI, want)
+		}
 	}
 }

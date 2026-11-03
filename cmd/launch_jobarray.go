@@ -186,6 +186,9 @@ func buildJobArrayMemberConfig(baseConfig *aws.LaunchConfig, mp memberParams, jo
 				// Every completion record (rank 0's and the ones it writes on each
 				// peer) must go to the file spored watches (#1170).
 				CompletionFile: instanceConfig.CompletionFile,
+				// The EFA installer and spawn's apt-get go through the
+				// egress proxy the launch found or created (#1515).
+				EgressProxyAddr: baseConfig.EgressProxyAddr,
 			}
 			mpiScript, err := userdata.GenerateMPIUserData(mpiConfig)
 			if err != nil {
