@@ -224,6 +224,12 @@ type Agent struct {
 	spotNow          func() time.Time
 	spotEIPSleep     func(context.Context, time.Duration)
 	spotEIPGo        func(func())
+
+	// externalIdle, when set, is the instance's idle signal in place of
+	// spored's own (#1515, external_idle.go), and externalIdleClock its clock
+	// (nil means time.Now; tests only).
+	externalIdle      atomic.Pointer[ExternalIdle]
+	externalIdleClock func() time.Time
 }
 
 // cfg returns the current config under a read lock. Callers get a stable pointer
@@ -817,6 +823,12 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// this tick's evaluation rather than taking samples of their own (#952).
 	snap := a.evaluateIdle(ctx)
 	a.publishIdleState(snap) // for `spored status`, which cannot sample (#1090)
+	// An instance whose idle signal is a service spored runs (the egress
+	// proxy, #1515) is judged by that alone, and it always terminates.
+	if ext := a.externalIdle.Load(); ext != nil {
+		a.checkExternalIdle(ctx, ext)
+		return
+	}
 	if a.config.IdleTimeout > 0 {
 		log.Print(snap.reason)
 		if snap.idle {

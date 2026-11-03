@@ -110,12 +110,14 @@ func TestRunDaemonStartsTheReplacementCheck(t *testing.T) {
 	}
 	var daemon *ast.FuncDecl
 	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "runDaemon" && fd.Recv == nil {
+		// runDaemon is runDaemonWith(nil); the daemon's body, which every
+		// mode shares (#1515), is runDaemonWith.
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "runDaemonWith" && fd.Recv == nil {
 			daemon = fd
 		}
 	}
 	if daemon == nil {
-		t.Fatal("runDaemon not found in main.go")
+		t.Fatal("runDaemonWith not found in main.go")
 	}
 
 	var checkPos, agentPos token.Pos

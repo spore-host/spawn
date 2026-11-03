@@ -64,6 +64,9 @@ var Paths = []string{
 	"/var/lib/spored/queue-state.json",
 	// Already keyed on instance_id and ignored on a mismatch; removed anyway.
 	"/var/lib/spored/compute-checkpoint.json",
+	// The egress proxy's last activity (#1515): an inherited one would start
+	// a new proxy's idle clock from another instance's traffic.
+	"/var/lib/spored/egress-proxy-activity.json",
 	// Job array / pipeline identity and peers. The MPI user data waits for the
 	// peers file to appear, so an inherited one released it at once with the
 	// parent cohort's addresses.
