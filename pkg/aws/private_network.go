@@ -557,10 +557,13 @@ func describeNATInstance(ctx context.Context, api privateNetworkAPI, instanceID,
 
 // natInstanceProblem is every reason inst, routed to through eniID (its
 // primary interface when ""), is not a working NAT instance for vpcID, whose
-// route tables are tables; "" if it is one. It must be running, the routed
-// interface must forward (source/destination check off), the instance must
-// have a public IPv4 address, and that interface's subnet must send 0.0.0.0/0
-// to an internet gateway. Pure.
+// route tables are tables; "" if it is one. It must be running; the routed
+// interface, the one that forwards, must have its source/destination check
+// off; and an interface with a public IPv4 address, the one its traffic
+// leaves by, must sit in a subnet that sends 0.0.0.0/0 to an internet gateway.
+// The two interfaces may differ: a two-interface NAT has its inside one in the
+// private subnet (whose default route points back at it) and its outside one,
+// with the public IP, in a public subnet. Pure.
 func natInstanceProblem(inst types.Instance, eniID, vpcID string, tables []types.RouteTable) string {
 	var problems []string
 	state := "in an unknown state"
@@ -571,59 +574,82 @@ func natInstanceProblem(inst types.Instance, eniID, vpcID string, tables []types
 		problems = append(problems, "it is "+state+", not running")
 	}
 
-	publicIP := aws.ToString(inst.PublicIpAddress) != ""
-	var eni *types.InstanceNetworkInterface
+	var routed *types.InstanceNetworkInterface
+	var public []*types.InstanceNetworkInterface
 	for i := range inst.NetworkInterfaces {
 		ni := &inst.NetworkInterfaces[i]
-		if ni.Association != nil && aws.ToString(ni.Association.PublicIp) != "" {
-			publicIP = true
-		}
+		primary := ni.Attachment != nil && aws.ToInt32(ni.Attachment.DeviceIndex) == 0
 		switch {
 		case eniID != "" && aws.ToString(ni.NetworkInterfaceId) == eniID:
-			eni = ni
-		case eniID == "" && ni.Attachment != nil && aws.ToInt32(ni.Attachment.DeviceIndex) == 0:
-			eni = ni
+			routed = ni
+		case eniID == "" && primary:
+			routed = ni
+		}
+		// The instance's PublicIpAddress is its primary interface's.
+		if (ni.Association != nil && aws.ToString(ni.Association.PublicIp) != "") ||
+			(primary && aws.ToString(inst.PublicIpAddress) != "") {
+			public = append(public, ni)
 		}
 	}
 
-	if eni == nil {
-		if eniID != "" {
-			problems = append(problems, "the routed network interface "+eniID+" is not one of its interfaces")
-		} else {
-			problems = append(problems, "spawn could not find its primary network interface")
-		}
-	} else {
-		id := aws.ToString(eni.NetworkInterfaceId)
-		check := eni.SourceDestCheck
-		if check == nil {
-			check = inst.SourceDestCheck
+	switch {
+	case routed == nil && eniID != "":
+		problems = append(problems, "the routed network interface "+eniID+" is not one of its interfaces")
+	case routed == nil:
+		problems = append(problems, "spawn could not find its primary network interface")
+	default:
+		check := routed.SourceDestCheck
+		if check == nil && aws.ToString(routed.NetworkInterfaceId) == primaryInterface(inst) {
+			check = inst.SourceDestCheck // the instance's is its primary interface's
 		}
 		// EC2 turns the check on by default; unreported is not off.
 		if check == nil || *check {
-			problems = append(problems, "its source/destination check is on (network interface "+id+"), so it drops traffic it is not the destination of")
+			problems = append(problems, "its source/destination check is on (network interface "+
+				aws.ToString(routed.NetworkInterfaceId)+"), so it drops traffic it is not the destination of")
 		}
 	}
-	if !publicIP {
+
+	if len(public) == 0 {
 		problems = append(problems, "it has no public IPv4 address, so what it forwards cannot leave through an internet gateway")
-	}
-	if eni != nil {
-		if p := natSubnetProblem(eni, vpcID, tables); p != "" {
-			problems = append(problems, p)
+	} else {
+		var why []string
+		for _, ni := range public {
+			p := natSubnetProblem(ni, vpcID, tables)
+			if p == "" {
+				why = nil
+				break
+			}
+			why = append(why, "network interface "+aws.ToString(ni.NetworkInterfaceId)+" is in "+p)
+		}
+		if len(why) > 0 {
+			problems = append(problems, "no interface with a public IPv4 address sits in a subnet routed to an internet gateway: "+
+				strings.Join(why, ", and "))
 		}
 	}
 	return strings.Join(problems, "; ")
 }
 
+// primaryInterface is the ID of inst's interface at device index 0.
+func primaryInterface(inst types.Instance) string {
+	for _, ni := range inst.NetworkInterfaces {
+		if ni.Attachment != nil && aws.ToInt32(ni.Attachment.DeviceIndex) == 0 {
+			return aws.ToString(ni.NetworkInterfaceId)
+		}
+	}
+	return ""
+}
+
 // natSubnetProblem is why eni's subnet does not send 0.0.0.0/0 to an internet
-// gateway, or "" if it does.
+// gateway, phrased to follow "is in" ("subnet-x, whose route table ..."), or
+// "" if it does.
 func natSubnetProblem(eni *types.InstanceNetworkInterface, vpcID string, tables []types.RouteTable) string {
 	subnet := aws.ToString(eni.SubnetId)
 	if v := aws.ToString(eni.VpcId); v != "" && v != vpcID {
-		return fmt.Sprintf("its network interface is in %s, not %s", v, vpcID)
+		return fmt.Sprintf("%s, not %s", v, vpcID)
 	}
 	rt := subnetRouteTable(tables, subnet)
 	if rt == nil {
-		return fmt.Sprintf("its subnet %s has no route table", orNone(subnet))
+		return fmt.Sprintf("%s, which has no route table", orNone(subnet))
 	}
 	t := defaultRoute(*rt)
 	if strings.HasPrefix(t.gateway, "igw-") {
@@ -638,7 +664,7 @@ func natSubnetProblem(eni *types.InstanceNetworkInterface, vpcID string, tables 
 	case t.desc != "":
 		to = "sends 0.0.0.0/0 to " + t.desc + ", not to an internet gateway"
 	}
-	return fmt.Sprintf("its subnet %s's route table %s %s", subnet, aws.ToString(rt.RouteTableId), to)
+	return fmt.Sprintf("%s, whose route table %s %s", subnet, aws.ToString(rt.RouteTableId), to)
 }
 
 // applyNoPublicIP makes a private-only launch (#1433) ask for no public IP on

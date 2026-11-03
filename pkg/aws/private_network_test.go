@@ -548,6 +548,24 @@ func natInstance(edit ...func(*types.Instance)) types.Instance {
 	return i
 }
 
+// twoInterfaceNAT is a working two-interface NAT i-nat: its primary, inside
+// interface eni-in in subnet-1 forwards and has no public IP; its outside
+// interface eni-out, in outsideSubnet, has the public IP and keeps its
+// source/destination check on.
+func twoInterfaceNAT(outsideSubnet string) types.Instance {
+	return natInstance(func(i *types.Instance) {
+		i.SubnetId, i.PublicIpAddress = aws.String("subnet-1"), nil
+		i.NetworkInterfaces = []types.InstanceNetworkInterface{{
+			NetworkInterfaceId: aws.String("eni-in"), SubnetId: aws.String("subnet-1"), VpcId: aws.String("vpc-1"),
+			SourceDestCheck: aws.Bool(false), Attachment: &types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+		}, {
+			NetworkInterfaceId: aws.String("eni-out"), SubnetId: aws.String(outsideSubnet), VpcId: aws.String("vpc-1"),
+			SourceDestCheck: aws.Bool(true), Attachment: &types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(1)},
+			Association: &types.InstanceNetworkInterfaceAssociation{PublicIp: aws.String("203.0.113.8")},
+		}}
+	})
+}
+
 func defaultRouteTo(instance, eni string) types.Route {
 	r := types.Route{DestinationCidrBlock: aws.String("0.0.0.0/0"), State: types.RouteStateActive}
 	if instance != "" {
@@ -602,16 +620,32 @@ func TestNATInstanceIsAWayOut(t *testing.T) {
 				i.PublicIpAddress, i.NetworkInterfaces[0].Association = nil, nil
 			})}}},
 		{name: "the NAT's subnet has no internet gateway route", described: 1,
-			mentions: notNAT + ", which is not a working NAT instance: its subnet subnet-closed's route table rtb-closed has no 0.0.0.0/0 route to an internet gateway",
+			mentions: notNAT + ", which is not a working NAT instance: no interface with a public IPv4 address sits in a subnet routed to an internet gateway: " +
+				"network interface eni-nat is in subnet-closed, whose route table rtb-closed has no 0.0.0.0/0 route to an internet gateway",
 			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
 				i.SubnetId, i.NetworkInterfaces[0].SubnetId = aws.String("subnet-closed"), aws.String("subnet-closed")
 			})}}},
-		// The NAT in the private subnet itself routes back to itself.
-		{name: "the NAT's subnet routes to the NAT", described: 1,
-			mentions: "its subnet subnet-1's route table rtb-priv sends 0.0.0.0/0 to instance i-nat, not to an internet gateway",
+		// A single-interface NAT in the private subnet itself: its public IP
+		// leaves by a subnet whose default route points back at it.
+		{name: "a single-interface NAT in the subnet that routes to it", described: 1,
+			mentions: "network interface eni-nat is in subnet-1, whose route table rtb-priv sends 0.0.0.0/0 to instance i-nat, not to an internet gateway",
 			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
 				i.SubnetId, i.NetworkInterfaces[0].SubnetId = aws.String("subnet-1"), aws.String("subnet-1")
 			})}}},
+		// A two-interface NAT: the routed inside interface sits in the private
+		// subnet (whose default route points back at it), the public IP on the
+		// outside interface in a public subnet. The egress check belongs to the
+		// interface with the public IP; the forwarding check to the routed one.
+		{name: "a two-interface NAT, inside interface routed, outside one public", ok: true, described: 1,
+			mentions: "everything, through NAT instance i-nat on route table rtb-priv",
+			api:      natAPI{route: defaultRouteTo("i-nat", "eni-in"), instances: []types.Instance{twoInterfaceNAT("subnet-pub")}}},
+		{name: "a two-interface NAT routed by instance ID uses its inside primary", ok: true, described: 1,
+			mentions: "NAT instance i-nat",
+			api:      natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{twoInterfaceNAT("subnet-pub")}}},
+		{name: "a two-interface NAT whose public interface has no internet gateway route", described: 1,
+			mentions: notNAT + " (network interface eni-in), which is not a working NAT instance: no interface with a public IPv4 address sits in a " +
+				"subnet routed to an internet gateway: network interface eni-out is in subnet-closed, whose route table rtb-closed has no 0.0.0.0/0 route to an internet gateway",
+			api: natAPI{route: defaultRouteTo("i-nat", "eni-in"), instances: []types.Instance{twoInterfaceNAT("subnet-closed")}}},
 		{name: "a NAT instance that is not running (route not yet blackholed)", described: 1,
 			mentions: notNAT + ", which is not a working NAT instance: it is stopping, not running",
 			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
