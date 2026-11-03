@@ -418,7 +418,7 @@ func init() {
 		"(the EFA installer, say) when the subnet has no NAT route. none (default): it does not, and such a launch is refused, naming what it needs. "+
 		"proxy: through a spawn egress proxy in the VPC, a t4g.nano in a public subnet that spawn finds or creates, which forwards only to "+
 		"spawn's own bootstrap hosts; members get its client security group. The VPC needs a public subnet routed to an internet gateway. "+
-		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with `spawn defaults set bootstrap-egress proxy`. Not supported on parameter sweeps yet (#1515)")
+		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with spawn defaults set bootstrap-egress proxy. Not supported on parameter sweeps yet (#1515)")
 	launchCmd.Flags().DurationVar(&egressProxyIdle, "egress-proxy-idle", egressproxy.DefaultIdle, "With --bootstrap-egress proxy: how long a proxy this launch creates may go "+
 		"with nothing proxied before it is retired. At most the proxy's life of "+egressproxy.MaxLife.String()+" (the TTL reaper's ceiling less a day), which ends it regardless")
 	launchCmd.Flags().StringVar(&efaGroup, "efa-group", "", "With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper")
