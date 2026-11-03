@@ -629,16 +629,16 @@ func natSubnetProblem(eni *types.InstanceNetworkInterface, vpcID string, tables 
 	if strings.HasPrefix(t.gateway, "igw-") {
 		return ""
 	}
-	to := "has no 0.0.0.0/0 route"
+	to := "has no 0.0.0.0/0 route to an internet gateway"
 	switch {
 	case t.nat != "":
-		to = "sends 0.0.0.0/0 to NAT gateway " + t.nat
+		to = "sends 0.0.0.0/0 to NAT gateway " + t.nat + ", not to an internet gateway"
 	case t.gateway != "": // a virtual private gateway, say
-		to = "sends 0.0.0.0/0 to gateway " + t.gateway
+		to = "sends 0.0.0.0/0 to gateway " + t.gateway + ", not to an internet gateway"
 	case t.desc != "":
-		to = "sends 0.0.0.0/0 to " + t.desc
+		to = "sends 0.0.0.0/0 to " + t.desc + ", not to an internet gateway"
 	}
-	return fmt.Sprintf("its subnet %s's route table %s %s, not to an internet gateway", subnet, aws.ToString(rt.RouteTableId), to)
+	return fmt.Sprintf("its subnet %s's route table %s %s", subnet, aws.ToString(rt.RouteTableId), to)
 }
 
 // applyNoPublicIP makes a private-only launch (#1433) ask for no public IP on
