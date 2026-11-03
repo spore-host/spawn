@@ -91,6 +91,8 @@ func newRootCmd() *cobra.Command {
 		newDiscardInheritedStateCmd(),
 		// The task wrapper records output regeneration cost and provenance (#1076).
 		newProvenanceCmd(),
+		// The managed egress proxy for --no-public-ip bootstraps (#1515).
+		newEgressProxyCmd(),
 		// Explicit `version` subcommand preserves the historical contract
 		// (`spored version` → "spored version X"); cobra's --version flag alone
 		// would break callers that parse it: `spawn upgrade-spored`
@@ -123,7 +125,17 @@ func main() {
 }
 
 // runDaemon is the lifecycle-monitoring daemon (the bare `spored` invocation).
-func runDaemon() {
+func runDaemon() { runDaemonWith(nil) }
+
+// daemonMode is a service the daemon runs beside its lifecycle loop, such as
+// the egress proxy (#1515). attach is called once the agent exists and before
+// its monitor loop starts; the function it returns runs at shutdown.
+type daemonMode interface {
+	attach(ctx context.Context, ag *agent.Agent, identity *provider.Identity) (stop func())
+}
+
+// runDaemonWith is runDaemon with an optional mode attached.
+func runDaemonWith(mode daemonMode) {
 	// Subscribe to reload requests before anything else, so one that arrives
 	// during startup waits for the monitor loop instead of stopping the
 	// process (#1278).
@@ -251,6 +263,13 @@ func runDaemon() {
 		}
 	}
 
+	// A mode attaches before the monitor loop starts, so the loop's first
+	// tick already sees what it sets (the egress proxy's idle signal).
+	stopMode := func() {}
+	if mode != nil {
+		stopMode = mode.attach(ctx, agent, agentIdentity)
+	}
+
 	// Start monitoring. `spored reload` reaches the loop through reloads.
 	go forwardReloads(ctx, reloads, agent.RequestReload)
 	go agent.Monitor(ctx)
@@ -264,6 +283,7 @@ func runDaemon() {
 
 	// Graceful shutdown - run cleanup tasks
 	cancel()
+	stopMode()
 
 	// Run cleanup with a timeout context
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
