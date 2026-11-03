@@ -402,7 +402,8 @@ func init() {
 		"Amazon Linux's amazon-ec2-net-utils set up per-interface policy routing at boot; spawn adds none. Refused without multi-card EFA")
 	launchCmd.Flags().BoolVar(&noPublicIP, "no-public-ip", false, "Launch with private IPs only: no public IP on any interface, and no Elastic IP for a multi-card --efa launch, "+
 		"so the region's Elastic IP quota does not limit the fleet. Needs --subnet-id, or --az to let spawn pick a subnet. "+
-		"Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a NAT gateway route, "+
+		"Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a 0.0.0.0/0 route to a NAT gateway "+
+		"or to a working NAT instance (running, source/destination check off, a public IPv4 address, in a subnet routed to an internet gateway), "+
 		"or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the "+
 		"launch if not; a sweep checks each member's subnet, a detached one at --detach. spawn connect uses SSM. Refused with --dns and "+
 		"--wait-for-ssh; the DNS record --name implies is skipped")

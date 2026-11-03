@@ -8,6 +8,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
 // --- --no-public-ip (#1433) ---
@@ -469,5 +473,241 @@ func TestPreflightNoPublicIPRepeatPrintsNothingNew(t *testing.T) {
 	}
 	if second.Len() != 0 {
 		t.Errorf("the repeated check printed again:\n%s", second.String())
+	}
+}
+
+// --- a NAT instance as the way out (#1515) ---
+
+// natAPI is a typed fake privateNetworkAPI: subnet-1 in vpc-1 has route table
+// rtb-priv, whose 0.0.0.0/0 route is the case's; subnet-pub's rtb-pub sends
+// 0.0.0.0/0 to igw-1; subnet-closed's rtb-closed has no default route.
+type natAPI struct {
+	route     types.Route
+	instances []types.Instance
+	descErr   error
+	described int
+}
+
+func (f *natAPI) DescribeSubnets(_ context.Context, in *ec2.DescribeSubnetsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error) {
+	return &ec2.DescribeSubnetsOutput{Subnets: []types.Subnet{
+		{SubnetId: aws.String("subnet-1"), VpcId: aws.String("vpc-1"), AvailabilityZone: aws.String("us-west-2a")},
+	}}, nil
+}
+
+func (f *natAPI) DescribeRouteTables(context.Context, *ec2.DescribeRouteTablesInput, ...func(*ec2.Options)) (*ec2.DescribeRouteTablesOutput, error) {
+	local := types.Route{DestinationCidrBlock: aws.String("10.0.0.0/16"), GatewayId: aws.String("local"), State: types.RouteStateActive}
+	table := func(id, subnet string, routes ...types.Route) types.RouteTable {
+		return types.RouteTable{RouteTableId: aws.String(id), VpcId: aws.String("vpc-1"), Routes: append([]types.Route{local}, routes...),
+			Associations: []types.RouteTableAssociation{{SubnetId: aws.String(subnet)}}}
+	}
+	main := types.RouteTable{RouteTableId: aws.String("rtb-main"), VpcId: aws.String("vpc-1"), Routes: []types.Route{local},
+		Associations: []types.RouteTableAssociation{{Main: aws.Bool(true)}}}
+	return &ec2.DescribeRouteTablesOutput{RouteTables: []types.RouteTable{
+		main,
+		table("rtb-priv", "subnet-1", f.route),
+		table("rtb-pub", "subnet-pub", types.Route{DestinationCidrBlock: aws.String("0.0.0.0/0"), GatewayId: aws.String("igw-1"), State: types.RouteStateActive}),
+		table("rtb-closed", "subnet-closed"),
+	}}, nil
+}
+
+func (f *natAPI) DescribeVpcEndpoints(context.Context, *ec2.DescribeVpcEndpointsInput, ...func(*ec2.Options)) (*ec2.DescribeVpcEndpointsOutput, error) {
+	return &ec2.DescribeVpcEndpointsOutput{}, nil
+}
+
+func (f *natAPI) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+	f.described++
+	if f.descErr != nil {
+		return nil, f.descErr
+	}
+	var out []types.Instance
+	for _, i := range f.instances {
+		if containsString(in.InstanceIds, aws.ToString(i.InstanceId)) {
+			out = append(out, i)
+		}
+	}
+	return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: out}}}, nil
+}
+
+// natInstance is a working NAT instance i-nat: running, its primary interface
+// eni-nat in subnet-pub with the source/destination check off and a public IP.
+// The EC2 API reports the check on the instance too, for the primary.
+func natInstance(edit ...func(*types.Instance)) types.Instance {
+	i := types.Instance{
+		InstanceId: aws.String("i-nat"), VpcId: aws.String("vpc-1"), SubnetId: aws.String("subnet-pub"),
+		State:           &types.InstanceState{Name: types.InstanceStateNameRunning},
+		SourceDestCheck: aws.Bool(false), PublicIpAddress: aws.String("203.0.113.7"),
+		NetworkInterfaces: []types.InstanceNetworkInterface{{
+			NetworkInterfaceId: aws.String("eni-nat"), SubnetId: aws.String("subnet-pub"), VpcId: aws.String("vpc-1"),
+			SourceDestCheck: aws.Bool(false), Attachment: &types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+			Association: &types.InstanceNetworkInterfaceAssociation{PublicIp: aws.String("203.0.113.7")},
+		}},
+	}
+	for _, e := range edit {
+		e(&i)
+	}
+	return i
+}
+
+// twoInterfaceNAT is a working two-interface NAT i-nat: its primary, inside
+// interface eni-in in subnet-1 forwards and has no public IP; its outside
+// interface eni-out, in outsideSubnet, has the public IP and keeps its
+// source/destination check on.
+func twoInterfaceNAT(outsideSubnet string) types.Instance {
+	return natInstance(func(i *types.Instance) {
+		i.SubnetId, i.PublicIpAddress = aws.String("subnet-1"), nil
+		i.NetworkInterfaces = []types.InstanceNetworkInterface{{
+			NetworkInterfaceId: aws.String("eni-in"), SubnetId: aws.String("subnet-1"), VpcId: aws.String("vpc-1"),
+			SourceDestCheck: aws.Bool(false), Attachment: &types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+		}, {
+			NetworkInterfaceId: aws.String("eni-out"), SubnetId: aws.String(outsideSubnet), VpcId: aws.String("vpc-1"),
+			SourceDestCheck: aws.Bool(true), Attachment: &types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(1)},
+			Association: &types.InstanceNetworkInterfaceAssociation{PublicIp: aws.String("203.0.113.8")},
+		}}
+	})
+}
+
+func defaultRouteTo(instance, eni string) types.Route {
+	r := types.Route{DestinationCidrBlock: aws.String("0.0.0.0/0"), State: types.RouteStateActive}
+	if instance != "" {
+		r.InstanceId = aws.String(instance)
+	}
+	if eni != "" {
+		r.NetworkInterfaceId = aws.String(eni)
+	}
+	return r
+}
+
+// The subnet has no VPC endpoints at all, and the launch needs the internet
+// (the EFA installer), so only a way out through the default route passes.
+func TestNATInstanceIsAWayOut(t *testing.T) {
+	const notNAT = "0.0.0.0/0 goes to instance i-nat"
+	secondary := func(check bool) func(*types.Instance) {
+		return func(i *types.Instance) {
+			i.NetworkInterfaces = append(i.NetworkInterfaces, types.InstanceNetworkInterface{
+				NetworkInterfaceId: aws.String("eni-2"), SubnetId: aws.String("subnet-pub"), VpcId: aws.String("vpc-1"),
+				SourceDestCheck: aws.Bool(check), Attachment: &types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(1)},
+			})
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		api       natAPI
+		ok        bool
+		mentions  string // in Met when ok, else in every Missing entry
+		absent    string // in no Missing entry
+		described int    // DescribeInstances calls
+	}{
+		{name: "a working NAT instance, routed by instance ID", ok: true, described: 1, mentions: "everything, through NAT instance i-nat on route table rtb-priv",
+			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance()}}},
+		{name: "a working NAT instance, routed by its interface", ok: true, described: 1, mentions: "everything, through NAT instance i-nat on route table rtb-priv",
+			api: natAPI{route: defaultRouteTo("i-nat", "eni-nat"), instances: []types.Instance{natInstance()}}},
+		// The routed interface's check is the one that matters, not the primary's.
+		{name: "routed through a secondary interface that forwards", ok: true, described: 1, mentions: "NAT instance i-nat",
+			api: natAPI{route: defaultRouteTo("i-nat", "eni-2"), instances: []types.Instance{natInstance(func(i *types.Instance) {
+				i.SourceDestCheck, i.NetworkInterfaces[0].SourceDestCheck = aws.Bool(true), aws.Bool(true)
+			}, secondary(false))}}},
+		{name: "routed through a secondary interface that does not forward", described: 1,
+			mentions: notNAT + " (network interface eni-2), which is not a working NAT instance: its source/destination check is on (network interface eni-2)",
+			api:      natAPI{route: defaultRouteTo("i-nat", "eni-2"), instances: []types.Instance{natInstance(secondary(true))}}},
+		{name: "source/destination check on", described: 1,
+			mentions: notNAT + ", which is not a working NAT instance: its source/destination check is on (network interface eni-nat)",
+			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
+				i.SourceDestCheck, i.NetworkInterfaces[0].SourceDestCheck = aws.Bool(true), aws.Bool(true)
+			})}}},
+		{name: "no public IP", described: 1,
+			mentions: notNAT + ", which is not a working NAT instance: it has no public IPv4 address",
+			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
+				i.PublicIpAddress, i.NetworkInterfaces[0].Association = nil, nil
+			})}}},
+		{name: "the NAT's subnet has no internet gateway route", described: 1,
+			mentions: notNAT + ", which is not a working NAT instance: no interface with a public IPv4 address sits in a subnet routed to an internet gateway: " +
+				"network interface eni-nat is in subnet-closed, whose route table rtb-closed has no 0.0.0.0/0 route to an internet gateway",
+			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
+				i.SubnetId, i.NetworkInterfaces[0].SubnetId = aws.String("subnet-closed"), aws.String("subnet-closed")
+			})}}},
+		// A single-interface NAT in the private subnet itself: its public IP
+		// leaves by a subnet whose default route points back at it.
+		{name: "a single-interface NAT in the subnet that routes to it", described: 1,
+			mentions: "network interface eni-nat is in subnet-1, whose route table rtb-priv sends 0.0.0.0/0 to instance i-nat, not to an internet gateway",
+			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
+				i.SubnetId, i.NetworkInterfaces[0].SubnetId = aws.String("subnet-1"), aws.String("subnet-1")
+			})}}},
+		// A two-interface NAT: the routed inside interface sits in the private
+		// subnet (whose default route points back at it), the public IP on the
+		// outside interface in a public subnet. The egress check belongs to the
+		// interface with the public IP; the forwarding check to the routed one.
+		{name: "a two-interface NAT, inside interface routed, outside one public", ok: true, described: 1,
+			mentions: "everything, through NAT instance i-nat on route table rtb-priv",
+			api:      natAPI{route: defaultRouteTo("i-nat", "eni-in"), instances: []types.Instance{twoInterfaceNAT("subnet-pub")}}},
+		{name: "a two-interface NAT routed by instance ID uses its inside primary", ok: true, described: 1,
+			mentions: "NAT instance i-nat",
+			api:      natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{twoInterfaceNAT("subnet-pub")}}},
+		{name: "a two-interface NAT whose public interface has no internet gateway route", described: 1,
+			mentions: notNAT + " (network interface eni-in), which is not a working NAT instance: no interface with a public IPv4 address sits in a " +
+				"subnet routed to an internet gateway: network interface eni-out is in subnet-closed, whose route table rtb-closed has no 0.0.0.0/0 route to an internet gateway",
+			api: natAPI{route: defaultRouteTo("i-nat", "eni-in"), instances: []types.Instance{twoInterfaceNAT("subnet-closed")}}},
+		{name: "a NAT instance that is not running (route not yet blackholed)", described: 1,
+			mentions: notNAT + ", which is not a working NAT instance: it is stopping, not running",
+			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
+				i.State.Name = types.InstanceStateNameStopping
+			})}}},
+		{name: "every failed check is named", described: 1,
+			mentions: "it is stopping, not running; its source/destination check is on (network interface eni-nat), so it drops traffic it is not the destination of; it has no public IPv4 address",
+			api: natAPI{route: defaultRouteTo("i-nat", ""), instances: []types.Instance{natInstance(func(i *types.Instance) {
+				i.State.Name = types.InstanceStateNameStopping
+				i.SourceDestCheck, i.NetworkInterfaces[0].SourceDestCheck = aws.Bool(true), aws.Bool(true)
+				i.PublicIpAddress, i.NetworkInterfaces[0].Association = nil, nil
+			})}}},
+		{name: "a stopped NAT's blackholed route is no route", described: 0, mentions: "no NAT route in rtb-priv", absent: "0.0.0.0/0 goes to",
+			api: natAPI{route: func() types.Route {
+				r := defaultRouteTo("i-nat", "eni-nat")
+				r.State = types.RouteStateBlackhole
+				return r
+			}()}},
+		{name: "an interface attached to no instance", described: 0,
+			mentions: "0.0.0.0/0 goes to network interface eni-x, which is not a working NAT instance: the network interface is attached to no instance",
+			api:      natAPI{route: defaultRouteTo("", "eni-x")}},
+		{name: "the instance cannot be read", described: 1,
+			mentions: notNAT + ", which is not a working NAT instance: spawn could not read it (ec2:DescribeInstances: denied)",
+			api:      natAPI{route: defaultRouteTo("i-nat", ""), descErr: errors.New("denied")}},
+		{name: "the instance is gone", described: 1, mentions: "spawn could not find it",
+			api: natAPI{route: defaultRouteTo("i-nat", "")}},
+		{name: "a NAT gateway is unchanged", ok: true, described: 0, mentions: "everything, through NAT gateway nat-1 on route table rtb-priv",
+			api: natAPI{route: types.Route{DestinationCidrBlock: aws.String("0.0.0.0/0"), NatGatewayId: aws.String("nat-1"), State: types.RouteStateActive}}},
+		{name: "an internet gateway is unchanged", described: 0,
+			mentions: "0.0.0.0/0 goes to internet gateway igw-9, which spawn does not count as a way out for an instance with no public IP",
+			api:      natAPI{route: types.Route{DestinationCidrBlock: aws.String("0.0.0.0/0"), GatewayId: aws.String("igw-9"), State: types.RouteStateActive}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, err := describePrivateNetwork(context.Background(), &tc.api, pnRegion, "subnet-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.api.described != tc.described {
+				t.Errorf("%d DescribeInstances calls, want %d", tc.api.described, tc.described)
+			}
+			c := CheckPrivateNetwork(n, privateCfg, []string{"the EFA installer"})
+			if c.OK() != tc.ok {
+				t.Fatalf("OK() = %t, want %t: met %q, missing %q", c.OK(), tc.ok, c.Met, c.Missing)
+			}
+			if tc.ok {
+				if len(c.Met) != 1 || !strings.Contains(c.Met[0], tc.mentions) {
+					t.Errorf("met = %q, want it to say %q", c.Met, tc.mentions)
+				}
+				instance := strings.Contains(tc.mentions, "NAT instance")
+				if warned := len(c.Warnings) == 1 && strings.Contains(c.Warnings[0], "trusts the route"); warned != instance {
+					t.Errorf("warnings = %q; a NAT instance must warn that spawn trusts the route, and nothing else may", c.Warnings)
+				}
+				return
+			}
+			for _, m := range c.Missing {
+				if !strings.Contains(m, tc.mentions) {
+					t.Errorf("missing entry %q does not say %q", m, tc.mentions)
+				}
+				if tc.absent != "" && strings.Contains(m, tc.absent) {
+					t.Errorf("missing entry %q says %q", m, tc.absent)
+				}
+			}
+		})
 	}
 }

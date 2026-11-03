@@ -393,6 +393,8 @@ field PrivateNetwork.AvailabilityZone string
 field PrivateNetwork.DefaultRoute string
 field PrivateNetwork.Endpoints []PrivateEndpoint
 field PrivateNetwork.NATGatewayID string
+field PrivateNetwork.NATInstanceID string
+field PrivateNetwork.NATInstanceProblem string
 field PrivateNetwork.Region string
 field PrivateNetwork.RouteTableID string
 field PrivateNetwork.SubnetID string
