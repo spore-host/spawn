@@ -18,10 +18,12 @@ import (
 
 // Defaults for `spored egress-proxy` (#1515).
 const (
-	defaultEgressProxyPort = 3128
-	// defaultEgressProxyIdle is the owner's default idle period: 14 days with
-	// nothing proxied, then the proxy instance terminates.
-	defaultEgressProxyIdle = 14 * 24 * time.Hour
+	defaultEgressProxyPort = egressproxy.Port
+	// defaultEgressProxyIdle is the owner's default idle period (2026-11-03):
+	// three days with nothing proxied, then the proxy instance terminates. It
+	// was 14 days until the proxy's life was capped under the TTL reaper's
+	// ceiling, which a 14-day idle period could never reach.
+	defaultEgressProxyIdle = egressproxy.DefaultIdle
 	// egressProxyPersistEvery is how often the last-activity time is written
 	// to disk while it changes.
 	egressProxyPersistEvery = time.Minute
@@ -134,6 +136,21 @@ func (m *egressProxyMode) attach(ctx context.Context, ag *agent.Agent, identity 
 // not the listener binds, so a proxy that cannot serve still expires.
 func (m *egressProxyMode) start(ctx context.Context, ag idleSetter, identity *provider.Identity) func() {
 	now := m.clock()
+	// An idle period longer than the instance's own life is refused: the
+	// deadline would end the proxy first, so the setting would promise what
+	// nothing keeps (#1515). spawn never launches one; this is the backstop
+	// for a unit written by hand. Refusing means not serving at all and
+	// retiring the instance at the next tick, through the same terminate the
+	// idle timeout uses, rather than serving under a period it cannot honour.
+	if err := idleRefusal(ag.GetConfig(), m.idle); err != nil {
+		log.Printf("egress-proxy: refusing to serve: %v; terminating the instance", err)
+		ag.SetExternalIdle(agent.ExternalIdle{
+			Name:         "egress proxy (refused: " + err.Error() + ")",
+			LastActivity: func() time.Time { return time.Time{} },
+			Timeout:      time.Nanosecond,
+		})
+		return func() {}
+	}
 	persisted, err := egressproxy.LoadActivity(m.statePath)
 	if err != nil {
 		log.Printf("egress-proxy: %v; counting idle from the launch time", err)
@@ -164,6 +181,21 @@ func (m *egressProxyMode) start(ctx context.Context, ag idleSetter, identity *pr
 		wg.Wait()
 		m.save()
 	}
+}
+
+// idleRefusal is why idle cannot be this instance's idle period: it is longer
+// than the instance's life, from its launch to its spawn:ttl-deadline. nil when
+// the instance has no deadline or launch time to measure against.
+func idleRefusal(cfg *provider.Config, idle time.Duration) error {
+	if cfg == nil || cfg.TTLDeadline.IsZero() || cfg.LaunchTime.IsZero() {
+		return nil
+	}
+	life := cfg.TTLDeadline.Sub(cfg.LaunchTime)
+	if idle > life {
+		return fmt.Errorf("--idle %v is longer than this instance's life of %v (launched %s, deadline %s)",
+			idle, life, fmtTime(cfg.LaunchTime), fmtTime(cfg.TTLDeadline))
+	}
+	return nil
 }
 
 // serve binds, retrying until it can or ctx ends, then serves until ctx ends.
