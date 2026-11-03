@@ -417,7 +417,9 @@ func init() {
 	launchCmd.Flags().StringVar(&bootstrapEgress, "bootstrap-egress", aws.BootstrapEgressNone, "With --no-public-ip: how the bootstrap reaches the few hosts outside AWS it fetches from "+
 		"(the EFA installer, say) when the subnet has no NAT route. none (default): it does not, and such a launch is refused, naming what it needs. "+
 		"proxy: through a spawn egress proxy in the VPC, a t4g.micro in a public subnet that spawn finds or creates, which forwards only to "+
-		"spawn's own bootstrap hosts; members get its client security group. The VPC needs a public subnet routed to an internet gateway. "+
+		"spawn's own bootstrap hosts; members get its client security group, and their own groups must allow outbound tcp 3128 to it. "+
+		"Only spawn's own fetches use it (the EFA installer and the packages it installs, spawn's apt-get, the AWS CLI's origin fallback); "+
+		"--command and --mpi-command never see it. The VPC needs a public subnet routed to an internet gateway. "+
 		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with spawn defaults set bootstrap-egress proxy. Not supported on parameter sweeps yet (#1515)")
 	launchCmd.Flags().DurationVar(&egressProxyIdle, "egress-proxy-idle", egressproxy.DefaultIdle, "With --bootstrap-egress proxy: how long a proxy this launch creates may go "+
 		"with nothing proxied before it is retired. At most the proxy's life of "+egressproxy.MaxLife.String()+" (the TTL reaper's ceiling less a day), which ends it regardless")

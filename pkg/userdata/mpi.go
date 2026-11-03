@@ -6,6 +6,7 @@ import (
 	"strings"
 	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template
 
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/security"
 )
 
@@ -38,6 +39,13 @@ type MPIConfig struct {
 	// two must agree or --on-complete never fires and the cohort bills to TTL
 	// (#1170). Empty means /tmp/SPAWN_COMPLETE, the flag default.
 	CompletionFile string
+	// EgressProxyAddr is the private host:port of the spawn egress proxy the
+	// launch found or created (LaunchConfig.EgressProxyAddr, #1515), or "".
+	// When set, the EFA installer's download and run, and the apt-get calls
+	// this script makes, go through it, and nothing else does: see the
+	// "Egress proxy" note below. Empty renders exactly the script it always
+	// has.
+	EgressProxyAddr string
 }
 
 // MPIClusterKeyComment is the comment on every MPI cluster key spawn mints. An
@@ -91,9 +99,14 @@ type mpiTemplateData struct {
 	EFAVersion string
 	EFASHA256  string
 	EFASources string
+	// ProxyEnv is the http_proxy/https_proxy/no_proxy assignments for one
+	// command (pkg/aws EgressProxyEnv), and AptProxy the apt-get options
+	// naming the proxy, with a leading space; both "" without a proxy.
+	ProxyEnv string
+	AptProxy string
 }
 
-func newMPITemplateData(config MPIConfig) mpiTemplateData {
+func newMPITemplateData(config MPIConfig) (mpiTemplateData, error) {
 	p := config.CompletionFile
 	if p == "" {
 		p = defaultCompletionFile
@@ -101,6 +114,15 @@ func newMPITemplateData(config MPIConfig) mpiTemplateData {
 	q := security.ShellQuote(p)
 	remote := `mkdir -p "$(dirname -- ` + q + `)" || true; cat > ` + q
 	id := security.ShellQuote(config.JobArrayID)
+	var proxyEnv, aptProxy string
+	if config.EgressProxyAddr != "" {
+		var err error
+		if proxyEnv, err = aws.EgressProxyEnv(config.EgressProxyAddr, config.Region); err != nil {
+			return mpiTemplateData{}, err
+		}
+		u, _ := aws.EgressProxyURL(config.EgressProxyAddr) // checked by EgressProxyEnv
+		aptProxy = " -o Acquire::http::Proxy=" + u + "/ -o Acquire::https::Proxy=" + u + "/"
+	}
 	return mpiTemplateData{
 		MPIConfig:             config,
 		CompletionPath:        q,
@@ -113,7 +135,9 @@ func newMPITemplateData(config MPIConfig) mpiTemplateData {
 		EFAVersion:            efaInstallerVersion,
 		EFASHA256:             efaPinnedSHA256,
 		EFASources:            strings.Join(efaInstallerSources(config.Region), " "),
-	}
+		ProxyEnv:              proxyEnv,
+		AptProxy:              aptProxy,
+	}, nil
 }
 
 // GenerateMPIUserData generates the MPI setup script for inclusion in user-data
@@ -130,8 +154,12 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 		return "", fmt.Errorf("failed to parse MPI template: %w", err)
 	}
 
+	data, err := newMPITemplateData(config)
+	if err != nil {
+		return "", fmt.Errorf("MPI user-data: %w", err)
+	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, newMPITemplateData(config)); err != nil {
+	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("failed to execute MPI template: %w", err)
 	}
 
@@ -406,6 +434,35 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //     the script refuses --efa on an AL2 --ami (closed, recorded, with a
 //     message) before downloading anything: spawn#1504, and efa.go.
 //
+// Egress proxy (#1515 phase 4). A --no-public-ip member in a subnet with no NAT
+// route reaches S3 and the other AWS services through VPC endpoints, but not
+// efa-installer.amazonaws.com or Ubuntu's apt mirrors. With --bootstrap-egress
+// proxy the launch finds or creates a spawn egress proxy in the VPC before any
+// member starts (cmd/launch_egress_proxy.go), and MPIConfig.EgressProxyAddr
+// names it. Then, and only then:
+//
+//   - spawn_px runs ONE command with http_proxy, https_proxy and no_proxy set
+//     (pkg/aws EgressProxyEnv). The assignments prefix the command inside the
+//     function, so they reach that command's environment and are gone when it
+//     returns: nothing is exported, nothing goes to /etc/environment or
+//     profile.d, and the --mpi-command (run by mpirun from this shell, or on a
+//     peer over ssh) never sees them.
+//   - The EFA download runs under spawn_px. no_proxy names the S3 hosts, so
+//     curl fetches the regional mirror directly, through the S3 endpoint, and
+//     only efa-installer.amazonaws.com through the proxy.
+//   - ./efa_installer.sh runs under spawn_px, for its own package installs:
+//     apt-get on Ubuntu (Ubuntu's mirrors, through the proxy) and dnf on
+//     AL2023, whose repositories are S3 buckets that no_proxy sends direct;
+//     the proxy would refuse them.
+//   - The apt-get calls this script makes carry Acquire::http::Proxy and
+//     Acquire::https::Proxy options, not environment.
+//   - yum/dnf that this script runs (AL2023's Open MPI) is never proxied: it
+//     reaches S3 through the gateway endpoint.
+//
+// The AWS CLI zip, which the bootstrap fetches before this script, is pkg/
+// launcher's (BootstrapConfig.EgressProxy). Without a proxy address every one
+// of these lines renders exactly as it did before #1515.
+//
 // Rationale lives HERE rather than in the template because every byte of the
 // template ships in each instance's user-data, which EC2 caps at 16 KB.
 const mpiUserDataTemplate = `
@@ -459,7 +516,7 @@ if ! command -v mpirun &> /dev/null; then
   elif command -v apt-get >/dev/null; then
     # Ubuntu (#1487): see mpi.go.
     SPAWN_APT=0
-    until apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y --no-install-recommends openmpi-bin libopenmpi-dev; do
+    until apt-get{{.AptProxy}} update && DEBIAN_FRONTEND=noninteractive apt-get{{.AptProxy}} -o DPkg::Lock::Timeout=60 install -y --no-install-recommends openmpi-bin libopenmpi-dev; do
       SPAWN_APT=$((SPAWN_APT + 1))
       [ "$SPAWN_APT" -lt 10 ] || exit 1 # spawn_mpi_exit records it
       sleep 15
@@ -483,13 +540,17 @@ if (. /etc/os-release 2>/dev/null && [ "$ID" = amzn ] && [ "$VERSION_ID" = 2 ]);
   exit 1
 fi
 echo "Installing EFA installer {{.EFAVersion}}..."
+{{- if .ProxyEnv}}
+# Through the egress proxy, for these commands only (#1515): see mpi.go.
+spawn_px() { {{.ProxyEnv}} "$@"; }
+{{- end}}
 if command -v apt-get >/dev/null; then
   # The installer apt-installs its dependencies (environment-modules among
   # them) and needs fresh indexes: a stock Ubuntu AMI's are stale, and with
   # --efa the Open MPI install above, which ran the only update, is skipped
   # (#1491). Same bound as that install; spawn_mpi_exit records a failure.
   SPAWN_APT=0
-  until apt-get update; do
+  until apt-get{{.AptProxy}} update; do
     SPAWN_APT=$((SPAWN_APT + 1))
     [ "$SPAWN_APT" -lt 10 ] || exit 1
     sleep 15
@@ -498,7 +559,7 @@ fi
 rm -rf /tmp/spawn-efa && mkdir -p /tmp/spawn-efa && cd /tmp/spawn-efa || exit 1
 r=1
 for u in {{.EFASources}}; do
-  if curl -fsS --connect-timeout 10 --max-time 1800 --retry 3 -o e.tgz "$u"; then
+  if {{if .ProxyEnv}}spawn_px {{end}}curl -fsS --connect-timeout 10 --max-time 1800 --retry 3 -o e.tgz "$u"; then
     [ "$(sha256sum e.tgz | cut -d ' ' -f 1)" = {{.EFASHA256}} ] && { r=0; break; }
     echo "spawn: EFA installer from $u: sha256 mismatch" >&2
   fi
@@ -507,7 +568,7 @@ done
 if [ "$r" -ne 0 ]; then
   echo "spawn: no EFA installer {{.EFAVersion}} with the pinned sha256" | tee -a /var/log/spawn-command.log >&2
 elif tar -xzf e.tgz && rm -f e.tgz && cd aws-efa-installer; then
-  ./efa_installer.sh -y -g || r=$?
+  {{if .ProxyEnv}}spawn_px {{end}}./efa_installer.sh -y -g || r=$?
 else
   r=1
 fi

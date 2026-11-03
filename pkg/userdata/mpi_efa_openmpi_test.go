@@ -46,12 +46,14 @@ func markedMpirun(marker string) string {
 // AMI (live, spawn#1491) unless 'apt-get update' ran first: it apt-installs
 // its dependencies and the image's indexes are stale.
 func efaInstallerScript(openmpi bool) string {
-	const staleApt = `if command -v apt-get >/dev/null && ! grep -q "^apt-get update" "$STUB_ROOT/apt.log" 2>/dev/null; then echo "E: Unable to locate package environment-modules" >&2; exit 1; fi` + "\n"
+	const staleApt = `if command -v apt-get >/dev/null && ! grep -qE "^apt-get( -o [^ ]+)* update" "$STUB_ROOT/apt.log" 2>/dev/null; then echo "E: Unable to locate package environment-modules" >&2; exit 1; fi` + "\n"
 	install := ""
 	if openmpi {
 		install = `d="$(cd ../../.. && pwd)/opt/amazon/openmpi/bin"; mkdir -p "$d"; cat "$STUB_ROOT/efa-mpirun" > "$d/mpirun"; chmod +x "$d/mpirun"` + "\n"
 	}
-	return "#!/bin/bash\necho \"efa_installer.sh $*\" >> \"$HOME/efa.log\"\n" + staleApt + install
+	// The proxy variables it ran with (#1515), for mpi_egress_proxy_test.go.
+	const env = `printf '%s|%s|%s\n' "${http_proxy-}" "${https_proxy-}" "${no_proxy-}" >> "$HOME/efa-env.log"` + "\n"
+	return "#!/bin/bash\necho \"efa_installer.sh $*\" >> \"$HOME/efa.log\"\n" + env + staleApt + install
 }
 
 // efaTarball is a real gzipped tarball laid out as AWS's is: one
@@ -106,6 +108,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 echo "$url" >> "$HOME/curl.log"
+printf '%s|%s|%s|%s\n' "$url" "${http_proxy-}" "${https_proxy-}" "${no_proxy-}" >> "$HOME/curl-env.log"
 f="$STUB_ROOT/serve/$(printf %s "$url" | tr -c 'A-Za-z0-9.' _)"
 [ -f "$f" ] || exit 22
 cat "$f" > "$out"
@@ -143,14 +146,20 @@ func efaCohort(t *testing.T, efa bool, o sandboxOpts) sandboxRun {
 
 // efaCohortServing is efaCohort with the URLs served given, and the pin left
 // as the caller set it. o.cfg.Region, if set, is the launch region (default
-// us-east-1); the rest of o.cfg is replaced.
+// us-east-1), and o.cfg.MPICommand (default hostname) and EgressProxyAddr are
+// kept; the rest of o.cfg is replaced.
 func efaCohortServing(t *testing.T, efa bool, o sandboxOpts, served map[string][]byte) sandboxRun {
 	t.Helper()
 	region := o.cfg.Region
 	if region == "" {
 		region = "us-east-1"
 	}
-	o.cfg = MPIConfig{Region: region, JobArrayID: "arr-1", JobArrayIndex: 0, JobArraySize: 3, MPICommand: "hostname", EFAEnabled: efa}
+	command := o.cfg.MPICommand
+	if command == "" {
+		command = "hostname"
+	}
+	o.cfg = MPIConfig{Region: region, JobArrayID: "arr-1", JobArrayIndex: 0, JobArraySize: 3, MPICommand: command, EFAEnabled: efa,
+		EgressProxyAddr: o.cfg.EgressProxyAddr}
 	o.peers, o.self = []string{rank0IP, peerA, peerB}, rank0IP
 	if o.stubs == nil {
 		o.stubs = map[string]string{}

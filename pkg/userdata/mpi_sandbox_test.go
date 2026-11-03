@@ -143,7 +143,8 @@ func sandboxStubs(o sandboxOpts) map[string]string {
 while [ $# -gt 0 ]; do case "$1" in -f) f=$2; shift 2 ;; *) shift ;; esac; done
 echo private > "$f"; echo "ssh-rsa AAAAstub spawn-mpi-cohort" > "$f.pub"
 `,
-		"yum":    "#!/bin/bash\necho \"yum $*\" >> \"$STUB_ROOT/yum.log\"\n",
+		"yum": "#!/bin/bash\necho \"yum $*\" >> \"$STUB_ROOT/yum.log\"\n" +
+			`printf '%s|%s|%s\n' "${http_proxy-}" "${https_proxy-}" "${no_proxy-}" >> "$STUB_ROOT/yum-env.log"` + "\n",
 		"mpirun": sandboxMpirun,
 	}
 	if o.apt || o.ubuntu {
@@ -151,6 +152,7 @@ echo private > "$f"; echo "ssh-rsa AAAAstub spawn-mpi-cohort" > "$f.pub"
 		// Installs the mpirun stand-in, once update and install have both run.
 		s["apt-get"] = `#!/bin/bash
 echo "apt-get $*" >> "$STUB_ROOT/apt.log"
+printf '%s|%s|%s\n' "${http_proxy-}" "${https_proxy-}" "${no_proxy-}" >> "$STUB_ROOT/apt-env.log"
 case " $* " in *" install "*) cat "$STUB_ROOT/mpirun.pkg" > "$(dirname "$0")/mpirun" && chmod +x "$(dirname "$0")/mpirun" ;; esac
 `
 	}
