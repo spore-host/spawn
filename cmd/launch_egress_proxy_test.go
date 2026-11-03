@@ -232,6 +232,10 @@ func TestLaunchFindsOrCreatesTheProxyBeforeAnyInstance(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := &efaSubnetAWS{}
 			serveEFASubnetAWS(t, f)
+			// The launch writes audit records (the security group): send
+			// ~/.spawn/audit.log to a temp dir and close it at the end, or
+			// Windows cannot remove the open file from HOME's temp dir.
+			withLogDir(t, false)
 			keepBootstrapEgressSource(t)
 			t.Setenv(bootstrapEgressEnv, "")
 			stubPreflightViaProxy(t, true)
