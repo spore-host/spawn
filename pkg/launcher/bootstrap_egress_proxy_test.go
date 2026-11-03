@@ -185,8 +185,11 @@ func TestEgressProxyLeavesTheBodyAndAPlainLaunchUnchanged(t *testing.T) {
 				t.Errorf("%s/%q: the proxied user data differs from the plain one by more than the proxy's install", name, version)
 			}
 			// Before anything that needs the CLI: the staged files' fetch, and
-			// the body.
+			// the body. After the function it calls is defined.
 			at := strings.Index(proxiedScript, block)
+			if def := strings.Index(proxiedScript, "spawn_need_aws() {"); def < 0 || def > at {
+				t.Errorf("%s/%q: spawn_need_aws is defined at %d, after the egress proxy's call at %d", name, version, def, at)
+			}
 			for _, later := range []string{`spawn_need_aws "$SPAWN_ST_REGION"`, `spawn_need_aws "$REGION"`, bodyPath} {
 				if i := strings.Index(proxiedScript, later); i >= 0 && i < at {
 					t.Errorf("%s/%q: %q comes before the egress proxy's AWS CLI install", name, version, later)

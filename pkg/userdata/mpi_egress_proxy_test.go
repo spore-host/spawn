@@ -202,6 +202,24 @@ func TestMPIAptThroughTheEgressProxy(t *testing.T) {
 	}
 }
 
+// spawn's own yum/dnf (AL2023's Open MPI) is never proxied: its repositories
+// are S3 buckets, which the proxy refuses and the gateway endpoint serves.
+func TestMPIYumIsNotProxied(t *testing.T) {
+	r := efaCohort(t, false, sandboxOpts{noMPI: true, cfg: MPIConfig{EgressProxyAddr: testProxyAddr}})
+	_, envs := readProxyEnvs(t, r, "yum-env.log")
+	if len(envs) == 0 {
+		t.Fatal("yum never ran; the test checks nothing")
+	}
+	for _, e := range envs {
+		if e != (proxyEnv{}) {
+			t.Errorf("yum ran with proxy variables %+v", e)
+		}
+	}
+	if log, _ := r.read(t, "yum.log"); strings.Contains(log, "Proxy") || strings.Contains(log, "proxy") {
+		t.Errorf("yum was given a proxy: %q", log)
+	}
+}
+
 // What a proxied render adds, and nothing else: removing these from it gives
 // the unproxied render, byte for byte. With them it is #1515's script; without
 // EgressProxyAddr it is the script as it was before (TestNoEgressProxyRendersUnchanged).
