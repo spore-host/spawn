@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.157.0] - 2026-11-03
+
 ### Added
 
 - **`spored egress-proxy`: a small forward proxy built into spored, for `--no-public-ip` bootstraps to fetch through. It is not wired to launches yet** (#1515, phase 2). This subcommand runs the usual lifecycle daemon (TTL, cost limit, completion, Spot and DNS) plus a standard-library forward proxy, `pkg/egressproxy`. Nothing creates a proxy instance or sends traffic through one yet. Phase 3 adds find-or-create in the launch path, behind the opt-in `--bootstrap-egress proxy`. Phase 4 sets the proxy environment around the bootstrap's own fetches, and phase 5 adds `spawn egress-proxy status|delete|upgrade` and reaper coverage.
@@ -13300,7 +13302,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.156.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.157.0...HEAD
+[0.157.0]: https://github.com/spore-host/spawn/compare/v0.156.0...v0.157.0
 [0.156.0]: https://github.com/spore-host/spawn/compare/v0.155.0...v0.156.0
 [0.155.0]: https://github.com/spore-host/spawn/compare/v0.154.0...v0.155.0
 [0.154.0]: https://github.com/spore-host/spawn/compare/v0.153.0...v0.154.0
