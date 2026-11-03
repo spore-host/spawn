@@ -1245,9 +1245,8 @@ func mergeManagedSecurityGroup(existing []string, managed string) []string {
 func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws.LaunchConfig, prog *progress.Progress, auditLog *audit.AuditLogger) error {
 	if mpiEnabled {
 		prog.Start("Creating MPI security group")
-		// Get default VPC
-		// Honour --vpc (#673); falls back to the default VPC when unset.
-		vpcID, err := awsClient.ResolveVPC(ctx, config.Region, config.VPCID)
+		// Honour --vpc (#673), then the --subnet-id's VPC, then the default VPC.
+		vpcID, err := awsClient.ResolveLaunchVPC(ctx, config.Region, config.VPCID, config.SubnetID)
 		if err != nil {
 			prog.Error("Creating MPI security group", err)
 			return err
@@ -1274,7 +1273,7 @@ func ensureSecurityGroup(ctx context.Context, awsClient *aws.Client, config *aws
 		// RDP would be impossible (#95). Create a managed Windows SG.
 		prog.Start("Creating Windows security group")
 		// Honour --vpc (#673); falls back to the default VPC when unset.
-		vpcID, err := awsClient.ResolveVPC(ctx, config.Region, config.VPCID)
+		vpcID, err := awsClient.ResolveLaunchVPC(ctx, config.Region, config.VPCID, config.SubnetID)
 		if err != nil {
 			prog.Error("Creating Windows security group", err)
 			return err

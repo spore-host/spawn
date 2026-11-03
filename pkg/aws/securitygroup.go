@@ -593,6 +593,30 @@ func (c *Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (st
 	return vpcID, nil
 }
 
+// ResolveLaunchVPC is the VPC a launch's security groups must be created in:
+// an explicit --vpc, else the VPC of an explicit --subnet-id, else the region's
+// default VPC.
+//
+// [ResolveVPC] alone skips the middle step, so `--subnet-id` in a non-default
+// VPC without `--vpc` created the MPI (and Windows, and --efa-group) security
+// group in the DEFAULT VPC, and RunInstances then refused every member with
+// "Security group … and subnet … belong to different networks" (live, #1515's
+// egress-proxy test). A subnet whose VPC cannot be read fails the launch here,
+// before anything is created, rather than guessing the default VPC.
+func (c *Client) ResolveLaunchVPC(ctx context.Context, region, explicitVPC, subnetID string) (string, error) {
+	if explicitVPC != "" || subnetID == "" {
+		return c.ResolveVPC(ctx, region, explicitVPC)
+	}
+	out, err := c.regionalEC2(region).DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{SubnetIds: []string{subnetID}})
+	if err != nil {
+		return "", fmt.Errorf("cannot read the VPC of --subnet-id %s, which the launch's security group must be created in: %w", subnetID, err)
+	}
+	if len(out.Subnets) == 0 || aws.ToString(out.Subnets[0].VpcId) == "" {
+		return "", fmt.Errorf("--subnet-id %s: no such subnet in %s", subnetID, region)
+	}
+	return aws.ToString(out.Subnets[0].VpcId), nil
+}
+
 // ValidateSubnetInVPC fails closed when an explicit --subnet-id is not in the
 // explicit --vpc.
 //

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--mpi` (and Windows, and `--efa-group`) into a `--subnet-id` of a non-default VPC, without `--vpc`, creates its security group in the subnet's VPC** (found live in #1515's egress-proxy test). The security group was created in the region's **default** VPC, so RunInstances refused every member with "Security group sg-… and subnet subnet-… belong to different networks". The launch's VPC is now an explicit `--vpc`, else the `--subnet-id`'s VPC, else the default VPC. A subnet whose VPC cannot be read fails the launch before anything is created. Public API (additive): `pkg/aws.Client.ResolveLaunchVPC`.
+
 ## [0.157.0] - 2026-11-03
 
 ### Added

@@ -57,7 +57,7 @@ type fakeEFAGroupAPI struct {
 	vpcs    int
 }
 
-func (f *fakeEFAGroupAPI) ResolveVPC(context.Context, string, string) (string, error) {
+func (f *fakeEFAGroupAPI) ResolveLaunchVPC(context.Context, string, string, string) (string, error) {
 	f.vpcs++
 	return "vpc-1", nil
 }
