@@ -188,8 +188,16 @@ type PrivateNetwork struct {
 	RouteTableID string
 	// NATGatewayID is the NAT gateway the route table sends 0.0.0.0/0 to.
 	NATGatewayID string
-	// DefaultRoute describes a 0.0.0.0/0 route to anything else (an internet
-	// gateway, a transit gateway, an instance), which spawn cannot count on.
+	// NATInstanceID is the instance the route table sends 0.0.0.0/0 to (#1515),
+	// directly or through one of its network interfaces. It is a way out only
+	// when NATInstanceProblem is empty.
+	NATInstanceID string
+	// NATInstanceProblem is why the route's instance, or its network interface
+	// with no instance, is not a working NAT instance: every check it failed.
+	NATInstanceProblem string
+	// DefaultRoute describes a 0.0.0.0/0 route to anything but a NAT gateway (an
+	// internet gateway, a transit gateway, an instance or network interface).
+	// Of these spawn counts only a working NAT instance as a way out.
 	DefaultRoute string
 	Endpoints    []PrivateEndpoint
 }
@@ -233,8 +241,18 @@ func CheckPrivateNetwork(n PrivateNetwork, cfg LaunchConfig, internet []string) 
 		out.Met = append(out.Met, fmt.Sprintf("everything, through NAT gateway %s on route table %s", n.NATGatewayID, n.RouteTableID))
 		return out
 	}
+	if n.NATInstanceID != "" && n.NATInstanceProblem == "" {
+		out.Met = append(out.Met, fmt.Sprintf("everything, through NAT instance %s on route table %s", n.NATInstanceID, n.RouteTableID))
+		out.Warnings = append(out.Warnings, fmt.Sprintf("NAT instance %s is running, has its source/destination check off, has a public IPv4 "+
+			"address and sits in a subnet routed to an internet gateway, but spawn cannot see its own IP forwarding and iptables (masquerade) "+
+			"configuration, so it trusts the route", n.NATInstanceID))
+		return out
+	}
 	noNAT := "no NAT route in " + orNone(n.RouteTableID)
-	if n.DefaultRoute != "" {
+	switch {
+	case n.NATInstanceProblem != "":
+		noNAT += " (0.0.0.0/0 goes to " + n.DefaultRoute + ", which is not a working NAT instance: " + n.NATInstanceProblem + ")"
+	case n.DefaultRoute != "":
 		noNAT += " (0.0.0.0/0 goes to " + n.DefaultRoute + ", which spawn does not count as a way out for an instance with no public IP)"
 	}
 	for _, s := range privateServices {
@@ -344,11 +362,16 @@ type privateNetworkAPI interface {
 	DescribeSubnets(ctx context.Context, in *ec2.DescribeSubnetsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
 	DescribeRouteTables(ctx context.Context, in *ec2.DescribeRouteTablesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeRouteTablesOutput, error)
 	DescribeVpcEndpoints(ctx context.Context, in *ec2.DescribeVpcEndpointsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVpcEndpointsOutput, error)
+	// DescribeInstances reads the instance a 0.0.0.0/0 route sends to (#1515).
+	// Every launch path already calls it, so the check needs no new IAM; it
+	// deliberately reads nothing else (no DescribeNetworkInterfaces).
+	DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 }
 
 // DescribePrivateNetwork reads what [CheckPrivateNetwork] decides on for a
 // subnet: read-only (ec2:DescribeSubnets, ec2:DescribeRouteTables,
-// ec2:DescribeVpcEndpoints), and cached on the client per region and subnet.
+// ec2:DescribeVpcEndpoints, and ec2:DescribeInstances for a default route to
+// an instance), and cached on the client per region and subnet.
 func (c *Client) DescribePrivateNetwork(ctx context.Context, region, subnetID string) (PrivateNetwork, error) {
 	key := region + "|" + subnetID
 	if v, ok := c.privateNets.Load(key); ok {
@@ -389,7 +412,17 @@ func describePrivateNetwork(ctx context.Context, api privateNetworkAPI, region, 
 		return n, fmt.Errorf("no route table for subnet %s (no explicit association and no main table in %s)", subnetID, n.VPCID)
 	}
 	n.RouteTableID = aws.ToString(rt.RouteTableId)
-	n.NATGatewayID, n.DefaultRoute = defaultRoute(*rt)
+	route := defaultRoute(*rt)
+	n.NATGatewayID, n.DefaultRoute = route.nat, route.desc
+	switch {
+	case route.instance != "":
+		n.NATInstanceID = route.instance
+		n.NATInstanceProblem = describeNATInstance(ctx, api, route.instance, route.eni, n.VPCID, tables)
+	case route.eni != "":
+		// DescribeRouteTables names the instance of an attached interface, so
+		// this one is attached to none: nothing forwards its traffic.
+		n.NATInstanceProblem = "the network interface is attached to no instance, so nothing forwards its traffic"
+	}
 
 	// The VPC's subnets, for each interface endpoint's AZs.
 	azOf := map[string]string{}
@@ -458,29 +491,154 @@ func subnetRouteTable(tables []types.RouteTable, subnetID string) *types.RouteTa
 	return main
 }
 
-// defaultRoute is the route table's 0.0.0.0/0 target: a NAT gateway's ID, or a
-// description of any other target. A blackholed route is no route.
-func defaultRoute(rt types.RouteTable) (nat, other string) {
+// routeTarget is a route table's 0.0.0.0/0 target.
+type routeTarget struct {
+	// nat is a NAT gateway's ID; gateway an internet (or other) gateway's.
+	nat, gateway string
+	// instance is the instance the route sends to, directly or through its
+	// network interface eni. A route to an attached interface carries both.
+	instance, eni string
+	// desc describes any target but a NAT gateway.
+	desc string
+}
+
+// defaultRoute is the route table's 0.0.0.0/0 target. A blackholed route (to a
+// stopped instance or a deleted gateway, say) is no route.
+func defaultRoute(rt types.RouteTable) routeTarget {
+	var t routeTarget
 	for _, r := range rt.Routes {
 		if aws.ToString(r.DestinationCidrBlock) != "0.0.0.0/0" || r.State == types.RouteStateBlackhole {
 			continue
 		}
+		t = routeTarget{}
 		switch {
 		case aws.ToString(r.NatGatewayId) != "":
-			return aws.ToString(r.NatGatewayId), ""
+			return routeTarget{nat: aws.ToString(r.NatGatewayId)}
 		case aws.ToString(r.GatewayId) != "":
-			other = "internet gateway " + aws.ToString(r.GatewayId)
+			t.gateway = aws.ToString(r.GatewayId)
+			t.desc = "internet gateway " + t.gateway
 		case aws.ToString(r.TransitGatewayId) != "":
-			other = "transit gateway " + aws.ToString(r.TransitGatewayId)
+			t.desc = "transit gateway " + aws.ToString(r.TransitGatewayId)
 		case aws.ToString(r.InstanceId) != "":
-			other = "instance " + aws.ToString(r.InstanceId)
+			t.instance, t.eni = aws.ToString(r.InstanceId), aws.ToString(r.NetworkInterfaceId)
+			t.desc = "instance " + t.instance
+			if t.eni != "" {
+				t.desc += " (network interface " + t.eni + ")"
+			}
 		case aws.ToString(r.NetworkInterfaceId) != "":
-			other = "network interface " + aws.ToString(r.NetworkInterfaceId)
+			t.eni = aws.ToString(r.NetworkInterfaceId)
+			t.desc = "network interface " + t.eni
 		default:
-			other = "an unrecognised target"
+			t.desc = "an unrecognised target"
 		}
 	}
-	return "", other
+	return t
+}
+
+// describeNATInstance reads the instance a default route sends to, with
+// ec2:DescribeInstances only, and returns why it is not a working NAT
+// instance, or "" if it is. A failed read is a problem, not an error: the
+// launch is refused saying so, and --allow-missing-endpoints still lists the
+// rest.
+func describeNATInstance(ctx context.Context, api privateNetworkAPI, instanceID, eniID, vpcID string, tables []types.RouteTable) string {
+	out, err := api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{instanceID}})
+	if err != nil {
+		return fmt.Sprintf("spawn could not read it (ec2:DescribeInstances: %v)", err)
+	}
+	for _, r := range out.Reservations {
+		for _, inst := range r.Instances {
+			if aws.ToString(inst.InstanceId) == instanceID {
+				return natInstanceProblem(inst, eniID, vpcID, tables)
+			}
+		}
+	}
+	return "spawn could not find it (ec2:DescribeInstances returned no such instance)"
+}
+
+// natInstanceProblem is every reason inst, routed to through eniID (its
+// primary interface when ""), is not a working NAT instance for vpcID, whose
+// route tables are tables; "" if it is one. It must be running, the routed
+// interface must forward (source/destination check off), the instance must
+// have a public IPv4 address, and that interface's subnet must send 0.0.0.0/0
+// to an internet gateway. Pure.
+func natInstanceProblem(inst types.Instance, eniID, vpcID string, tables []types.RouteTable) string {
+	var problems []string
+	state := "in an unknown state"
+	if inst.State != nil && inst.State.Name != "" {
+		state = string(inst.State.Name)
+	}
+	if state != string(types.InstanceStateNameRunning) {
+		problems = append(problems, "it is "+state+", not running")
+	}
+
+	publicIP := aws.ToString(inst.PublicIpAddress) != ""
+	var eni *types.InstanceNetworkInterface
+	for i := range inst.NetworkInterfaces {
+		ni := &inst.NetworkInterfaces[i]
+		if ni.Association != nil && aws.ToString(ni.Association.PublicIp) != "" {
+			publicIP = true
+		}
+		switch {
+		case eniID != "" && aws.ToString(ni.NetworkInterfaceId) == eniID:
+			eni = ni
+		case eniID == "" && ni.Attachment != nil && aws.ToInt32(ni.Attachment.DeviceIndex) == 0:
+			eni = ni
+		}
+	}
+
+	if eni == nil {
+		if eniID != "" {
+			problems = append(problems, "the routed network interface "+eniID+" is not one of its interfaces")
+		} else {
+			problems = append(problems, "spawn could not find its primary network interface")
+		}
+	} else {
+		id := aws.ToString(eni.NetworkInterfaceId)
+		check := eni.SourceDestCheck
+		if check == nil {
+			check = inst.SourceDestCheck
+		}
+		// EC2 turns the check on by default; unreported is not off.
+		if check == nil || *check {
+			problems = append(problems, "its source/destination check is on (network interface "+id+"), so it drops traffic it is not the destination of")
+		}
+	}
+	if !publicIP {
+		problems = append(problems, "it has no public IPv4 address, so what it forwards cannot leave through an internet gateway")
+	}
+	if eni != nil {
+		if p := natSubnetProblem(eni, vpcID, tables); p != "" {
+			problems = append(problems, p)
+		}
+	}
+	return strings.Join(problems, "; ")
+}
+
+// natSubnetProblem is why eni's subnet does not send 0.0.0.0/0 to an internet
+// gateway, or "" if it does.
+func natSubnetProblem(eni *types.InstanceNetworkInterface, vpcID string, tables []types.RouteTable) string {
+	subnet := aws.ToString(eni.SubnetId)
+	if v := aws.ToString(eni.VpcId); v != "" && v != vpcID {
+		return fmt.Sprintf("its network interface is in %s, not %s", v, vpcID)
+	}
+	rt := subnetRouteTable(tables, subnet)
+	if rt == nil {
+		return fmt.Sprintf("its subnet %s has no route table", orNone(subnet))
+	}
+	t := defaultRoute(*rt)
+	if strings.HasPrefix(t.gateway, "igw-") {
+		return ""
+	}
+	to := "has no 0.0.0.0/0 route"
+	switch {
+	case t.nat != "":
+		to = "sends 0.0.0.0/0 to NAT gateway " + t.nat
+	case t.gateway != "": // a virtual private gateway, say
+		to = "sends 0.0.0.0/0 to gateway " + t.gateway
+	case t.desc != "":
+		to = "sends 0.0.0.0/0 to " + t.desc
+	}
+	return fmt.Sprintf("its subnet %s's route table %s %s, not to an internet gateway", subnet, aws.ToString(rt.RouteTableId), to)
 }
 
 // applyNoPublicIP makes a private-only launch (#1433) ask for no public IP on
@@ -542,7 +700,8 @@ func (c *Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, int
 			return PrivateCheck{}, nil
 		}
 		return PrivateCheck{}, fmt.Errorf("--no-public-ip: could not check that subnet %s can serve a private-only instance "+
-			"(it reads ec2:DescribeSubnets, ec2:DescribeRouteTables and ec2:DescribeVpcEndpoints): %w. "+
+			"(it reads ec2:DescribeSubnets, ec2:DescribeRouteTables, ec2:DescribeVpcEndpoints and, for a route to an instance, "+
+			"ec2:DescribeInstances): %w. "+
 			"Pass --allow-missing-endpoints to launch without the check", cfg.SubnetID, err)
 	}
 	check := CheckPrivateNetwork(n, *cfg, internet)
@@ -561,6 +720,6 @@ func (c *Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, int
 	}
 	return check, fmt.Errorf("%w: subnet %s (%s, %s) has no way to reach:\n%s\n"+
 		"Without these spored cannot enforce the TTL or cost limit, and `spawn connect` has nothing to reach. Add the VPC "+
-		"endpoints or a NAT gateway route, or pass --allow-missing-endpoints to launch anyway",
+		"endpoints or a route to a NAT gateway or a working NAT instance, or pass --allow-missing-endpoints to launch anyway",
 		ErrPrivateNetworkIncomplete, n.SubnetID, n.VPCID, n.AvailabilityZone, list)
 }
