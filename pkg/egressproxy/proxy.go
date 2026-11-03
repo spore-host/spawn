@@ -463,10 +463,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host, port strin
 func (p *Proxy) deny(w http.ResponseWriter, r *http.Request, host, port string, ref *refusal) {
 	p.refused.Add(1)
 	p.logLine(r, host, port, "refused", ref.reason, 0, 0, p.now())
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// http.Error answers text/plain with nosniff, so the reason, which echoes
+	// the requested host (sanitised), is never read as HTML.
 	w.Header().Set("Connection", "close")
-	w.WriteHeader(ref.status)
-	_, _ = fmt.Fprintf(w, "spawn egress proxy: refused: %s\n", ref.reason)
+	http.Error(w, "spawn egress proxy: refused: "+ref.reason, ref.status)
 }
 
 // logLine writes the one line a request gets: method, host, port, verdict,

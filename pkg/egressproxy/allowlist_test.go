@@ -63,9 +63,9 @@ func TestAllowedCannotBeBypassed(t *testing.T) {
 		"52.94.233.129", "127.0.0.1", "169.254.169.254", "127.1", "0x7f.1", "2130706433",
 		"::1", "[::1]", "fd00:ec2::254", "[fd00:ec2::254]",
 		// IDN: Unicode look-alikes and punycode never match an ASCII entry.
-		"efa-installer。amazonaws.com",  // ideographic full stop
-		"еfa-installer.amazonaws.com",  // Cyrillic е
-		"efa-installer.amazonaws.com​", // zero-width space
+		"efa-installer\u3002amazonaws.com",  // ideographic full stop
+		"\u0435fa-installer.amazonaws.com",  // Cyrillic е
+		"efa-installer.amazonaws.com\u200b", // zero-width space
 		"xn--fa-installer-9ve.amazonaws.com",
 		"xn--efa-installer.amazonaws.com",
 		"us-east-1.ec2.archive.ubuntu.xn--com-9ka",
