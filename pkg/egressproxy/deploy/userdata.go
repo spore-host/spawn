@@ -28,6 +28,9 @@ cat > %[1]s <<'EOFDROPIN'
 ExecStart=
 ExecStart=/usr/local/bin/spored egress-proxy --port %[2]d --idle %[3]s
 EOFDROPIN
+# The proxy never installs packages (each rotation boots a fresh AMI), so
+# AL2023's periodic dnf-makecache, which pressures memory, is turned off.
+systemctl disable --now dnf-makecache.timer 2>/dev/null || true
 systemctl daemon-reload
 systemctl restart spored
 `, UnitDropIn, egressproxy.Port, idle.String())

@@ -150,7 +150,7 @@ func hasTag(tags []types.Tag, key string) bool {
 	return false
 }
 
-// RunInput is the RunInstances request for s: one t4g.nano in a public
+// RunInput is the RunInstances request for s: one t4g.micro in a public
 // subnet with a public IP from EC2 (no Elastic IP), the proxy group as its
 // only group, IMDSv2 required, the spored profile, and the proxy's tags on
 // the instance and its volume. It terminates rather than stops on an OS

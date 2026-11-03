@@ -1,5 +1,5 @@
 // Package deploy finds or creates the spawn egress proxy of a VPC (#1515
-// phase 3): the t4g.nano running `spored egress-proxy` that lets a
+// phase 3): the t4g.micro running `spored egress-proxy` that lets a
 // --no-public-ip launch reach the few hosts outside AWS its bootstrap fetches
 // from, when the VPC has no NAT. One proxy per VPC, shared by every launch in
 // it, found by its tags and by what the instance itself cannot change.
@@ -42,8 +42,11 @@ const (
 	// lookup key, not proof: see [Evaluate] for what is.
 	ProxyTag = "spawn:egress-proxy"
 	// InstanceType is the proxy's size. It carries a handful of bootstrap
-	// downloads per launch, not a workload.
-	InstanceType = "t4g.nano"
+	// downloads per launch, not a workload, but it must stay up for days: on a
+	// t4g.nano (0.5 GiB) the bootstrap's dnf install of acpid drove the kernel
+	// out of memory, and the OOM killer took spored and then systemd-resolved,
+	// the proxy's DNS (live, #1515). 1 GiB leaves dnf room.
+	InstanceType = "t4g.micro"
 	// AMIParameter is the public SSM parameter the proxy's image comes from:
 	// the latest AL2023 arm64, the parameter spawn's auto-AMI already reads
 	// (pkg/aws AMI_AL2023_ARM). Each rotation boots it fresh, so the proxy is

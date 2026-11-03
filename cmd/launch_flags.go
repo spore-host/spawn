@@ -416,7 +416,7 @@ func init() {
 		"and spawn connect may not reach the instance")
 	launchCmd.Flags().StringVar(&bootstrapEgress, "bootstrap-egress", aws.BootstrapEgressNone, "With --no-public-ip: how the bootstrap reaches the few hosts outside AWS it fetches from "+
 		"(the EFA installer, say) when the subnet has no NAT route. none (default): it does not, and such a launch is refused, naming what it needs. "+
-		"proxy: through a spawn egress proxy in the VPC, a t4g.nano in a public subnet that spawn finds or creates, which forwards only to "+
+		"proxy: through a spawn egress proxy in the VPC, a t4g.micro in a public subnet that spawn finds or creates, which forwards only to "+
 		"spawn's own bootstrap hosts; members get its client security group. The VPC needs a public subnet routed to an internet gateway. "+
 		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with spawn defaults set bootstrap-egress proxy. Not supported on parameter sweeps yet (#1515)")
 	launchCmd.Flags().DurationVar(&egressProxyIdle, "egress-proxy-idle", egressproxy.DefaultIdle, "With --bootstrap-egress proxy: how long a proxy this launch creates may go "+

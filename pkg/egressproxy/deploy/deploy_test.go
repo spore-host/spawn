@@ -161,7 +161,7 @@ func TestRunInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if aws.ToString(in.ImageId) != "ami-al2023arm" || in.InstanceType != "t4g.nano" ||
+	if aws.ToString(in.ImageId) != "ami-al2023arm" || in.InstanceType != "t4g.micro" ||
 		aws.ToInt32(in.MinCount) != 1 || aws.ToInt32(in.MaxCount) != 1 {
 		t.Errorf("image %s type %s count %d-%d", aws.ToString(in.ImageId), in.InstanceType, aws.ToInt32(in.MinCount), aws.ToInt32(in.MaxCount))
 	}
