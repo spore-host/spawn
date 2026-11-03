@@ -40,7 +40,7 @@ func validateEFAGroup(name string, efa bool) error {
 
 // efaGroupAPI is what ensureEFAGroup needs of *aws.Client.
 type efaGroupAPI interface {
-	ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
+	ResolveLaunchVPC(ctx context.Context, region, explicitVPC, subnetID string) (string, error)
 	CreateOrGetEFASecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error)
 }
 
@@ -53,7 +53,7 @@ func ensureEFAGroup(ctx context.Context, api efaGroupAPI, config *aws.LaunchConf
 	}
 	const step = "Creating or joining EFA security group"
 	prog.Start(step)
-	vpcID, err := api.ResolveVPC(ctx, config.Region, config.VPCID)
+	vpcID, err := api.ResolveLaunchVPC(ctx, config.Region, config.VPCID, config.SubnetID)
 	if err != nil {
 		prog.Error(step, err)
 		return err

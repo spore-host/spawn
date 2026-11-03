@@ -563,6 +563,7 @@ func (*Client) RecallFSxFilesystem(ctx context.Context, stackName, region string
 func (*Client) RemoveResource(ctx context.Context, r ManagedResource) error
 func (*Client) ResolveDNSTarget(ctx context.Context, region, flagDomain, flagEndpoint, flagFunctionARN string) (spawnconfig.DNSTarget, error)
 func (*Client) ResolveLaunchSettings(ctx context.Context, lc LaunchConfig) LaunchSettings
+func (*Client) ResolveLaunchVPC(ctx context.Context, region, explicitVPC, subnetID string) (string, error)
 func (*Client) ResolveVPC(ctx context.Context, region, explicitVPC string) (string, error)
 func (*Client) RunPowerShell(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
 func (*Client) RunShellScript(ctx context.Context, region, instanceID, command string, timeout time.Duration) (*SSMRunResult, error)
