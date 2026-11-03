@@ -233,6 +233,19 @@ type LaunchConfig struct {
 	// subnet's VPC lacks an endpoint or NAT route it needs (#1433). The
 	// missing services are still listed. Without NoPublicIP it is refused.
 	AllowMissingEndpoints bool
+	// BootstrapEgress is how a NoPublicIP launch reaches the few hosts outside
+	// AWS its bootstrap fetches from when the subnet has no NAT route (#1515):
+	// "" or [BootstrapEgressNone], not at all, so such a launch is refused; or
+	// [BootstrapEgressProxy], through a spawn egress proxy in the VPC, for the
+	// hosts on egressproxy.Allowlist only. The proxy is never implied: it is
+	// the owner's opt-in (2026-11-02). Without NoPublicIP it is refused.
+	BootstrapEgress string
+	// EgressProxyAddr is the private host:port of the egress proxy a
+	// BootstrapEgressProxy launch found or created. Launch refuses a launch
+	// whose subnet check counts on the proxy when it is empty: the CLI's
+	// find-or-create sets it (pkg/egressproxy/deploy), and a caller that has
+	// no proxy must not be told its needs are met.
+	EgressProxyAddr string
 
 	// spawn-specific tags
 	TTL             string
@@ -701,7 +714,15 @@ func (c *Client) prepareLaunch(ctx context.Context, launchConfig LaunchConfig) (
 	// already, so this is a cache hit there; an SDK caller gets it here. With
 	// only an AZ the subnet is chosen and pinned, so the check is of the subnet
 	// the instance lands in.
-	if _, err := c.PreflightNoPublicIP(ctx, &launchConfig, nil, os.Stderr); err != nil {
+	check, err := c.PreflightNoPublicIP(ctx, &launchConfig, nil, os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	// A check that counts on the egress proxy (#1515) is only true once there
+	// is one: the CLI finds or creates it and sets EgressProxyAddr. A caller
+	// that opted in without one would be told its needs are met when nothing
+	// in the VPC meets them.
+	if err := check.requireEgressProxy(launchConfig); err != nil {
 		return nil, err
 	}
 

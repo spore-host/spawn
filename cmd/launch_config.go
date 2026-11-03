@@ -242,6 +242,7 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 		return nil, err
 	}
 	config.NoPublicIP, config.AllowMissingEndpoints = noPublicIP, allowMissingEndpoints
+	config.BootstrapEgress = launchBootstrapEgress()
 	// --placement-group without --mpi: same gap. The flag was applied only in
 	// resolveMPIPlacement, which returns early when --mpi is off, so an explicit
 	// cluster placement group was silently ignored on a single launch.

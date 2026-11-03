@@ -13,9 +13,21 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
+	"github.com/spore-host/spawn/pkg/egressproxy"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
+
+// BootstrapEgressNone and BootstrapEgressProxy are [LaunchConfig.BootstrapEgress]'s
+// values (#1515). "" means none.
+const (
+	BootstrapEgressNone  = "none"
+	BootstrapEgressProxy = "proxy"
+)
+
+// BootstrapEgressFlag is the flag that opts a launch in to the egress proxy,
+// as refusals name it.
+const BootstrapEgressFlag = "--bootstrap-egress proxy"
 
 // A private-only launch (LaunchConfig.NoPublicIP, #1433) has no route to the
 // public AWS endpoints unless its subnet has a NAT route or VPC endpoints for
@@ -158,9 +170,18 @@ var ErrPrivateNetworkIncomplete = errors.New("the subnet cannot serve a private-
 // public IP, and there is none. Pure; [Client.Launch] calls it before any AWS
 // call.
 func (cfg LaunchConfig) ValidateNoPublicIP() error {
+	switch cfg.BootstrapEgress {
+	case "", BootstrapEgressNone, BootstrapEgressProxy:
+	default:
+		return fmt.Errorf("--bootstrap-egress %q: use %s or %s", cfg.BootstrapEgress, BootstrapEgressNone, BootstrapEgressProxy)
+	}
 	if !cfg.NoPublicIP {
 		if cfg.AllowMissingEndpoints {
 			return errors.New("--allow-missing-endpoints applies only with --no-public-ip")
+		}
+		if cfg.BootstrapEgress == BootstrapEgressProxy {
+			return errors.New("--bootstrap-egress proxy applies only with --no-public-ip: an instance with a public IP " +
+				"reaches the internet itself")
 		}
 		return nil
 	}
@@ -200,6 +221,15 @@ type PrivateNetwork struct {
 	// Of these spawn counts only a working NAT instance as a way out.
 	DefaultRoute string
 	Endpoints    []PrivateEndpoint
+	// PublicSubnets are the VPC's subnets whose route table sends 0.0.0.0/0 to
+	// an internet gateway (igw-), where an egress proxy can run (#1515). Sorted
+	// by ID.
+	PublicSubnets []PublicSubnet
+}
+
+// PublicSubnet is a subnet routed to an internet gateway.
+type PublicSubnet struct {
+	SubnetID, AvailabilityZone string
 }
 
 // PrivateEndpoint is one of the VPC's endpoints.
@@ -227,6 +257,34 @@ type PrivateCheck struct {
 	// Met says how each needed service is reached; Missing what cannot be,
 	// and why it matters; Warnings what works with a caveat.
 	Met, Missing, Warnings []string
+	// ViaEgressProxy are the needs Met counts as reached through the spawn
+	// egress proxy (#1515): a launch with any must have one before it starts.
+	ViaEgressProxy []string
+}
+
+// proxyWouldServe reports whether a missing need names the egress proxy as
+// its remedy.
+func (c PrivateCheck) proxyWouldServe() bool {
+	for _, m := range c.Missing {
+		if strings.Contains(m, BootstrapEgressFlag) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrNoEgressProxy is wrapped by a launch whose subnet check counts on the
+// spawn egress proxy but which names none (LaunchConfig.EgressProxyAddr).
+var ErrNoEgressProxy = errors.New("the launch counts on a spawn egress proxy but names none")
+
+// requireEgressProxy refuses cfg when c counts a need as reached through the
+// egress proxy and cfg has no proxy address.
+func (c PrivateCheck) requireEgressProxy(cfg LaunchConfig) error {
+	if len(c.ViaEgressProxy) == 0 || cfg.EgressProxyAddr != "" {
+		return nil
+	}
+	return fmt.Errorf("%w: %s is reached only through it (%s). `spawn launch` finds or creates the proxy; "+
+		"this caller has not", ErrNoEgressProxy, strings.Join(c.ViaEgressProxy, "; "), BootstrapEgressFlag)
 }
 
 // OK reports whether nothing is missing.
@@ -279,10 +337,61 @@ func CheckPrivateNetwork(n PrivateNetwork, cfg LaunchConfig, internet []string) 
 		}
 		out.Missing = append(out.Missing, fmt.Sprintf("%s: %s and %s. Needed because %s", s.Endpoint, why, noNAT, s.Why))
 	}
+	proxy := cfg.BootstrapEgress == BootstrapEgressProxy
+	// The proxy serves the Linux bootstrap's fetches: the Windows bootstrap
+	// does not route its AWS CLI installer download through one.
+	linux := !strings.EqualFold(cfg.TargetOS, "windows")
 	for _, need := range append(privateInternetNeeds(cfg), internet...) {
-		out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s", need, noNAT))
+		// Only a host on the proxy's allowlist can go through it: derived from
+		// the list the proxy enforces, never assumed for a kind of need.
+		viaProxy := linux && egressproxy.Allowed(InternetNeedHost(need))
+		switch {
+		case viaProxy && proxy && len(n.PublicSubnets) > 0:
+			out.Met = append(out.Met, fmt.Sprintf("internet: %s, through the spawn egress proxy in %s", need, orVPC(n.VPCID)))
+			out.ViaEgressProxy = append(out.ViaEgressProxy, need)
+		case viaProxy && proxy:
+			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s, and %s cannot "+
+				"run the egress proxy: it has no public subnet whose route table sends 0.0.0.0/0 to an internet gateway", need, noNAT, orVPC(n.VPCID)))
+		case viaProxy:
+			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s. Pass %s to reach it "+
+				"through a spawn egress proxy in %s", need, noNAT, BootstrapEgressFlag, orVPC(n.VPCID)))
+		case proxy && !linux:
+			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s, and the spawn "+
+				"egress proxy serves the Linux bootstrap only", need, noNAT))
+		case proxy:
+			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s, and the spawn "+
+				"egress proxy forwards only to spawn's own bootstrap hosts, not to this one", need, noNAT))
+		default:
+			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s", need, noNAT))
+		}
 	}
 	return out
+}
+
+func orVPC(vpc string) string {
+	if vpc == "" {
+		return "the subnet's VPC"
+	}
+	return vpc
+}
+
+// InternetNeedHost is the host an internet need names: every need is phrased
+// "what (host)" (privateInternetNeeds, and the CLI's own), so it is what the
+// last parentheses hold, without a port. "" when there is none.
+func InternetNeedHost(need string) string {
+	need = strings.TrimSpace(need)
+	if !strings.HasSuffix(need, ")") {
+		return ""
+	}
+	open := strings.LastIndexByte(need, '(')
+	if open < 0 {
+		return ""
+	}
+	host := need[open+1 : len(need)-1]
+	if h, _, ok := strings.Cut(host, ":"); ok {
+		host = h
+	}
+	return host
 }
 
 func orNone(s string) string {
@@ -433,9 +542,16 @@ func describePrivateNetwork(ctx context.Context, api privateNetworkAPI, region, 
 			return n, fmt.Errorf("describe subnets of %s: %w", n.VPCID, err)
 		}
 		for _, s := range page.Subnets {
-			azOf[aws.ToString(s.SubnetId)] = aws.ToString(s.AvailabilityZone)
+			id := aws.ToString(s.SubnetId)
+			azOf[id] = aws.ToString(s.AvailabilityZone)
+			// Where an egress proxy could run (#1515): read from the tables
+			// already in hand, so it costs no call.
+			if rt := subnetRouteTable(tables, id); rt != nil && strings.HasPrefix(defaultRoute(*rt).gateway, "igw-") {
+				n.PublicSubnets = append(n.PublicSubnets, PublicSubnet{SubnetID: id, AvailabilityZone: azOf[id]})
+			}
 		}
 	}
+	sort.Slice(n.PublicSubnets, func(i, j int) bool { return n.PublicSubnets[i].SubnetID < n.PublicSubnets[j].SubnetID })
 
 	prefix := "com.amazonaws." + region + "."
 	vep := ec2.NewDescribeVpcEndpointsPaginator(api, &ec2.DescribeVpcEndpointsInput{Filters: vpcFilter})
@@ -744,8 +860,12 @@ func (c *Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, int
 			n.SubnetID, n.VPCID, n.AvailabilityZone, list)
 		return check, nil
 	}
+	remedy := "Add the VPC endpoints or a route to a NAT gateway or a working NAT instance"
+	if cfg.BootstrapEgress != BootstrapEgressProxy && check.proxyWouldServe() {
+		remedy += ", pass " + BootstrapEgressFlag + " for the internet needs marked with it"
+	}
 	return check, fmt.Errorf("%w: subnet %s (%s, %s) has no way to reach:\n%s\n"+
-		"Without these spored cannot enforce the TTL or cost limit, and `spawn connect` has nothing to reach. Add the VPC "+
-		"endpoints or a route to a NAT gateway or a working NAT instance, or pass --allow-missing-endpoints to launch anyway",
-		ErrPrivateNetworkIncomplete, n.SubnetID, n.VPCID, n.AvailabilityZone, list)
+		"Without these spored cannot enforce the TTL or cost limit, and `spawn connect` has nothing to reach. %s, "+
+		"or pass --allow-missing-endpoints to launch anyway",
+		ErrPrivateNetworkIncomplete, n.SubnetID, n.VPCID, n.AvailabilityZone, list, remedy)
 }

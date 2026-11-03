@@ -64,7 +64,7 @@ func TestEgressProxyCommandContract(t *testing.T) {
 		t.Fatal("missing egress-proxy subcommand")
 	}
 	for flag, want := range map[string]string{
-		"listen": "", "port": "3128", "idle": "336h0m0s", "state-file": egressProxyStatePath(), "max-conns": "256",
+		"listen": "", "port": "3128", "idle": "72h0m0s", "state-file": egressProxyStatePath(), "max-conns": "256",
 	} {
 		f := cmd.Flags().Lookup(flag)
 		if f == nil {
@@ -218,3 +218,43 @@ type bindErr struct{}
 func (bindErr) Error() string { return "address already in use" }
 
 var errBind = bindErr{}
+
+// An idle period longer than the instance's life (launch to deadline) is
+// refused: the proxy does not serve, and the instance is retired at the next
+// tick instead of running under a period its deadline always beats (#1515).
+func TestEgressProxyRefusesAnIdleLongerThanItsLife(t *testing.T) {
+	launch := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+	cfg := &provider.Config{LaunchTime: launch, TTLDeadline: launch.Add(egressproxy.MaxLife)}
+
+	if err := idleRefusal(cfg, egressproxy.MaxLife); err != nil {
+		t.Errorf("idle equal to the life refused: %v", err)
+	}
+	if err := idleRefusal(cfg, egressproxy.MaxLife+time.Second); err == nil {
+		t.Error("idle one second past the life accepted")
+	}
+	if err := idleRefusal(&provider.Config{}, 1000*time.Hour); err != nil {
+		t.Errorf("no deadline to measure against, yet refused: %v", err)
+	}
+
+	m := &egressProxyMode{port: 3128, idle: egressproxy.MaxLife + time.Hour,
+		statePath: filepath.Join(t.TempDir(), "a.json"), retryWait: 10 * time.Millisecond}
+	bound := false
+	m.listenFunc = func(network, _ string) (net.Listener, error) {
+		bound = true
+		return net.Listen(network, "127.0.0.1:0")
+	}
+	ag := &fakeIdleSetter{cfg: cfg}
+	stop := m.start(context.Background(), ag, &provider.Identity{PrivateIP: "10.0.1.23"})
+	defer stop()
+	time.Sleep(50 * time.Millisecond)
+	if bound {
+		t.Error("a refused proxy opened a listener")
+	}
+	e := ag.get()
+	if e == nil {
+		t.Fatal("a refused proxy set no idle signal, so nothing retires it")
+	}
+	if idle := time.Since(e.LastActivity()); e.Timeout <= 0 || idle < e.Timeout {
+		t.Errorf("refused proxy's idle signal (timeout %v, idle %v) does not retire it at the next tick", e.Timeout, idle)
+	}
+}

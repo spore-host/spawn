@@ -82,6 +82,10 @@ var detachedDispositions = map[string]detachedDisposition{
 	// VPC reads (detachedBootstrap.privateNetOf), and the orchestrator asks
 	// for no public IP from the settings.
 	"NoPublicIP": {settings: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	// The egress proxy (#1515): no sweep path finds or creates one, so
+	// sweepMemberGuard, which detachedSettingsGuard runs first, refuses both.
+	"BootstrapEgress": {refused: true, prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
+	"EgressProxyAddr": {refused: true, prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
 	"AllowMissingEndpoints": {why: "read only by --no-public-ip's subnet check, which runs at --detach (detachedBootstrap.privateNetOf)",
 		prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
 	"EBSKMSKeyID":     {refused: true, settings: true},

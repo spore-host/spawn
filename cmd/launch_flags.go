@@ -3,10 +3,12 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/egressproxy"
 )
 
 var (
@@ -94,6 +96,8 @@ var (
 	efaGroup              string
 	noPublicIP            bool
 	allowMissingEndpoints bool
+	bootstrapEgress       string
+	egressProxyIdle       time.Duration
 
 	// Shared storage
 	efsID           string
@@ -410,6 +414,13 @@ func init() {
 	launchCmd.Flags().BoolVar(&allowMissingEndpoints, "allow-missing-endpoints", false, "With --no-public-ip: launch even when the subnet lacks a VPC endpoint or NAT route it needs. "+
 		"What is missing is still listed; without it the bootstrap may not install spored, spored may not enforce --ttl or --cost-limit, "+
 		"and spawn connect may not reach the instance")
+	launchCmd.Flags().StringVar(&bootstrapEgress, "bootstrap-egress", aws.BootstrapEgressNone, "With --no-public-ip: how the bootstrap reaches the few hosts outside AWS it fetches from "+
+		"(the EFA installer, say) when the subnet has no NAT route. none (default): it does not, and such a launch is refused, naming what it needs. "+
+		"proxy: through a spawn egress proxy in the VPC, a t4g.micro in a public subnet that spawn finds or creates, which forwards only to "+
+		"spawn's own bootstrap hosts; members get its client security group. The VPC needs a public subnet routed to an internet gateway. "+
+		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with spawn defaults set bootstrap-egress proxy. Not supported on parameter sweeps yet (#1515)")
+	launchCmd.Flags().DurationVar(&egressProxyIdle, "egress-proxy-idle", egressproxy.DefaultIdle, "With --bootstrap-egress proxy: how long a proxy this launch creates may go "+
+		"with nothing proxied before it is retired. At most the proxy's life of "+egressproxy.MaxLife.String()+" (the TTL reaper's ceiling less a day), which ends it regardless")
 	launchCmd.Flags().StringVar(&efaGroup, "efa-group", "", "With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper")
 
 	// Shared storage

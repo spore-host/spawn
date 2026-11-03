@@ -21,6 +21,7 @@ Valid keys:
   active-ports       TCP ports to monitor for active connections (e.g. 8787)
   idle-timeout       Default idle timeout duration (e.g. 30m, 1h)
   hibernate-on-idle  Hibernate instead of stopping on idle (true/false)
+  bootstrap-egress   --bootstrap-egress for --no-public-ip launches (none/proxy)
 
 Examples:
   spawn defaults set slack-workspace T03NE3GTY

@@ -104,6 +104,10 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	// installer from the internet, so its subnet check requires a NAT route.
 	"no-public-ip":            honouredOnWindows(whyEC2Param + " (no public IP on the interface); the subnet check requires a NAT route on Windows, whose bootstrap downloads the AWS CLI installer. RDP: `spawn connect --rdp --via-ssm`"),
 	"allow-missing-endpoints": honouredOnWindows("read by --no-public-ip's subnet check, the same on Windows"),
+	// The egress proxy (#1515) serves the Linux bootstrap's fetches; the
+	// Windows bootstrap's AWS CLI MSI download is not routed through it.
+	"bootstrap-egress":  rejectedOnWindows("the egress proxy serves the Linux bootstrap only; a private Windows launch needs a NAT route for its AWS CLI installer"),
+	"egress-proxy-idle": rejectedOnWindows("it sets the idle period of the egress proxy, which a Windows launch does not use"),
 
 	// Instance shape, network and purchase: EC2 parameters.
 	"instance-type":         honouredOnWindows(whyEC2Param),
