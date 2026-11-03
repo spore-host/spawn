@@ -338,10 +338,13 @@ func CheckPrivateNetwork(n PrivateNetwork, cfg LaunchConfig, internet []string) 
 		out.Missing = append(out.Missing, fmt.Sprintf("%s: %s and %s. Needed because %s", s.Endpoint, why, noNAT, s.Why))
 	}
 	proxy := cfg.BootstrapEgress == BootstrapEgressProxy
+	// The proxy serves the Linux bootstrap's fetches: the Windows bootstrap
+	// does not route its AWS CLI installer download through one.
+	linux := !strings.EqualFold(cfg.TargetOS, "windows")
 	for _, need := range append(privateInternetNeeds(cfg), internet...) {
 		// Only a host on the proxy's allowlist can go through it: derived from
 		// the list the proxy enforces, never assumed for a kind of need.
-		viaProxy := egressproxy.Allowed(InternetNeedHost(need))
+		viaProxy := linux && egressproxy.Allowed(InternetNeedHost(need))
 		switch {
 		case viaProxy && proxy && len(n.PublicSubnets) > 0:
 			out.Met = append(out.Met, fmt.Sprintf("internet: %s, through the spawn egress proxy in %s", need, orVPC(n.VPCID)))
@@ -352,6 +355,9 @@ func CheckPrivateNetwork(n PrivateNetwork, cfg LaunchConfig, internet []string) 
 		case viaProxy:
 			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s. Pass %s to reach it "+
 				"through a spawn egress proxy in %s", need, noNAT, BootstrapEgressFlag, orVPC(n.VPCID)))
+		case proxy && !linux:
+			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s, and the spawn "+
+				"egress proxy serves the Linux bootstrap only", need, noNAT))
 		case proxy:
 			out.Missing = append(out.Missing, fmt.Sprintf("internet: %s, which no VPC endpoint serves; %s, and the spawn "+
 				"egress proxy forwards only to spawn's own bootstrap hosts, not to this one", need, noNAT))

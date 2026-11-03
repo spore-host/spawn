@@ -275,6 +275,10 @@ var sweepLaunchFlags = map[string]sweepFlagRule{
 	// paths; a detached member carries it in its launch settings (#1437).
 	"no-public-ip":            viaConfig(whySweepEC2 + "; each member's subnet is checked, at --detach for a detached sweep (#1433, #1437)"),
 	"allow-missing-endpoints": viaConfig(whySweepConfig + "; read by --no-public-ip's subnet check (#1433)"),
+	// The egress proxy (#1515) is found or created by a single launch only.
+	"bootstrap-egress": refusedOnSweep("a sweep's members, foreground or --detach, and the sweep orchestrator do not find or " +
+		"create the egress proxy yet (#1515). Use a NAT route or the VPC endpoints for the sweep"),
+	"egress-proxy-idle": refusedOnSweep("it sets the idle period of the egress proxy, which a sweep does not use yet (#1515)"),
 }
 
 // isSweepLaunch reports whether runLaunch dispatches to the parameter sweep:
@@ -330,6 +334,9 @@ func sweepMemberGuard(cfg aws.LaunchConfig) error {
 		return refuse("--fsx-recall", sweepFSxRecallWhy)
 	case cfg.VPCID != "" && cfg.SubnetID == "":
 		return refuse("--vpc without --subnet", sweepVPCWhy)
+	case (cfg.BootstrapEgress != "" && cfg.BootstrapEgress != aws.BootstrapEgressNone) || cfg.EgressProxyAddr != "":
+		// Detached or not (#1515): no sweep path finds or creates the proxy.
+		return refuse("--bootstrap-egress proxy", sweepLaunchFlags["bootstrap-egress"].why)
 	}
 	return nil
 }

@@ -450,3 +450,40 @@ func orDefault(d, def time.Duration) time.Duration {
 	}
 	return d
 }
+
+// Client is the AWS side of find-or-create for a launch in region, through
+// the launching spawn's client: its EC2 and SSM, the spored instance profile
+// (created if absent, as any launch does), the AL2023 arm64 AMI, and the
+// standard launch tags for a proxy launched by spawn version.
+type Client struct {
+	Deps Deps
+	// Profile returns the spored instance profile's name.
+	Profile func(ctx context.Context) (string, error)
+	// AMI and BaseTags are [Request.AMI] and [Request.BaseTags].
+	AMI      func(ctx context.Context) (string, error)
+	BaseTags func(ctx context.Context) ([]types.Tag, error)
+}
+
+// ClientFor is [Client] through c.
+func ClientFor(c *spawnaws.Client, region, version string) Client {
+	cfg := c.Config().Copy()
+	cfg.Region = region
+	return Client{
+		Deps:    Deps{EC2: ec2.NewFromConfig(cfg), Prober: c},
+		Profile: c.SetupSporedIAMRole,
+		AMI: func(ctx context.Context) (string, error) {
+			return c.GetAL2023AMI(ctx, region, "arm64", false)
+		},
+		BaseTags: func(ctx context.Context) ([]types.Tag, error) {
+			tagger, err := c.NewLaunchTagger(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// No TTL here: ProxyTags adds the proxy's own.
+			return tagger.Tags(ctx, spawnaws.LaunchConfig{
+				Name: "spawn-egress-proxy", InstanceType: InstanceType, Region: region,
+				SpawnVersion: version, TargetOS: "linux",
+			})
+		},
+	}
+}

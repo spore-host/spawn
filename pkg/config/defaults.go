@@ -18,6 +18,9 @@ type LaunchDefaults struct {
 	ActivePorts     string `yaml:"active_ports,omitempty"`
 	IdleTimeout     string `yaml:"idle_timeout,omitempty"`
 	HibernateOnIdle *bool  `yaml:"hibernate_on_idle,omitempty"`
+	// BootstrapEgress is --bootstrap-egress's default (#1515): "none" or
+	// "proxy". The opt-in to the egress proxy, set once.
+	BootstrapEgress string `yaml:"bootstrap_egress,omitempty"`
 }
 
 // knownDefaultKeys maps CLI flag names (with hyphens) to their display names.
@@ -27,6 +30,7 @@ var knownDefaultKeys = []string{
 	"active-ports",
 	"idle-timeout",
 	"hibernate-on-idle",
+	"bootstrap-egress",
 }
 
 // KnownDefaultKeys returns the list of valid default key names.
@@ -98,6 +102,11 @@ func applyDefaultKey(d *LaunchDefaults, key, value string) error {
 		} else {
 			return fmt.Errorf("hibernate-on-idle must be true or false")
 		}
+	case "bootstrap-egress":
+		if err := ValidateBootstrapEgress(value); err != nil {
+			return err
+		}
+		d.BootstrapEgress = value
 	default:
 		return fmt.Errorf("unknown default key %q — valid keys: %v", key, knownDefaultKeys)
 	}
@@ -115,6 +124,8 @@ func GetDefaultValue(d *LaunchDefaults, key string) string {
 		return d.ActivePorts
 	case "idle-timeout":
 		return d.IdleTimeout
+	case "bootstrap-egress":
+		return d.BootstrapEgress
 	case "hibernate-on-idle":
 		if d.HibernateOnIdle == nil {
 			return ""
@@ -125,6 +136,16 @@ func GetDefaultValue(d *LaunchDefaults, key string) string {
 		return "false"
 	}
 	return ""
+}
+
+// ValidateBootstrapEgress accepts --bootstrap-egress's values, "none" and
+// "proxy", and "" (unset).
+func ValidateBootstrapEgress(value string) error {
+	switch value {
+	case "", "none", "proxy":
+		return nil
+	}
+	return fmt.Errorf("invalid bootstrap-egress %q: use none or proxy", value)
 }
 
 func loadOrInitFile() (*Config, error) {

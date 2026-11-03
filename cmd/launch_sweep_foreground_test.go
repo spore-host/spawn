@@ -376,6 +376,10 @@ var foregroundDispositions = map[string]foregroundDisposition{
 	// Elastic IP. The CLI pins and checks each member's subnet first
 	// (preflightSweepNoPublicIP).
 	"NoPublicIP": {settings: true, direct: whyDirect + " (the subnet check, no Elastic IP, #1433)", prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
+	// The egress proxy (#1515): no sweep path finds or creates one, so
+	// sweepMemberGuard refuses both.
+	"BootstrapEgress": {refused: true, prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
+	"EgressProxyAddr": {refused: true, prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
 	"AllowMissingEndpoints": {direct: whyDirect + " (--no-public-ip's subnet check launches past what is missing, #1433)", prereq: func(c *aws.LaunchConfig) {
 		c.NoPublicIP, c.SubnetID = true, "subnet-1"
 	}},

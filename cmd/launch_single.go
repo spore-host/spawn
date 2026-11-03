@@ -63,6 +63,16 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// --bootstrap-egress (#1515): its value by flag > env > config file >
+	// default, and what it cannot be combined with, on every path, before any
+	// AWS call. A sweep with the proxy is refused here.
+	if err := resolveBootstrapEgressFlag(cmd.Flags().Changed("bootstrap-egress")); err != nil {
+		return err
+	}
+	if err := validateBootstrapEgressFlags(cmd.Flags().Changed("egress-proxy-idle"), isSweepLaunch()); err != nil {
+		return err
+	}
+
 	// Reject an unparseable --ttl/--idle-timeout (etc.) before any AWS call,
 	// on every launch path below (#990).
 	if err := validateLaunchDurationFlags(); err != nil {
@@ -536,6 +546,14 @@ func launchWithProgress(ctx context.Context, awsClient *aws.Client, config *aws.
 
 	// Step 4: Security group (create for MPI / Windows if needed)
 	if err := ensureSecurityGroup(ctx, awsClient, config, prog, auditLog); err != nil {
+		return err
+	}
+
+	// Step 4.1: the egress proxy a --bootstrap-egress proxy launch counts on
+	// (#1515), found or created and ready before any member is launched, and
+	// its client group added to the groups chosen above. Every job array and
+	// MPI member is cloned from this config, so each gets it.
+	if err := ensureEgressProxy(ctx, awsClient, config, prog, os.Stderr); err != nil {
 		return err
 	}
 

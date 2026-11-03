@@ -11,6 +11,9 @@ const AMI_AL2023_ARM
 const AMI_AL2023_GPU_ARM
 const AMI_AL2023_GPU_X86
 const AMI_AL2023_X86
+const BootstrapEgressFlag
+const BootstrapEgressNone
+const BootstrapEgressProxy
 const CopiedFromTagKey
 const CreatedTagKey
 const EFAGroupPrefix
@@ -239,6 +242,7 @@ field LaunchConfig.AppMode string
 field LaunchConfig.AppName string
 field LaunchConfig.AttachVolumes []AttachVolumeSpec
 field LaunchConfig.AvailabilityZone string
+field LaunchConfig.BootstrapEgress string
 field LaunchConfig.CapacityBlock bool
 field LaunchConfig.ClientToken string
 field LaunchConfig.CompletionDelay string
@@ -258,6 +262,7 @@ field LaunchConfig.EFAInterfaces int
 field LaunchConfig.EFASecondaryType string
 field LaunchConfig.EFSID string
 field LaunchConfig.EFSMountPoint string
+field LaunchConfig.EgressProxyAddr string
 field LaunchConfig.FSxExportPath string
 field LaunchConfig.FSxImportPath string
 field LaunchConfig.FSxLifecycle string
@@ -380,6 +385,7 @@ field PreparedImage.Reader io.ReadCloser
 field PrivateCheck.Met []string
 field PrivateCheck.Missing []string
 field PrivateCheck.Network PrivateNetwork
+field PrivateCheck.ViaEgressProxy []string
 field PrivateCheck.Warnings []string
 field PrivateEndpoint.AvailabilityZones []string
 field PrivateEndpoint.ID string
@@ -395,6 +401,7 @@ field PrivateNetwork.Endpoints []PrivateEndpoint
 field PrivateNetwork.NATGatewayID string
 field PrivateNetwork.NATInstanceID string
 field PrivateNetwork.NATInstanceProblem string
+field PrivateNetwork.PublicSubnets []PublicSubnet
 field PrivateNetwork.Region string
 field PrivateNetwork.RouteTableID string
 field PrivateNetwork.SubnetID string
@@ -404,6 +411,8 @@ field PrivateService.Gateway bool
 field PrivateService.IAMPrefixes []string
 field PrivateService.When string
 field PrivateService.Why string
+field PublicSubnet.AvailabilityZone string
+field PublicSubnet.SubnetID string
 field ReaperCoverage.Covered bool
 field ReaperCoverage.Determined bool
 field ReaperCoverage.How string
@@ -655,6 +664,7 @@ func ImageCreateTags(userTags, sourceTags map[string]string) map[string]string
 func ImageProvenanceFromTags(tags map[string]string) ImageProvenance
 func ImageProvenanceTagKeys() []string
 func InstanceProfilePropagationRetryWindow() time.Duration
+func InternetNeedHost(need string) string
 func IsAccessDenied(err error) bool
 func IsCapacityErrorCode(code string) bool
 func IsImageProvenanceTagKey(key string) bool
@@ -735,6 +745,7 @@ type PrivateCheck struct
 type PrivateEndpoint struct
 type PrivateNetwork struct
 type PrivateService struct
+type PublicSubnet struct
 type ReaperCoverage struct
 type S3BucketConfig struct
 type SSMRunResult struct
@@ -755,6 +766,7 @@ var ErrAMIWaitExhausted
 var ErrEFANeedsSubnet
 var ErrNestedSpawnNeedsTTL
 var ErrNestedSpawnRoleReserved
+var ErrNoEgressProxy
 var ErrNoPublicIPNeedsSubnet
 var ErrNotSpawnManagedAMI
 var ErrPrivateNetworkIncomplete
