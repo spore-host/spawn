@@ -145,7 +145,6 @@ func ensureEgressProxy(ctx context.Context, awsClient *aws.Client, config *aws.L
 		return err
 	}
 	if len(check.ViaEgressProxy) == 0 {
-		prog.Skip("Egress proxy (nothing this launch needs goes through one)")
 		return nil
 	}
 	const step = "Finding or creating the egress proxy"

@@ -254,7 +254,7 @@ func TestEgressProxyRefusesAnIdleLongerThanItsLife(t *testing.T) {
 	if e == nil {
 		t.Fatal("a refused proxy set no idle signal, so nothing retires it")
 	}
-	if idle := time.Now().Sub(e.LastActivity()); e.Timeout <= 0 || idle < e.Timeout {
+	if idle := time.Since(e.LastActivity()); e.Timeout <= 0 || idle < e.Timeout {
 		t.Errorf("refused proxy's idle signal (timeout %v, idle %v) does not retire it at the next tick", e.Timeout, idle)
 	}
 }
