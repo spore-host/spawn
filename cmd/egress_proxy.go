@@ -582,7 +582,7 @@ func printEgressProxyDeletePlan(w io.Writer, p deploy.DeletePlan) {
 		default:
 			note := ""
 			if others := otherUsers(g.Users, p); len(others) > 0 {
-				note = fmt.Sprintf(" (kept while %s use it)", strings.Join(others, ", "))
+				note = fmt.Sprintf(" (kept while used by %s)", strings.Join(others, ", "))
 			}
 			fmt.Fprintf(w, "    delete     %s (%s)%s\n", g.Name, g.ID, note)
 		}

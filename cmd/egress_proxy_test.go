@@ -248,7 +248,7 @@ func TestEgressProxyDeleteDryRunWritesNothing(t *testing.T) {
 		t.Errorf("err = %v, want the refusal", err)
 	}
 	for _, want := range []string{"terminate  i-p", "REFUSE     i-forged: its security groups", "delete     spawn-egress-proxy-vpc-1 (sg-proxy)",
-		"delete     spawn-egress-clients-vpc-1 (sg-clients) (kept while i-m1 use it)", "Dry run: nothing was terminated or deleted."} {
+		"delete     spawn-egress-clients-vpc-1 (sg-clients) (kept while used by i-m1)", "Dry run: nothing was terminated or deleted."} {
 		if !strings.Contains(out, want) {
 			t.Errorf("plan lacks %q:\n%s", want, out)
 		}
