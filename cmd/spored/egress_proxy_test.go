@@ -2,8 +2,8 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"

@@ -28,6 +28,9 @@ import (
 // defining launch, list, status, extend, connect and terminate.
 var nestedSpawnCommandFiles = []string{
 	"launch_single.go", "list.go", "status.go", "extend.go", "connect.go", "terminate.go",
+	// The egress proxy a --bootstrap-egress proxy child launch finds or
+	// creates, and the commands that show, delete and upgrade it (#1515).
+	"launch_egress_proxy.go", "egress_proxy.go",
 }
 
 // nestedSpawnNotGranted: discovered calls the nested role does not grant, and

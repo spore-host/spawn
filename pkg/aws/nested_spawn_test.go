@@ -317,3 +317,41 @@ func TestNestedSpawnRoleFromCallerARN(t *testing.T) {
 		}
 	}
 }
+
+// The egress proxy's security-group writes (#1515): find-or-create revokes the
+// default egress of its new groups and any drifted rule, and `spawn
+// egress-proxy delete` deletes them. A nested spore gets each only on
+// spawn:managed=true resources, under EC2's own condition key: a key of
+// another service's would never be present on an EC2 request, and the grant
+// would be a silent implicit deny.
+func TestNestedSpawnGrantsTheEgressProxyGroupWritesOnManagedResources(t *testing.T) {
+	want := map[string]bool{
+		"ec2:AuthorizeSecurityGroupIngress": true, "ec2:AuthorizeSecurityGroupEgress": true,
+		"ec2:RevokeSecurityGroupIngress": true, "ec2:RevokeSecurityGroupEgress": true,
+		"ec2:DeleteSecurityGroup": true,
+	}
+	found := map[string]bool{}
+	for _, st := range parseStatements(t, nestedSpawnPolicyDoc()) {
+		for _, a := range stringList(st.Action) {
+			if !want[a] {
+				continue
+			}
+			if found[a] {
+				t.Errorf("%s is granted by more than one statement", a)
+			}
+			found[a] = true
+			cond := st.Condition["StringEquals"]
+			if len(st.Condition) != 1 || len(cond) != 1 || cond["ec2:ResourceTag/spawn:managed"] != "true" {
+				t.Errorf("%s (%s) is granted under %v, want only StringEquals ec2:ResourceTag/spawn:managed=true", a, st.Sid, st.Condition)
+			}
+			if r := stringList(st.Resource); len(r) != 1 || r[0] != "*" {
+				t.Errorf("%s (%s) is on %v; the condition, not the resource, scopes it", a, st.Sid, r)
+			}
+		}
+	}
+	for a := range want {
+		if !found[a] {
+			t.Errorf("the nested-spawn role does not grant %s", a)
+		}
+	}
+}

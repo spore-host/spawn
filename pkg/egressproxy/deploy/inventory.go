@@ -35,6 +35,11 @@ type Listed struct {
 	Idle         time.Duration
 }
 
+// Launched is the proxy's launch time: the earlier of its spawn:launch-time
+// tag and EC2's LaunchTime (pkg/ttl LaunchAnchor, the reaper's rule), so a
+// rewritten tag cannot make it younger.
+func (l Listed) Launched() time.Time { return l.Proxy.LaunchTime }
+
 // IdleExpiry is when the idle period ends if nothing is proxied before then:
 // zero when the activity tags are absent.
 func (l Listed) IdleExpiry() time.Time {
