@@ -378,12 +378,12 @@ func DeleteGroups(ctx context.Context, api EC2, vpcID string) ([]string, error) 
 			return deleted, err
 		}
 		id := aws.ToString(sg.GroupId)
-		users, err := groupUsers(ctx, api, id)
+		users, _, err := groupUsers(ctx, api, id)
 		if err != nil {
 			return deleted, err
 		}
 		if len(users) > 0 {
-			return deleted, fmt.Errorf("%w: %s (%s) is used by %s", ErrGroupsInUse, n.name, id, join(users))
+			return deleted, &GroupInUseError{Name: n.name, ID: id, Users: users}
 		}
 		if _, err := api.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{GroupId: aws.String(id)}); err != nil {
 			if strings.Contains(err.Error(), "InvalidGroup.NotFound") {
@@ -396,9 +396,26 @@ func DeleteGroups(ctx context.Context, api EC2, vpcID string) ([]string, error) 
 	return deleted, nil
 }
 
-// groupUsers are the instances, in any state but terminated, carrying groupID.
-func groupUsers(ctx context.Context, api EC2, groupID string) ([]string, error) {
+// GroupInUseError is [DeleteGroups]'s refusal of a group an instance still
+// carries. It wraps [ErrGroupsInUse].
+type GroupInUseError struct {
+	Name, ID string
+	// Users are the instances carrying it, sorted.
+	Users []string
+}
+
+func (e *GroupInUseError) Error() string {
+	return fmt.Sprintf("%v: %s (%s) is used by %s", ErrGroupsInUse, e.Name, e.ID, join(e.Users))
+}
+
+func (e *GroupInUseError) Unwrap() error { return ErrGroupsInUse }
+
+// groupUsers are the instances, in any state but terminated, carrying groupID,
+// and how many of their network interfaces carry it. An instance listed with
+// no interfaces (EC2 always lists them for a VPC instance) counts as one.
+func groupUsers(ctx context.Context, api EC2, groupID string) ([]string, int, error) {
 	users := map[string]bool{}
+	enis := 0
 	in := &ec2.DescribeInstancesInput{Filters: []types.Filter{
 		{Name: aws.String("instance.group-id"), Values: []string{groupID}},
 		{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "shutting-down", "stopping", "stopped"}},
@@ -407,15 +424,99 @@ func groupUsers(ctx context.Context, api EC2, groupID string) ([]string, error) 
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list the instances using %s: %w", groupID, err)
+			return nil, 0, fmt.Errorf("list the instances using %s: %w", groupID, err)
 		}
 		for _, r := range page.Reservations {
 			for _, i := range r.Instances {
-				users[aws.ToString(i.InstanceId)] = true
+				id := aws.ToString(i.InstanceId)
+				if users[id] {
+					continue
+				}
+				users[id] = true
+				if len(i.NetworkInterfaces) == 0 {
+					enis++
+					continue
+				}
+				for _, ni := range i.NetworkInterfaces {
+					for _, g := range ni.Groups {
+						if aws.ToString(g.GroupId) == groupID {
+							enis++
+							break
+						}
+					}
+				}
 			}
 		}
 	}
-	return sortedKeys(users), nil
+	return sortedKeys(users), enis, nil
+}
+
+// GroupState is one of a VPC's two groups as it stands: read-only, for
+// `spawn egress-proxy status` and the plans of delete and upgrade.
+type GroupState struct {
+	Name string
+	// ID is empty when no group of Name is in the VPC.
+	ID string
+	// Foreign is why a group of Name is not spawn's ([ErrForeignGroup]); ""
+	// when it is spawn's or absent.
+	Foreign string
+	// Users are the instances, in any state but terminated, carrying it, and
+	// ENIs how many of their network interfaces do. Not read for a foreign
+	// group.
+	Users []string
+	ENIs  int
+}
+
+// Exists reports whether a group of the name is in the VPC.
+func (g GroupState) Exists() bool { return g.ID != "" }
+
+// Owned reports whether the group exists and is spawn's.
+func (g GroupState) Owned() bool { return g.ID != "" && g.Foreign == "" }
+
+// GroupsState is a VPC's two groups, read through ec2:DescribeSecurityGroups
+// and ec2:DescribeInstances only.
+type GroupsState struct {
+	Proxy, Clients GroupState
+}
+
+// Groups are the IDs of the two, when both are spawn's.
+func (s GroupsState) Groups() Groups {
+	g := Groups{}
+	if s.Proxy.Owned() {
+		g.ProxyID = s.Proxy.ID
+	}
+	if s.Clients.Owned() {
+		g.ClientsID = s.Clients.ID
+	}
+	return g
+}
+
+// DescribeGroups reads the VPC's two groups and who uses them. It creates and
+// changes nothing.
+func DescribeGroups(ctx context.Context, api EC2, vpcID string) (GroupsState, error) {
+	var out GroupsState
+	for _, n := range []struct {
+		name, purpose string
+		into          *GroupState
+	}{{ProxyGroupName(vpcID), PurposeProxy, &out.Proxy}, {ClientsGroupName(vpcID), PurposeClients, &out.Clients}} {
+		n.into.Name = n.name
+		sg, err := describeGroup(ctx, api, vpcID, n.name)
+		if err != nil {
+			return out, err
+		}
+		if sg == nil {
+			continue
+		}
+		n.into.ID = aws.ToString(sg.GroupId)
+		if err := ownGroup(*sg, vpcID, n.purpose); err != nil {
+			n.into.Foreign = err.Error()
+			continue
+		}
+		if n.into.Users, n.into.ENIs, err = groupUsers(ctx, api, n.into.ID); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 // ErrMemberEgress is wrapped by [CheckMemberEgress] when no group of a

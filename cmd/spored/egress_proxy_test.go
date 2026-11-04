@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"context"
 	"io"
 	"net"
@@ -20,6 +21,25 @@ type fakeIdleSetter struct {
 	mu   sync.Mutex
 	cfg  *provider.Config
 	idle *agent.ExternalIdle
+	// tagWrites are the PutInstanceTags calls, in order; tagErr fails them.
+	tagWrites []map[string]string
+	tagErr    error
+}
+
+func (f *fakeIdleSetter) PutInstanceTags(_ context.Context, tags map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.tagErr != nil {
+		return f.tagErr
+	}
+	f.tagWrites = append(f.tagWrites, tags)
+	return nil
+}
+
+func (f *fakeIdleSetter) writes() []map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]string(nil), f.tagWrites...)
 }
 
 func (f *fakeIdleSetter) SetExternalIdle(e agent.ExternalIdle) {
@@ -256,5 +276,57 @@ func TestEgressProxyRefusesAnIdleLongerThanItsLife(t *testing.T) {
 	}
 	if idle := time.Since(e.LastActivity()); e.Timeout <= 0 || idle < e.Timeout {
 		t.Errorf("refused proxy's idle signal (timeout %v, idle %v) does not retire it at the next tick", e.Timeout, idle)
+	}
+}
+
+// The proxy publishes its activity and idle period as tags on its first
+// persist tick (#1515 phase 5), through the agent's own tag path, so `spawn
+// egress-proxy status` can read them without SSM.
+func TestEgressProxyPublishesActivityTags(t *testing.T) {
+	launch := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	now := launch.Add(time.Hour)
+	m := &egressProxyMode{port: 3128, idle: 72 * time.Hour, statePath: filepath.Join(t.TempDir(), "a.json"),
+		now: func() time.Time { return now }}
+	ag := &fakeIdleSetter{cfg: &provider.Config{LaunchTime: launch}}
+	_, stop := startMode(t, m, ag)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(ag.writes()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+	w := ag.writes()
+	if len(w) == 0 {
+		t.Fatal("no activity tags were published")
+	}
+	if got := w[0][egressproxy.ActivityTag]; got != "2026-11-02T12:00:00Z" {
+		t.Errorf("%s = %q, want the launch time (nothing proxied yet)", egressproxy.ActivityTag, got)
+	}
+	if got := w[0][egressproxy.IdleTag]; got != "72h0m0s" {
+		t.Errorf("%s = %q, want the enforced idle period", egressproxy.IdleTag, got)
+	}
+	// The clock never moved and nothing was proxied: one write, not one a tick.
+	if len(w) != 1 {
+		t.Errorf("%d tag writes for one unchanged value, want 1", len(w))
+	}
+}
+
+// A refused tag write is logged, not fatal, and is retried only at the
+// publisher's pace.
+func TestEgressProxyActivityTagWriteFailureIsThrottled(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	m := &egressProxyMode{idle: time.Hour, now: func() time.Time { return now }}
+	m.proxy = egressproxy.New(egressproxy.Config{InitialActivity: now, Now: m.now})
+	ag := &fakeIdleSetter{tagErr: errors.New("UnauthorizedOperation")}
+	m.publishActivity(context.Background(), ag)
+	ag.tagErr = nil
+	now = now.Add(time.Minute)
+	m.publishActivity(context.Background(), ag)
+	if n := len(ag.writes()); n != 0 {
+		t.Fatalf("retried a minute after a refused write (%d writes); want the throttle", n)
+	}
+	now = now.Add(egressproxy.ActivityPublishEvery)
+	m.publishActivity(context.Background(), ag)
+	if n := len(ag.writes()); n != 1 {
+		t.Fatalf("%d writes after the throttle passed, want 1", n)
 	}
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -31,6 +32,17 @@ type ExternalIdle struct {
 // own, from the next monitor tick. Call it before Monitor.
 func (a *Agent) SetExternalIdle(e ExternalIdle) {
 	a.externalIdle.Store(&e)
+}
+
+// PutInstanceTags writes tags on this instance through spored's own tag path
+// (EC2 CreateTags, which the spored role grants on the instance itself), the
+// one the spawn:ready-* and spawn:dns-status tags use. The egress proxy
+// publishes its activity with it (#1515 phase 5).
+func (a *Agent) PutInstanceTags(ctx context.Context, tags map[string]string) error {
+	if a.tagger == nil || a.identity == nil || a.identity.InstanceID == "" {
+		return errors.New("no instance to tag")
+	}
+	return a.tagger.putTags(ctx, a.identity.InstanceID, tags)
 }
 
 // externalIdleNow is the clock the external idle check reads.

@@ -479,11 +479,16 @@ func ClientFor(c *spawnaws.Client, region, version string) Client {
 			if err != nil {
 				return nil, err
 			}
-			// No TTL here: ProxyTags adds the proxy's own.
-			return tagger.Tags(ctx, spawnaws.LaunchConfig{
-				Name: "spawn-egress-proxy", InstanceType: InstanceType, Region: region,
-				SpawnVersion: version, TargetOS: "linux",
-			})
+			return tagger.Tags(ctx, LaunchConfig(region, version))
 		},
+	}
+}
+
+// LaunchConfig is the launch config a proxy's base tags are rendered from
+// (pkg/aws LaunchTagger): no TTL, since [ProxyTags] adds the proxy's own.
+func LaunchConfig(region, version string) spawnaws.LaunchConfig {
+	return spawnaws.LaunchConfig{
+		Name: "spawn-egress-proxy", InstanceType: InstanceType, Region: region,
+		SpawnVersion: version, TargetOS: "linux",
 	}
 }
