@@ -56,6 +56,11 @@ func createsEphemeralFSx(c LaunchConfig) bool {
 // spawn tags it after the launch.
 func mountsPendingFSx(c LaunchConfig) bool { return createsEphemeralFSx(c) || c.FSxPending != "" }
 
+// isEgressProxy: the spawn egress proxy (#1515), whose base tags
+// pkg/egressproxy/deploy renders from a config of this Name (deploy
+// LaunchConfig; TestEgressProxyLaunchName there holds the two together).
+func isEgressProxy(c LaunchConfig) bool { return c.Name == "spawn-egress-proxy" }
+
 func registersDNS(c LaunchConfig) bool { return c.DNSName != "" }
 
 // reportsReadiness: a web app (#590) or a DCV session (#282), whose readiness
@@ -104,6 +109,8 @@ var postLaunchInstanceTags = slices.Concat([]postLaunchTag{
 	{key: "spawn:fsx-mount-point", by: writtenBySpored, writer: "pkg/agent tagFSxMounted", applies: mountsPendingFSx},
 	{key: "spawn:fsx-dra-status", by: writtenBySpored, writer: "pkg/agent tagFSxDRAStatus", applies: mountsPendingFSx},
 	{key: "spawn:fsx-dra-error", by: writtenBySpored, writer: "pkg/agent tagFSxDRAStatus", applies: mountsPendingFSx},
+	{key: "spawn:egress-proxy-last-activity", by: writtenBySpored, writer: "cmd/spored egressProxyMode.publishActivity, at most every 10 minutes", applies: isEgressProxy},
+	{key: "spawn:egress-proxy-idle", by: writtenBySpored, writer: "cmd/spored egressProxyMode.publishActivity", applies: isEgressProxy},
 
 	// spawn's launch code, right after RunInstances. A persistent request's
 	// spawn:original-instance-id (tagOriginalInstance) is on the Spot request,

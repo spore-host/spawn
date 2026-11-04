@@ -82,6 +82,9 @@ type egressProxyMode struct {
 	persist    time.Duration
 
 	proxy *egressproxy.Proxy
+	// publisher throttles the activity tags (#1515 phase 5). Touched only by
+	// persistLoop, and by start before it runs.
+	publisher egressproxy.ActivityPublisher
 }
 
 func (m *egressProxyMode) validate() error {
@@ -124,6 +127,9 @@ func (m *egressProxyMode) listenAddr(identity *provider.Identity) (string, error
 type idleSetter interface {
 	SetExternalIdle(agent.ExternalIdle)
 	GetConfig() *provider.Config
+	// PutInstanceTags is spored's own tag path (ec2:CreateTags on itself),
+	// for the activity tags.
+	PutInstanceTags(ctx context.Context, tags map[string]string) error
 }
 
 // attach implements daemonMode.
@@ -175,7 +181,7 @@ func (m *egressProxyMode) start(ctx context.Context, ag idleSetter, identity *pr
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); m.serve(ctx, identity) }()
-	go func() { defer wg.Done(); m.persistLoop(ctx) }()
+	go func() { defer wg.Done(); m.persistLoop(ctx, ag) }()
 	return func() {
 		cancel()
 		wg.Wait()
@@ -233,8 +239,11 @@ func (m *egressProxyMode) serve(ctx context.Context, identity *provider.Identity
 	}
 }
 
-// persistLoop writes the last-activity time whenever it has moved.
-func (m *egressProxyMode) persistLoop(ctx context.Context) {
+// persistLoop writes the last-activity time to disk whenever it has moved,
+// and publishes it as the activity tags at the publisher's pace: on the first
+// tick, then at most once per [egressproxy.ActivityPublishEvery] while it
+// moves.
+func (m *egressProxyMode) persistLoop(ctx context.Context, tags idleSetter) {
 	every := m.persist
 	if every <= 0 {
 		every = egressProxyPersistEvery
@@ -252,8 +261,32 @@ func (m *egressProxyMode) persistLoop(ctx context.Context) {
 					saved = last
 				}
 			}
+			m.publishActivity(ctx, tags)
 		}
 	}
+}
+
+// publishActivity writes [egressproxy.ActivityTag] and [egressproxy.IdleTag]
+// when the publisher says they are due (#1515 phase 5), so `spawn egress-proxy
+// status` can say how long the proxy has been idle and when its idle period
+// ends without SSM. Best effort: a refused write is logged and retried at the
+// publisher's pace; the idle expiry never depends on it.
+func (m *egressProxyMode) publishActivity(ctx context.Context, tags idleSetter) {
+	if m.proxy == nil || tags == nil {
+		return
+	}
+	v, due := m.publisher.Due(m.proxy.LastActivity(), m.clock())
+	if !due {
+		return
+	}
+	if err := tags.PutInstanceTags(ctx, map[string]string{
+		egressproxy.ActivityTag: v,
+		egressproxy.IdleTag:     m.idle.String(),
+	}); err != nil {
+		log.Printf("egress-proxy: publishing %s: %v", egressproxy.ActivityTag, err)
+		return
+	}
+	m.publisher.Written(v)
 }
 
 // save persists the current last-activity time, reporting success.

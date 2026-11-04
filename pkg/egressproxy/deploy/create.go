@@ -469,8 +469,13 @@ func ClientFor(c *spawnaws.Client, region, version string) Client {
 	cfg := c.Config().Copy()
 	cfg.Region = region
 	return Client{
-		Deps:    Deps{EC2: ec2.NewFromConfig(cfg), Prober: c},
-		Profile: c.SetupSporedIAMRole,
+		Deps: Deps{EC2: ec2.NewFromConfig(cfg), Prober: c},
+		Profile: func(ctx context.Context) (string, error) {
+			return ProxyProfile(ctx, func(ctx context.Context) (string, error) {
+				_, arn, err := c.GetCallerIdentityInfo(ctx)
+				return arn, err
+			}, c.SetupSporedIAMRole)
+		},
 		AMI: func(ctx context.Context) (string, error) {
 			return c.GetAL2023AMI(ctx, region, "arm64", false)
 		},
@@ -479,11 +484,31 @@ func ClientFor(c *spawnaws.Client, region, version string) Client {
 			if err != nil {
 				return nil, err
 			}
-			// No TTL here: ProxyTags adds the proxy's own.
-			return tagger.Tags(ctx, spawnaws.LaunchConfig{
-				Name: "spawn-egress-proxy", InstanceType: InstanceType, Region: region,
-				SpawnVersion: version, TargetOS: "linux",
-			})
+			return tagger.Tags(ctx, LaunchConfig(region, version))
 		},
+	}
+}
+
+// ProxyProfile is the instance profile a proxy launches with: the spored
+// profile, set up by setup (pkg/aws SetupSporedIAMRole, which creates or
+// updates it), unless the caller is a nested spore (#39). A nested spore's
+// role has no IAM write by design, so there it is named without being set up:
+// the launch that made the nested spore made sure it exists. callerARN is the
+// caller's STS identity; an error from it means "not nested".
+func ProxyProfile(ctx context.Context, callerARN, setup func(context.Context) (string, error)) (string, error) {
+	if arn, err := callerARN(ctx); err == nil {
+		if _, nested := spawnaws.NestedSpawnRoleFromCallerARN(arn); nested {
+			return spawnaws.SporedInstanceProfileName, nil
+		}
+	}
+	return setup(ctx)
+}
+
+// LaunchConfig is the launch config a proxy's base tags are rendered from
+// (pkg/aws LaunchTagger): no TTL, since [ProxyTags] adds the proxy's own.
+func LaunchConfig(region, version string) spawnaws.LaunchConfig {
+	return spawnaws.LaunchConfig{
+		Name: "spawn-egress-proxy", InstanceType: InstanceType, Region: region,
+		SpawnVersion: version, TargetOS: "linux",
 	}
 }

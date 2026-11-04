@@ -184,7 +184,18 @@ func nestedSpawnStatements() []interface{} {
 				},
 			},
 		},
-		// Lifecycle of spawn-managed resources only.
+		// Lifecycle of spawn-managed resources only. The condition key is
+		// EC2's (ec2:ResourceTag), because every action here is EC2's.
+		//
+		// The Revoke pair and DeleteSecurityGroup are the egress proxy's
+		// (#1515): find-or-create removes the default allow-all egress EC2
+		// gives its two new groups and any drifted rule (pkg/egressproxy/
+		// deploy EnsureGroups), and `spawn egress-proxy delete` deletes the
+		// groups. Both groups carry spawn:managed=true from creation, so the
+		// grant reaches them and no group spawn did not tag. A nested spore
+		// could already terminate any spawn-managed instance, so deleting an
+		// unused spawn-managed group (EC2 refuses one in use) grants it
+		// nothing more destructive.
 		map[string]interface{}{
 			"Sid":    "NestedSpawnManageManaged",
 			"Effect": "Allow",
@@ -196,6 +207,9 @@ func nestedSpawnStatements() []interface{} {
 				"ec2:GetPasswordData",
 				"ec2:AuthorizeSecurityGroupIngress",
 				"ec2:AuthorizeSecurityGroupEgress",
+				"ec2:RevokeSecurityGroupIngress",
+				"ec2:RevokeSecurityGroupEgress",
+				"ec2:DeleteSecurityGroup",
 				"ec2:DeletePlacementGroup",
 			},
 			"Resource":  "*",

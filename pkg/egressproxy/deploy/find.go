@@ -39,6 +39,46 @@ const deadlineSlack = 5 * time.Minute
 // Evaluate decides whether inst is a proxy a launch in w.VPCID may reuse: the
 // proxy, and "" if so; else why not. Pure.
 //
+// It is [Verify] (is it spawn's proxy at all), between a state check (pending
+// or running) and the freshness checks: it must be one this spawn launched
+// (spawn:version equal to w.Version), have more than the reuse margin left,
+// and have a private IP.
+func Evaluate(inst types.Instance, w Want) (Proxy, string) {
+	p := proxyOf(inst)
+	margin := w.ReuseMargin
+	if margin <= 0 {
+		margin = egressproxy.ReuseMargin
+	}
+
+	switch p.State {
+	case string(types.InstanceStateNamePending), string(types.InstanceStateNameRunning):
+	default:
+		return p, "it is " + orUnknown(p.State) + ", not pending or running"
+	}
+	p, why := Verify(inst, w)
+	if why != "" {
+		return p, why
+	}
+
+	// Freshness.
+	if w.Version == "" || p.Version != w.Version {
+		return p, fmt.Sprintf("it was launched by spawn %s, not %s", orUnknown(p.Version), orUnknown(w.Version))
+	}
+	if left := p.Deadline.Sub(w.Now); left <= margin {
+		return p, fmt.Sprintf("it has %v left before its deadline, not more than %v", left.Round(time.Minute), margin)
+	}
+	if p.PrivateIP == "" {
+		return p, "it has no private IP yet"
+	}
+	return p, ""
+}
+
+// Verify decides whether inst is w.VPCID's egress proxy as spawn launched it,
+// whatever its state, version or remaining life: the proxy, and "" if so; else
+// why not. Pure. It is the half of [Evaluate] that `spawn egress-proxy delete`
+// and `upgrade` require before they terminate an instance, since the tag that
+// names a proxy is not proof that spawn made it.
+//
 // What makes it spawn's proxy. spawn has no signature to check yet: #76's
 // signed tag does not exist, and the only spore.host signatures today are the
 // ones the bootstrap verifies on spored and on its own body, made by a key the
@@ -55,34 +95,10 @@ const deadlineSlack = 5 * time.Minute
 //     [egressproxy.MaxLife]: a deadline written later by the instance is
 //     refused rather than trusted.
 //
-// Then it must be one this spawn launched (spawn:version equal to w.Version),
-// pending or running, and have more than the reuse margin left.
-func Evaluate(inst types.Instance, w Want) (Proxy, string) {
+// w.Version, w.Now and w.ReuseMargin are not read.
+func Verify(inst types.Instance, w Want) (Proxy, string) {
 	tags := tagMap(inst.Tags)
-	p := Proxy{
-		InstanceID:       aws.ToString(inst.InstanceId),
-		PrivateIP:        aws.ToString(inst.PrivateIpAddress),
-		SubnetID:         aws.ToString(inst.SubnetId),
-		Version:          tags["spawn:version"],
-		LaunchTime:       ttl.LaunchAnchor(tags["spawn:launch-time"], aws.ToTime(inst.LaunchTime)),
-		AvailabilityZone: "",
-	}
-	if inst.Placement != nil {
-		p.AvailabilityZone = aws.ToString(inst.Placement.AvailabilityZone)
-	}
-	if inst.State != nil {
-		p.State = string(inst.State.Name)
-	}
-	margin := w.ReuseMargin
-	if margin <= 0 {
-		margin = egressproxy.ReuseMargin
-	}
-
-	switch p.State {
-	case string(types.InstanceStateNamePending), string(types.InstanceStateNameRunning):
-	default:
-		return p, "it is " + orUnknown(p.State) + ", not pending or running"
-	}
+	p := proxyOf(inst)
 	if tags[ProxyTag] != w.VPCID || aws.ToString(inst.VpcId) != w.VPCID {
 		return p, fmt.Sprintf("it is not %s's proxy (%s=%q, in %s)", w.VPCID, ProxyTag, tags[ProxyTag], orUnknown(aws.ToString(inst.VpcId)))
 	}
@@ -119,18 +135,26 @@ func Evaluate(inst types.Instance, w Want) (Proxy, string) {
 		return p, fmt.Sprintf("its deadline %s is later than launch plus the proxy's %v life (%s), which spawn never writes",
 			dl.UTC().Format(time.RFC3339), egressproxy.MaxLife, limit.UTC().Format(time.RFC3339))
 	}
-
-	// Freshness.
-	if w.Version == "" || p.Version != w.Version {
-		return p, fmt.Sprintf("it was launched by spawn %s, not %s", orUnknown(p.Version), orUnknown(w.Version))
-	}
-	if left := dl.Sub(w.Now); left <= margin {
-		return p, fmt.Sprintf("it has %v left before its deadline, not more than %v", left.Round(time.Minute), margin)
-	}
-	if p.PrivateIP == "" {
-		return p, "it has no private IP yet"
-	}
 	return p, ""
+}
+
+// proxyOf is what inst says about itself, unverified.
+func proxyOf(inst types.Instance) Proxy {
+	tags := tagMap(inst.Tags)
+	p := Proxy{
+		InstanceID: aws.ToString(inst.InstanceId),
+		PrivateIP:  aws.ToString(inst.PrivateIpAddress),
+		SubnetID:   aws.ToString(inst.SubnetId),
+		Version:    tags["spawn:version"],
+		LaunchTime: ttl.LaunchAnchor(tags["spawn:launch-time"], aws.ToTime(inst.LaunchTime)),
+	}
+	if inst.Placement != nil {
+		p.AvailabilityZone = aws.ToString(inst.Placement.AvailabilityZone)
+	}
+	if inst.State != nil {
+		p.State = string(inst.State.Name)
+	}
+	return p
 }
 
 func orUnknown(s string) string {
