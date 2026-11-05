@@ -422,7 +422,7 @@ func init() {
 		"spawn's own bootstrap hosts; members get its client security group, and their own groups must allow outbound tcp 3128 to it. "+
 		"Only spawn's own fetches use it (the EFA installer and the packages it installs, spawn's apt-get, the AWS CLI download); "+
 		"--command and --mpi-command never see it. The VPC needs a public subnet routed to an internet gateway. "+
-		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with spawn defaults set bootstrap-egress proxy. On a parameter sweep, with --no-detach only: the sweep finds or creates the proxy of each member's VPC before any member launches; a detached sweep refuses it (#1515)")
+		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with spawn defaults set bootstrap-egress proxy. On a parameter sweep: the sweep finds or creates the proxy of each member's VPC before any member launches; a detached sweep does so at --detach, and the sweep orchestrator replaces a proxy that has gone before it launches a member (#1515)")
 	launchCmd.Flags().DurationVar(&egressProxyIdle, "egress-proxy-idle", egressproxy.DefaultIdle, "With --bootstrap-egress proxy: how long a proxy this launch creates may go "+
 		"with nothing proxied before it is retired. At most the proxy's life of "+egressproxy.MaxLife.String()+" (the TTL reaper's ceiling less a day), which ends it regardless")
 	launchCmd.Flags().StringVar(&efaGroup, "efa-group", "", "With --efa: create or join the security group spawn-efa-NAME, which admits all traffic between its members, so separate launches (different instance types, no --mpi) can share one EFA fabric. Launch them in one AZ. Unused groups are deleted by the reaper")
