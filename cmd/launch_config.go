@@ -908,7 +908,7 @@ func buildUserDataSeeded(plat *platform.Platform, config *aws.LaunchConfig, publ
 		LaunchConfig:      launchConfig,
 		ReadsLaunchConfig: readsLaunchConfig,
 		// The egress proxy ensureEgressProxy found or created (#1515): the
-		// AWS CLI install's origin fallback goes through it.
+		// AWS CLI download on an image with none goes through it.
 		EgressProxy: launchEgressProxy(config),
 	})
 }

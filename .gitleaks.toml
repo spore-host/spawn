@@ -35,7 +35,7 @@ regexes = [
   '''\$sporeKey[XY] = '[0-9a-f]{64}'$''',
   # The AWS CLI team's PGP signing key FINGERPRINT (#1495), pinned in the
   # AWS CLI bump tooling (scripts/awsclipin, scripts/bump-awscli-pin.sh) and
-  # in scripts/mirror-awscli.sh (#1494), whose `readonly AWSCLI_KEY_FPR=` line
+  # in scripts/verify-awscli-pin.sh (#1515), whose `readonly AWSCLI_KEY_FPR=` line
   # is the same text, so the second entry covers both scripts. A fingerprint is a public identifier, published in
   # AWS's own install guide, not a secret; 40 hex characters beside "key" is
   # what generic-api-key matches. Allowlisted by exact LINE and exact value, so

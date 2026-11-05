@@ -453,7 +453,10 @@ func (sb *bootSandbox) run(script string) (string, error) {
 		// .s3.amazonaws.com name is left alone, so it 404s here.
 		".s3.${SPAWN_BS_REGION:-us-east-1}.amazonaws.com", "",
 		".s3.${REGION}.amazonaws.com", "",
-		".s3.$region.amazonaws.com", "", // spawn_need_aws's regional mirror (#1494)
+		// The retired #1494 AWS CLI mirror's name: no script uses it now, but
+		// one that did would be served and counted (retiredMirrorKey) here,
+		// not sent to the real S3.
+		".s3.$region.amazonaws.com", "",
 		".s3.us-east-1.amazonaws.com", "",
 	)
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command

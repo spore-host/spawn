@@ -11,8 +11,9 @@ import (
 
 // The egress proxy's allowlist is the one list of what spawn's bootstrap
 // fetches from outside AWS (#1515): every fixed origin the AWS CLI install
-// fetches from must be on it. The regional spawn-binaries mirror is S3,
-// reached through the endpoint --no-public-ip requires, not the proxy.
+// fetches from must be on it. Since the #1494 mirror was retired (#1515) that
+// is its only source, so a no-NAT --no-public-ip launch reaches it only
+// through the proxy.
 func TestAWSCLIOriginsAreOnTheEgressAllowlist(t *testing.T) {
 	origins := 0
 	for _, raw := range regexp.MustCompile(`https://[A-Za-z0-9.$-]+`).FindAllString(awsCLIInstallTemplate, -1) {
@@ -20,7 +21,8 @@ func TestAWSCLIOriginsAreOnTheEgressAllowlist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", raw, err)
 		}
-		if strings.Contains(u.Host, "$") { // the per-region S3 mirror
+		if strings.Contains(u.Host, "$") {
+			t.Errorf("spawn_need_aws fetches from a templated host %s: the per-region mirror is retired (#1515)", u.Host)
 			continue
 		}
 		origins++

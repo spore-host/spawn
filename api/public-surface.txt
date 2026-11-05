@@ -796,7 +796,6 @@ const ReadyGateTimeoutSecs
 const RequiredGatesFile
 const StorageReadyGate
 field AWSCLIPin.Arch string
-field AWSCLIPin.MirrorKey string
 field AWSCLIPin.SHA256 string
 field AWSCLIPin.Version string
 field BootstrapConfig.Command string

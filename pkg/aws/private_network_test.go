@@ -52,7 +52,7 @@ func missingNames(c PrivateCheck) []string {
 	return out
 }
 
-var privateCfg = LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1", Region: pnRegion}
+var privateCfg = LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1", Region: pnRegion, AMI: "ami-0123456789abcdef0"}
 
 // The issue's own two VPCs, and the cases in between. A subnet with no S3
 // endpoint and no NAT is refused; one with every endpoint, or with a NAT
@@ -202,10 +202,13 @@ func TestValidateNoPublicIP(t *testing.T) {
 // --- through Client.Launch, wire level ---
 
 // privateFake is a fake EC2 whose subnet-1 (vpc-1, us-west-2a) has route
-// table rtb-1 and the given endpoints and default route.
+// table rtb-1 and the given endpoints and default route. Every AMI it is asked
+// about is Amazon's AL2023, which ships the AWS CLI, so no launch needs it
+// downloaded (#1515); set imagesXML to say otherwise.
 func privateFake(endpoints, defaultRoute string) *fakeEC2 {
 	return &fakeEC2{
-		subnets: []fakeSubnet{{id: "subnet-1", vpc: "vpc-1", az: "us-west-2a", free: 200}},
+		imagesXML: al2023ImageXML,
+		subnets:   []fakeSubnet{{id: "subnet-1", vpc: "vpc-1", az: "us-west-2a", free: 200}},
 		routeTablesXML: `<item><routeTableId>rtb-1</routeTableId><vpcId>vpc-1</vpcId><routeSet>` +
 			`<item><destinationCidrBlock>172.31.0.0/16</destinationCidrBlock><gatewayId>local</gatewayId><state>active</state></item>` +
 			defaultRoute + `</routeSet><associationSet><item><routeTableAssociationId>rtbassoc-1</routeTableAssociationId>` +

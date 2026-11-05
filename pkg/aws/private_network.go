@@ -75,9 +75,9 @@ var privateServices = []PrivateService{
 		// TestEveryBootstrapS3HostIsRegional), which both a gateway endpoint
 		// and an interface endpoint's private DNS serve.
 		Endpoint: "s3", IAMPrefixes: []string{"s3"}, Gateway: true,
-		// The same bucket mirrors the pinned AWS CLI an image without one
-		// (Ubuntu) installs (#1494), so no Linux launch needs the internet for it.
-		Why: "the bootstrap downloads spored (and, on an image with no aws CLI, the pinned AWS CLI) from " +
+		// Not the AWS CLI an image without one (Ubuntu) installs: that comes
+		// from awscli.amazonaws.com, an internet need (imageAWSCLINeed, #1515).
+		Why: "the bootstrap downloads spored from " +
 			"https://spawn-binaries-<region>.s3.<region>.amazonaws.com, and spored reads its launch config object and stages data",
 	},
 	{
@@ -130,9 +130,11 @@ func PrivateServices() []PrivateService {
 }
 
 // privateInternetNeeds are the places outside AWS a launch of cfg sends
-// traffic to, which only a NAT route reaches. Every LaunchConfig URL or
-// endpoint field is here or refused by ValidateNoPublicIP
-// (TestEveryLaunchURLFieldIsAPrivateNeedOrRefused).
+// traffic to, which only a NAT route (or, for spawn's own bootstrap hosts, the
+// egress proxy) reaches. Every LaunchConfig URL or endpoint field is here or
+// refused by ValidateNoPublicIP (TestEveryLaunchURLFieldIsAPrivateNeedOrRefused).
+// The Linux bootstrap's AWS CLI download depends on the image, not on cfg:
+// [Client.PreflightNoPublicIP] adds it (imageAWSCLINeed).
 func privateInternetNeeds(cfg LaunchConfig) []string {
 	var out []string
 	add := func(what, raw string) {
@@ -285,6 +287,12 @@ func (c PrivateCheck) requireEgressProxy(cfg LaunchConfig) error {
 	}
 	return fmt.Errorf("%w: %s is reached only through it (%s). `spawn launch` finds or creates the proxy; "+
 		"this caller has not", ErrNoEgressProxy, strings.Join(c.ViaEgressProxy, "; "), BootstrapEgressFlag)
+}
+
+// hasWayOut reports whether n's route table sends 0.0.0.0/0 to a NAT gateway
+// or a working NAT instance: everything is met, internet needs included.
+func (n PrivateNetwork) hasWayOut() bool {
+	return n.NATGatewayID != "" || (n.NATInstanceID != "" && n.NATInstanceProblem == "")
 }
 
 // OK reports whether nothing is missing.
@@ -845,6 +853,18 @@ func (c *Client) PreflightNoPublicIP(ctx context.Context, cfg *LaunchConfig, int
 			"(it reads ec2:DescribeSubnets, ec2:DescribeRouteTables, ec2:DescribeVpcEndpoints and, for a route to an instance, "+
 			"ec2:DescribeInstances): %w. "+
 			"Pass --allow-missing-endpoints to launch without the check", cfg.SubnetID, err)
+	}
+	// The AWS CLI download is a need only where nothing else reaches the
+	// internet, and only for an image that may have no aws CLI: an image read
+	// is spent only then (#1515 phase 7).
+	if !n.hasWayOut() {
+		v := c.imageAWSCLINeed(ctx, *cfg)
+		if v.note != "" {
+			c.reportPreflightOnce(out, "⚠️  --no-public-ip: %s\n", v.note)
+		}
+		if v.need != "" {
+			internet = append(append([]string(nil), internet...), v.need)
+		}
 	}
 	check := CheckPrivateNetwork(n, *cfg, internet)
 	for _, w := range check.Warnings {
