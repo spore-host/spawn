@@ -29,9 +29,11 @@ import (
 // (phase 4: pkg/userdata's EFA and apt steps, pkg/launcher's AWS CLI
 // install), never for the user's command. A foreground parameter sweep
 // (--no-detach) finds or creates the proxy of each VPC its members count on
-// (ensureSweepEgressProxies). Detached sweeps and the sweep orchestrator do
-// not support it yet (#1515 PR B), and neither do schedules (which run
-// detached sweeps and carry no --no-public-ip) or pools.
+// (ensureSweepEgressProxies). A detached sweep does too, at submit time, and
+// records each VPC's proxy for the sweep orchestrator, which ensures it again
+// before each launch and replaces it if it has gone (#1515 PR B:
+// launch_sweep_detached_egress_proxy.go). Schedules (which run detached
+// sweeps and carry no --no-public-ip) and pools do not use it.
 
 // bootstrapEgressEnv sets --bootstrap-egress's default for one shell.
 const bootstrapEgressEnv = "SPAWN_BOOTSTRAP_EGRESS"
@@ -79,8 +81,8 @@ func resolveBootstrapEgressFlag(changed bool) error {
 }
 
 // errEgressProxyUnsupported is wrapped by a refusal on a path the proxy does
-// not reach yet.
-var errEgressProxyUnsupported = errors.New("--bootstrap-egress proxy is not supported here yet (#1515)")
+// not reach.
+var errEgressProxyUnsupported = errors.New("--bootstrap-egress proxy is not supported here (#1515)")
 
 // validateBootstrapEgressFlags refuses what --bootstrap-egress and
 // --egress-proxy-idle cannot do, before any AWS call. Pure: flags only.
@@ -89,11 +91,10 @@ var errEgressProxyUnsupported = errors.New("--bootstrap-egress proxy is not supp
 //     config file is simply not used there.
 //   - --egress-proxy-idle without the proxy, or not positive, or longer than
 //     the proxy's life.
-//   - The proxy on a detached parameter sweep (detachedSweep: a sweep without
-//     --no-detach, which is detached by default): the sweep orchestrator does
-//     not find or create one (refuseDetachedSweepEgressProxy). A foreground
-//     sweep does.
-func validateBootstrapEgressFlags(idleChanged, detachedSweep bool) error {
+//
+// Every launch path that takes --no-public-ip supports the proxy, a detached
+// parameter sweep included (#1515 PR B).
+func validateBootstrapEgressFlags(idleChanged bool) error {
 	proxy := bootstrapEgress == aws.BootstrapEgressProxy
 	switch {
 	case proxy && !noPublicIP && bootstrapEgressSource == "--bootstrap-egress":
@@ -101,8 +102,6 @@ func validateBootstrapEgressFlags(idleChanged, detachedSweep bool) error {
 			"reaches the internet itself")
 	case idleChanged && !(proxy && noPublicIP):
 		return errors.New("--egress-proxy-idle applies only with --no-public-ip --bootstrap-egress proxy")
-	case proxy && noPublicIP && detachedSweep:
-		return refuseDetachedSweepEgressProxy(bootstrapEgressSource)
 	}
 	if proxy && noPublicIP {
 		if err := egressproxy.ValidateIdle(egressProxyIdle, egressproxy.MaxLife); err != nil {
@@ -110,17 +109,6 @@ func validateBootstrapEgressFlags(idleChanged, detachedSweep bool) error {
 		}
 	}
 	return nil
-}
-
-// refuseDetachedSweepEgressProxy is the refusal of --bootstrap-egress proxy
-// (set by source) on a detached parameter sweep, for runLaunch and the
-// detached member guard alike. #1515 PR B, which teaches the orchestrator to
-// find or create the proxy, removes it and its two callers.
-func refuseDetachedSweepEgressProxy(source string) error {
-	return fmt.Errorf("%w: a detached parameter sweep (--detach, and every sweep without --no-detach) is launched "+
-		"by the sweep orchestrator, which does not find or create the egress proxy (set by %s). Pass --no-detach to "+
-		"launch the sweep from the CLI, which does, or --bootstrap-egress none with a NAT route or the VPC endpoints",
-		errEgressProxyUnsupported, source)
 }
 
 // launchBootstrapEgress is the LaunchConfig.BootstrapEgress of a launch: the
@@ -169,11 +157,12 @@ func egressProxyNeed(ctx context.Context, awsClient *aws.Client, cfg *aws.Launch
 	return check.Network, len(check.ViaEgressProxy) > 0, nil
 }
 
-// egressProxyFor is one VPC's proxy, found or created and ready, and the
-// client it was reached through.
+// egressProxyFor is one VPC's proxy, found or created and ready, the client
+// it was reached through, and the instance profile it runs with.
 type egressProxyFor struct {
-	client deploy.Client
-	result deploy.Result
+	client  deploy.Client
+	result  deploy.Result
+	profile string
 }
 
 // findOrCreateEgressProxy finds or creates the egress proxy of n's VPC in
@@ -191,7 +180,7 @@ func findOrCreateEgressProxy(ctx context.Context, awsClient *aws.Client, region 
 		Version: version(), Idle: idle, InstanceProfile: profile,
 		AMI: client.AMI, UserData: deploy.UserData, BaseTags: client.BaseTags, Out: out,
 	})
-	return egressProxyFor{client: client, result: result}, err
+	return egressProxyFor{client: client, result: result, profile: profile}, err
 }
 
 // attach gives config the proxy's client group, beside its own groups (or the

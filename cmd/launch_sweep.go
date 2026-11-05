@@ -310,12 +310,6 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if err := refuseUnpassableDetachedProfiles(paramFormat); err != nil {
 			return err
 		}
-		// The egress proxy too (#1515), before the IAM role below is made for
-		// a sweep that cannot launch: runLaunch refuses it first, and
-		// detachedSettingsGuard is the backstop per member.
-		if baseConfig.BootstrapEgress == aws.BootstrapEgressProxy {
-			return refuseDetachedSweepEgressProxy(bootstrapEgressSource)
-		}
 	} else if err := refuseNestedSweepRowsWithoutTTL(paramFormat, instanceProfile); err != nil {
 		return err
 	}
@@ -1421,6 +1415,9 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	// credentials, because the orchestrator cannot (#1437).
 	boot := newDetachedBootstrap(ctx, regionClient, plat)
 	boot.privateNetOf = detachedSubnetCheck(ctx, regionClient)
+	// --bootstrap-egress proxy (#1515): the members that count on the egress
+	// proxy, by VPC, whose proxies are found or created after the prompt.
+	boot.egress = &detachedEgressProxies{}
 	if err := seedDetachedBootstrap(paramFormat, *baseConfig, sweepID, sweepName, boot); err != nil {
 		return fmt.Errorf("detached sweep: %w", err)
 	}
@@ -1471,6 +1468,15 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 		return fmt.Errorf("detached sweep: %w", err)
 	}
 
+	// --bootstrap-egress proxy (#1515): each member VPC's egress proxy,
+	// found or created and ready, and its members bound to it; recorded for
+	// the orchestrator, which ensures it again before each launch. After the
+	// prompt and before the upload, which carries the bound members.
+	egressTargets, err := ensureDetachedEgressProxies(ctx, regionClient, paramFormat, boot.egress, egressProxyIdle, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("detached sweep: %w", err)
+	}
+
 	// The CLI IAM flags' profile, for `spawn sweep resume --detach` to re-create
 	// if the idle-role sweep deletes it (#1385). Before the upload, so a sweep
 	// the orchestrator can run always has it.
@@ -1502,6 +1508,7 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 		AWSAccountID:           accountID,
 		EstimatedCost:          costEstimate.TotalCost,
 		Budget:                 budget,
+		EgressProxies:          egressTargets,
 	}
 
 	// Check if multi-region sweep

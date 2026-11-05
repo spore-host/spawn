@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/egressproxy/deploy"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 )
@@ -90,15 +91,21 @@ type detachedBootstrap struct {
 	// has none: its params are replayed for as long as it runs, so a check
 	// made at `spawn schedule create` would not hold, and no schedule config
 	// sets NoPublicIP.
-	privateNetOf func(cfg *aws.LaunchConfig) error
+	privateNetOf func(cfg *aws.LaunchConfig) (aws.PrivateCheck, error)
+	// egress collects the --bootstrap-egress proxy members whose subnet
+	// check counts on the egress proxy, by (region, VPC), for
+	// ensureDetachedEgressProxies to find or create the proxies of after the
+	// confirmation prompt (#1515). Such a member is rendered with
+	// deploy.PendingAddr meanwhile. nil (a schedule, which carries no
+	// --no-public-ip): such a member is refused.
+	egress *detachedEgressProxies
 }
 
 // detachedSubnetCheck is the production detachedBootstrap.privateNetOf:
 // aws.Client.PreflightNoPublicIP, through the seam the foreground paths use.
-func detachedSubnetCheck(ctx context.Context, client *aws.Client) func(cfg *aws.LaunchConfig) error {
-	return func(cfg *aws.LaunchConfig) error {
-		_, err := preflightNoPublicIPFor(ctx, client, cfg, nil, os.Stderr)
-		return err
+func detachedSubnetCheck(ctx context.Context, client *aws.Client) func(cfg *aws.LaunchConfig) (aws.PrivateCheck, error) {
+	return func(cfg *aws.LaunchConfig) (aws.PrivateCheck, error) {
+		return preflightNoPublicIPFor(ctx, client, cfg, nil, os.Stderr)
 	}
 }
 
@@ -154,7 +161,7 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 	if pf.Defaults == nil {
 		pf.Defaults = map[string]interface{}{}
 	}
-	for _, k := range []string{detachedUserDataKey, detachedTagsKey, detachedLaunchSettingsKey} {
+	for _, k := range []string{detachedUserDataKey, detachedTagsKey, detachedLaunchSettingsKey, detachedEgressProxyVPCKey} {
 		delete(pf.Defaults, k)
 		for _, row := range pf.Params {
 			delete(row, k)
@@ -167,6 +174,7 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 	userData := make([]string, len(pf.Params))
 	memberTags := make([]map[string]interface{}, len(pf.Params))
 	memberSettings := make([]aws.LaunchSettings, len(pf.Params))
+	proxyVPCs := make([]string, len(pf.Params))
 	var defaultedVerbs []string
 	for i, row := range pf.Params {
 		cfg, err := buildLaunchConfigFromParams(base, pf.Defaults, row, sweepID, sweepName, i, len(pf.Params))
@@ -215,12 +223,25 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		// After the target OS (a Windows bootstrap needs NAT for its AWS CLI
 		// installer) and before the settings, which carry the pinned subnet:
 		// an AZ-only row would otherwise let EC2 pick one nobody checked.
+		proxyVPC := ""
 		if cfg.NoPublicIP {
 			if b.privateNetOf == nil {
 				return fmt.Errorf("param set %d: no subnet check: --no-public-ip would launch in an unchecked subnet", i)
 			}
-			if err := b.privateNetOf(&cfg); err != nil {
+			check, err := b.privateNetOf(&cfg)
+			if err != nil {
 				return fmt.Errorf("param set %d: %w", i, err)
+			}
+			// --bootstrap-egress proxy (#1515): a member the check counts on
+			// the proxy is rendered with deploy.PendingAddr, and bound to
+			// its VPC's proxy after the prompt.
+			if cfg.BootstrapEgress == aws.BootstrapEgressProxy && len(check.ViaEgressProxy) > 0 {
+				if b.egress == nil {
+					return fmt.Errorf("param set %d: %w: this sweep's members are not checked for the egress proxy", i, errEgressProxyUnsupported)
+				}
+				b.egress.add(cfg.Region, check.Network, i)
+				cfg.EgressProxyAddr = deploy.PendingAddr
+				proxyVPC = check.Network.VPCID
 			}
 		}
 		// Before the tags: the FSx mount name the lookup finds is one of them.
@@ -246,6 +267,7 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		}
 		memberTags[i] = encodeDetachedTags(tags)
 		memberSettings[i] = b.settingsOf(cfg)
+		proxyVPCs[i] = proxyVPC
 	}
 	if len(defaultedVerbs) > 0 {
 		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-setting --idle-timeout=1h for sweep members with no ttl or idle_timeout\n")
@@ -259,6 +281,9 @@ func seedDetachedBootstrap(pf *ParamFileFormat, base aws.LaunchConfig, sweepID, 
 		}
 		pf.Params[i][detachedTagsKey] = memberTags[i]
 		pf.Params[i][detachedLaunchSettingsKey] = memberSettings[i]
+		if proxyVPCs[i] != "" {
+			pf.Params[i][detachedEgressProxyVPCKey] = proxyVPCs[i]
+		}
 	}
 
 	same := true

@@ -82,9 +82,16 @@ var detachedDispositions = map[string]detachedDisposition{
 	// VPC reads (detachedBootstrap.privateNetOf), and the orchestrator asks
 	// for no public IP from the settings.
 	"NoPublicIP": {settings: true, prereq: func(c *aws.LaunchConfig) { c.SubnetID = "subnet-1" }},
-	// The egress proxy (#1515): no sweep path finds or creates one, so
-	// sweepMemberGuard, which detachedSettingsGuard runs first, refuses both.
-	"BootstrapEgress": {refused: true, prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
+	// The egress proxy (#1515 PR B): the opt-in is carried. The subnet check
+	// at --detach decides whether the member counts on the proxy; if so the
+	// CLI finds or creates its VPC's proxy and binds the member to it (its
+	// address in the user data, its clients group in the settings, its VPC
+	// in detachedEgressProxyVPCKey), and the orchestrator ensures it again
+	// before the launch. An address the config names itself was not found by
+	// that, and is refused.
+	"BootstrapEgress": {why: "the --no-public-ip subnet check at --detach, then the member's user data, groups and " +
+		"detachedEgressProxyVPCKey (ensureDetachedEgressProxies)",
+		prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
 	"EgressProxyAddr": {refused: true, prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
 	"AllowMissingEndpoints": {why: "read only by --no-public-ip's subnet check, which runs at --detach (detachedBootstrap.privateNetOf)",
 		prereq: func(c *aws.LaunchConfig) { c.NoPublicIP, c.SubnetID = true, "subnet-1" }},
@@ -416,7 +423,7 @@ func TestDetachedNoPublicIPChecksEveryMembersSubnet(t *testing.T) {
 	var checked []aws.LaunchConfig
 	boot := testDetachedBootstrap(t)
 	pin := boot.privateNetOf
-	boot.privateNetOf = func(cfg *aws.LaunchConfig) error {
+	boot.privateNetOf = func(cfg *aws.LaunchConfig) (aws.PrivateCheck, error) {
 		checked = append(checked, *cfg)
 		return pin(cfg)
 	}
@@ -440,9 +447,9 @@ func TestDetachedNoPublicIPChecksEveryMembersSubnet(t *testing.T) {
 	}
 
 	// A member whose subnet fails the check refuses the detach.
-	boot.privateNetOf = func(cfg *aws.LaunchConfig) error {
+	boot.privateNetOf = func(cfg *aws.LaunchConfig) (aws.PrivateCheck, error) {
 		if cfg.AvailabilityZone == "us-east-1c" {
-			return aws.ErrPrivateNetworkIncomplete
+			return aws.PrivateCheck{}, aws.ErrPrivateNetworkIncomplete
 		}
 		return pin(cfg)
 	}
@@ -470,7 +477,7 @@ func TestDetachedNoPublicIPChecksEveryMembersSubnet(t *testing.T) {
 	}
 	t.Cleanup(func() { preflightNoPublicIPFor = prev })
 	cfg := base
-	if err := detachedSubnetCheck(context.Background(), nil)(&cfg); !errors.Is(err, aws.ErrPrivateNetworkIncomplete) || prodChecked != 1 {
+	if _, err := detachedSubnetCheck(context.Background(), nil)(&cfg); !errors.Is(err, aws.ErrPrivateNetworkIncomplete) || prodChecked != 1 {
 		t.Errorf("production subnet check: err %v after %d checks; want PreflightNoPublicIP's refusal, once", err, prodChecked)
 	}
 }

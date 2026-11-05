@@ -277,10 +277,12 @@ var sweepLaunchFlags = map[string]sweepFlagRule{
 	"allow-missing-endpoints": viaConfig(whySweepConfig + "; read by --no-public-ip's subnet check (#1433)"),
 	// The egress proxy (#1515): a foreground sweep finds or creates the proxy
 	// of each VPC its members count on (ensureSweepEgressProxies); a detached
-	// one is refused by validateBootstrapEgressFlags and detachedSettingsGuard.
-	"bootstrap-egress": viaConfig(whySweepConfig + "; with --no-public-ip, a foreground sweep finds or creates the " +
-		"egress proxy of each member's VPC before any member launches, and a detached sweep refuses it (#1515)"),
-	"egress-proxy-idle": steers("the idle period of the egress proxy a foreground sweep finds or creates (#1515)"),
+	// one does so at --detach and records it for the orchestrator, which
+	// ensures it again before each launch (ensureDetachedEgressProxies).
+	"bootstrap-egress": viaConfig(whySweepConfig + "; with --no-public-ip, the sweep finds or creates the " +
+		"egress proxy of each member's VPC before any member launches; on a detached sweep the orchestrator " +
+		"replaces it before a launch if it has gone (#1515)"),
+	"egress-proxy-idle": steers("the idle period of the egress proxy a sweep finds or creates (#1515)"),
 }
 
 // isSweepLaunch reports whether runLaunch dispatches to the parameter sweep:

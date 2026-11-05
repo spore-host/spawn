@@ -84,7 +84,7 @@ func TestBootstrapEgressConfigDefault(t *testing.T) {
 	if launchBootstrapEgress() != "" {
 		t.Errorf("a public launch carries %q", launchBootstrapEgress())
 	}
-	if err := validateBootstrapEgressFlags(false, false); err != nil {
+	if err := validateBootstrapEgressFlags(false); err != nil {
 		t.Errorf("a default from the config file refused a public launch: %v", err)
 	}
 }

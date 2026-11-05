@@ -41,6 +41,9 @@ var detachedParamKeys = []string{
 	detachedTagsKey,
 	// The member's RunInstances-side settings (#1353), resolved beside its tags.
 	detachedLaunchSettingsKey,
+	// The VPC whose egress proxy the member counts on (#1515), set by
+	// seedDetachedBootstrap for a --bootstrap-egress proxy member.
+	detachedEgressProxyVPCKey,
 }
 
 // NOTE: `region` is deliberately NOT in the list above, and the gate caught me
