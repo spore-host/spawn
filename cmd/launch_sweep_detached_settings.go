@@ -56,6 +56,10 @@ func detachedSettingsGuard(cfg aws.LaunchConfig) error {
 		return err
 	}
 	switch {
+	case (cfg.BootstrapEgress != "" && cfg.BootstrapEgress != aws.BootstrapEgressNone) || cfg.EgressProxyAddr != "":
+		// The orchestrator does not find or create the egress proxy yet
+		// (#1515 PR B removes this); a foreground sweep does.
+		return refuseDetachedSweepEgressProxy("the member's config")
 	case cfg.EFASecondaryType != "" && cfg.EFASecondaryType != aws.EFASecondaryTypeEFAOnly:
 		// Applies only to a multi-card EFA launch, which is refused below; named
 		// here so the refusal says which flag to drop (#1404).

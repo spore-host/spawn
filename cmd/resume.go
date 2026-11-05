@@ -13,6 +13,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/platform"
+	"github.com/spore-host/spawn/pkg/progress"
 	"github.com/spore-host/spawn/pkg/sweep"
 )
 
@@ -439,6 +440,14 @@ func runResume(cmd *cobra.Command, args []string) error {
 				cfg.IamInstanceProfile = instanceProfile
 			}
 		}
+	}
+
+	// The egress proxy of every VPC a pending member counts on (#1515), as the
+	// launch found or created it, before any member is relaunched: the one it
+	// used may have expired since.
+	if err := ensureSweepEgressProxies(ctx, awsClient, launchConfigs, pending, member.egressProxyIdle(),
+		progress.NewProgress(), os.Stderr); err != nil {
+		return err
 	}
 
 	// Build user-data for each config, with its storage mounts, through the

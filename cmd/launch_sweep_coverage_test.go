@@ -85,6 +85,7 @@ func TestSweepFlagRulesAreEnforced(t *testing.T) {
 var flagPrereqs = map[string][]string{
 	"capacity-block": {"reservation-id"}, "efa-interfaces": {"efa"}, "efa-secondary-type": {"efa"},
 	"no-public-ip": {"subnet-id"}, "allow-missing-endpoints": {"no-public-ip", "subnet-id"},
+	"bootstrap-egress": {"no-public-ip", "subnet-id"},
 	"webhook-correlation": {"spot-webhook-url"}, "webhook-timeout": {"spot-webhook-url"},
 	"metrics-port": {"metrics"}, "metrics-bind": {"metrics"}, "metrics-path": {"metrics"},
 	"tracing-exporter": {"tracing"}, "tracing-sampling": {"tracing"},
@@ -97,6 +98,7 @@ var flagPrereqs = map[string][]string{
 // sampleFlagValues are values that pass a flag's validation; any other flag
 // gets a generic value of its type (sampleFlagValue).
 var sampleFlagValues = map[string]string{
+	"bootstrap-egress": "proxy",
 	"instance-type": "m7i.xlarge", "region": "us-west-2", "az": "us-east-1c", "ami": "ami-0fedcba9876543210",
 	"volume-size": "40", "attach-volume": "snap-0123:/refdata", "key-name": testSweepKeyName, "key-pair": testSweepKeyName,
 	"security-group": "sg-1", "security-group-ids": "sg-1", "subnet": "subnet-1", "subnet-id": "subnet-1", "vpc": "vpc-1",

@@ -8,8 +8,10 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/egressproxy"
 )
 
 // SweepMemberRecord is everything a foreground sweep's members were built
@@ -41,6 +43,10 @@ type SweepMemberRecord struct {
 	IAM *SweepIAMRole `json:"iam,omitempty"`
 	// Bootstrap is the CLI-side inputs the user-data builder reads.
 	Bootstrap SweepBootstrapInputs `json:"bootstrap"`
+	// EgressProxyIdle is --egress-proxy-idle, for a sweep whose members may
+	// count on the egress proxy (#1515): a resume finds or creates the proxy
+	// again, and one it creates gets the launch's idle period.
+	EgressProxyIdle time.Duration `json:"egress_proxy_idle,omitempty"`
 	// Withheld names each setting the sweep was launched with that is not
 	// stored, because it may carry a credential (sweepWithheldSettings). A
 	// resume requires each to be passed again.
@@ -163,6 +169,9 @@ func newSweepMemberRecord(base *aws.LaunchConfig, noTimeoutSet bool, iam *SweepI
 		return nil, err
 	}
 	rec := &SweepMemberRecord{Schema: sweepMemberRecordSchema, Base: *base, NoTimeout: noTimeoutSet, IAM: iam, Bootstrap: boot}
+	if base.BootstrapEgress == aws.BootstrapEgressProxy {
+		rec.EgressProxyIdle = egressProxyIdle
+	}
 	// Rendered per member, and stamped by the resuming spawn itself.
 	rec.Base.UserData, rec.Base.SpawnVersion = "", ""
 	for _, w := range sweepWithheldSettings {
@@ -178,6 +187,15 @@ func newSweepMemberRecord(base *aws.LaunchConfig, noTimeoutSet bool, iam *SweepI
 		w.set(rec, "")
 	}
 	return rec, nil
+}
+
+// egressProxyIdle is the idle period of a proxy a resume of the sweep
+// creates: the recorded --egress-proxy-idle, else its default.
+func (r *SweepMemberRecord) egressProxyIdle() time.Duration {
+	if r == nil || r.EgressProxyIdle <= 0 {
+		return egressproxy.DefaultIdle
+	}
+	return r.EgressProxyIdle
 }
 
 // currentSweepBootstrapInputs reads this invocation's bootstrap flags.
@@ -347,7 +365,7 @@ var oldCheckpointLostCategory = map[string]string{
 	"spot": catPurchase, "spot-max-price": catPurchase, "reservation-id": catPurchase, "capacity-block": catPurchase,
 	"security-group": catNetwork, "security-group-ids": catNetwork, "subnet": catNetwork, "subnet-id": catNetwork,
 	"efa": catNetwork, "efa-interfaces": catNetwork, "efa-secondary-type": catNetwork, "placement-group": catNetwork,
-	"no-public-ip": catNetwork, "allow-missing-endpoints": catNetwork,
+	"no-public-ip": catNetwork, "allow-missing-endpoints": catNetwork, "bootstrap-egress": catNetwork,
 	"efs-id": catStorage, "efs-mount-point": catStorage, "efs-mount-options": catStorage, "efs-profile": catStorage,
 	"fsx-id": catStorage, "fsx-mount-point": catStorage, "fsx-skip-validate": catStorage, "attach-volume": catStorage,
 	"tag": catTags, "team": catTags, "name": catTags, "dns": catTags, "no-dns": catTags,

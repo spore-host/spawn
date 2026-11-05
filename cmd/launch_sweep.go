@@ -310,6 +310,12 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if err := refuseUnpassableDetachedProfiles(paramFormat); err != nil {
 			return err
 		}
+		// The egress proxy too (#1515), before the IAM role below is made for
+		// a sweep that cannot launch: runLaunch refuses it first, and
+		// detachedSettingsGuard is the backstop per member.
+		if baseConfig.BootstrapEgress == aws.BootstrapEgressProxy {
+			return refuseDetachedSweepEgressProxy(bootstrapEgressSource)
+		}
 	} else if err := refuseNestedSweepRowsWithoutTTL(paramFormat, instanceProfile); err != nil {
 		return err
 	}
@@ -385,16 +391,6 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	if err := preflightSweepElasticIPs(ctx, awsClient, launchConfigs, os.Stderr); err != nil {
 		return err
 	}
-	// --no-public-ip (#1433): each member's subnet, pinned and checked for the
-	// endpoints or NAT route a private instance needs. Before the EFA subnets,
-	// which then find it set.
-	if err := preflightSweepNoPublicIP(ctx, awsClient, launchConfigs, nil, os.Stderr); err != nil {
-		return err
-	}
-	// And each multi-card member's subnet, or the refusal (#1410).
-	if err := resolveSweepEFASubnets(ctx, awsClient, launchConfigs, nil, os.Stderr); err != nil {
-		return err
-	}
 
 	// Step 1: Detect AMI — per config, so a heterogeneous sweep (#372) gets an
 	// arch/GPU-appropriate AMI per instance type instead of the first entry's AMI
@@ -450,6 +446,19 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if err := windowsPluginGuard(cfg.TargetOS, decls); err != nil {
 			return err
 		}
+	}
+
+	// --no-public-ip (#1433): each member's subnet, pinned and checked for the
+	// endpoints or NAT route a private instance needs. After each member's AMI
+	// and target OS are known, which decide its internet needs (an image with
+	// no aws CLI downloads one, #1515), as on a single launch. Before the EFA
+	// subnets, which then find it set.
+	if err := preflightSweepNoPublicIP(ctx, awsClient, launchConfigs, nil, os.Stderr); err != nil {
+		return err
+	}
+	// And each multi-card member's subnet, or the refusal (#1410).
+	if err := resolveSweepEFASubnets(ctx, awsClient, launchConfigs, nil, os.Stderr); err != nil {
+		return err
 	}
 
 	// Look the members' --fsx-id filesystem up before the key pair and IAM role
@@ -515,6 +524,14 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	} else if noTimeout {
 		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-timeout specified for sweep\n")
 		fmt.Fprintf(os.Stderr, "   Instances will run indefinitely until manually terminated.\n\n")
+	}
+
+	// --bootstrap-egress proxy (#1515): the egress proxy of every VPC a member
+	// counts on, found or created and ready before any member is launched, its
+	// client group added to those members' groups and its address to their
+	// bootstrap, which is rendered next.
+	if err := ensureSweepEgressProxies(ctx, awsClient, launchConfigs, nil, egressProxyIdle, prog, os.Stderr); err != nil {
+		return err
 	}
 
 	// Build user-data for each config, with its storage mounts (#1366).
