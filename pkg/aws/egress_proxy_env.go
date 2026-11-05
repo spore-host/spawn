@@ -33,8 +33,8 @@ func EgressProxyURL(addr string) (string, error) {
 //
 //   - IMDS and the loopback names.
 //   - S3, in every form a fetch names it: the regional virtual-hosted
-//     (spawn-binaries-<region>.s3.<region>.amazonaws.com: spored and the EFA
-//     installer mirror) and path forms, the form AL2023's dnf repositories use, and
+//     (spawn-binaries-<region>.s3.<region>.amazonaws.com, where spored is
+//     published) and path forms, the form AL2023's dnf repositories use, and
 //     the global form. The gateway endpoint --no-public-ip requires serves
 //     all of them. The AL2023 AMI's repositories come from its
 //     amazon-linux-repo-s3 package (2023.12.20261021, read from the package):

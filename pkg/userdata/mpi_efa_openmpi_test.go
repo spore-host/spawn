@@ -128,7 +128,9 @@ func serve(t *testing.T, root, url string, b []byte) {
 	}
 }
 
-// The pinned tarball's two sources, for the sandbox's region.
+// The pinned tarball's origin, its only source, and the regional
+// spawn-binaries copy the retired mirror (#1507, #1515) would have used: the
+// sandbox can serve it, so a script that fetched it again would be caught.
 var (
 	efaMirrorURL = "https://spawn-binaries-us-east-1.s3.us-east-1.amazonaws.com/spawn/efa/aws-efa-installer-" + efaInstallerVersion + ".tar.gz"
 	efaOriginURL = "https://efa-installer.amazonaws.com/aws-efa-installer-" + efaInstallerVersion + ".tar.gz"
@@ -136,7 +138,7 @@ var (
 
 // efaCohort runs rank 0 of a healthy 3-member --mpi-command cohort. Unless
 // o.setup serves otherwise, the origin serves a good, pinned tarball whose
-// installer installs Open MPI, and the mirror serves nothing.
+// installer installs Open MPI.
 func efaCohort(t *testing.T, efa bool, o sandboxOpts) sandboxRun {
 	t.Helper()
 	good := efaTarball(t, efaInstallerScript(true))

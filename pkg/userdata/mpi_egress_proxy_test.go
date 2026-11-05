@@ -104,8 +104,8 @@ func TestEFAThroughTheEgressProxy(t *testing.T) {
 			good := efaTarball(t, efaInstallerScript(true))
 			pinEFATarball(t, good)
 			o.cfg = MPIConfig{EgressProxyAddr: testProxyAddr, MPICommand: `env > /tmp/mpi-command.env.$OMPI_COMM_WORLD_RANK`}
-			// The mirror lacks it, so both sources are fetched.
-			r := efaCohortServing(t, true, o, map[string][]byte{efaOriginURL: good})
+			// The old regional copy is served too, and must not be fetched.
+			r := efaCohortServing(t, true, o, map[string][]byte{efaMirrorURL: good, efaOriginURL: good})
 			if r.rc != 0 {
 				t.Fatalf("rank 0 exited %d with --efa through the proxy", r.rc)
 			}
@@ -114,16 +114,13 @@ func TestEFAThroughTheEgressProxy(t *testing.T) {
 			}
 			noProxy := testNoProxy("us-east-1")
 
-			// curl: the mirror direct, the origin through the proxy.
+			// curl: the origin alone, through the proxy (#1515: no mirror).
 			urls, envs := readProxyEnvs(t, r, "curl-env.log")
-			if strings.Join(urls, " ") != efaMirrorURL+" "+efaOriginURL {
-				t.Fatalf("curl fetched %q, want the mirror, then the origin", urls)
+			if strings.Join(urls, " ") != efaOriginURL {
+				t.Fatalf("curl fetched %q, want only the origin", urls)
 			}
-			if viaProxy(t, envs[0], efaMirrorURL) {
-				t.Errorf("the regional mirror %s went through the proxy (env %+v); it must go direct, through the S3 endpoint", efaMirrorURL, envs[0])
-			}
-			if !viaProxy(t, envs[1], efaOriginURL) || envs[1].https != testProxyURL {
-				t.Errorf("the EFA origin %s did not go through the proxy %s (env %+v)", efaOriginURL, testProxyURL, envs[1])
+			if !viaProxy(t, envs[0], efaOriginURL) || envs[0].https != testProxyURL {
+				t.Errorf("the EFA origin %s did not go through the proxy %s (env %+v)", efaOriginURL, testProxyURL, envs[0])
 			}
 
 			// The installer: proxy variables and the derived no_proxy, for its

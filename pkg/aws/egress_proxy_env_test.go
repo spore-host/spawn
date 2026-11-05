@@ -43,7 +43,7 @@ func TestEgressProxyNoProxySparesTheAllowlist(t *testing.T) {
 		}
 		direct := []string{
 			"169.254.169.254", "localhost", "127.0.0.1",
-			// The spawn-binaries bucket: spored and the EFA installer mirror.
+			// The spawn-binaries bucket, where spored is published.
 			"spawn-binaries-" + region + ".s3." + region + ".amazonaws.com",
 			// S3's path, dual-stack and global forms.
 			"s3." + region + ".amazonaws.com",

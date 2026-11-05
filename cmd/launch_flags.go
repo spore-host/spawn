@@ -409,7 +409,7 @@ func init() {
 		"Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a 0.0.0.0/0 route to a NAT gateway "+
 		"or to a working NAT instance (running, source/destination check off, a public IPv4 address, in a subnet routed to an internet gateway), "+
 		"or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the "+
-		"launch if not. On an image other than Amazon's Amazon Linux (stock Ubuntu, say), which may have no aws CLI, the bootstrap also "+
+		"launch if not. On an image other than Amazon's Amazon Linux or a spawn create-ami image built from it (stock Ubuntu, say), which may have no aws CLI, the bootstrap also "+
 		"downloads it from awscli.amazonaws.com, so without a NAT route that launch needs --bootstrap-egress proxy. "+
 		"A sweep checks each member's subnet, a detached one at --detach. spawn connect uses SSM. Refused with --dns and "+
 		"--wait-for-ssh; the DNS record --name implies is skipped")

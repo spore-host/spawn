@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
 	"github.com/spore-host/spawn/pkg/egressproxy"
@@ -191,5 +193,169 @@ func TestLaunch_NoPublicIPUbuntuWithoutNATIsRefused(t *testing.T) {
 	}
 	if f.request("RunInstances") != nil {
 		t.Error("RunInstances was called for a refused launch")
+	}
+}
+
+// --- spawn create-ami images (#1515): judged by the image they were built from ---
+
+// imageAPI is a DescribeImages stand-in over images by ID in one region,
+// recording every (region, ID) it is asked for.
+type imageAPI struct {
+	region string
+	images map[string]types.Image // "<region>|<id>"
+	calls  *[]string
+}
+
+func (a imageAPI) DescribeImages(_ context.Context, in *ec2.DescribeImagesInput, _ ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
+	id := in.ImageIds[0]
+	*a.calls = append(*a.calls, a.region+"|"+id)
+	img, ok := a.images[a.region+"|"+id]
+	if !ok {
+		return nil, fmt.Errorf("InvalidAMIID.NotFound: %s", id)
+	}
+	return &ec2.DescribeImagesOutput{Images: []types.Image{img}}, nil
+}
+
+func amazonAL2023(id string) types.Image {
+	return types.Image{ImageId: aws.String(id), ImageOwnerAlias: aws.String("amazon"),
+		Name: aws.String("al2023-ami-2023.9.20261020.0-kernel-6.1-x86_64"), Description: aws.String("Amazon Linux 2023 AMI")}
+}
+
+func canonicalUbuntu(id string) types.Image {
+	return types.Image{ImageId: aws.String(id), Name: aws.String("ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20261015")}
+}
+
+// spawnBuilt is an image `spawn create-ami` made from an instance of base,
+// with the tags cmd/create_ami.go writes; region "" omits spawn:source-region.
+func spawnBuilt(id, base, region string) types.Image {
+	tags := []types.Tag{
+		{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+		{Key: aws.String("spawn:created-from"), Value: aws.String("i-0abc")},
+	}
+	if base != "" {
+		tags = append(tags, types.Tag{Key: aws.String(createAMIBaseTag), Value: aws.String(base)})
+	}
+	if region != "" {
+		tags = append(tags, types.Tag{Key: aws.String(createAMIRegionTag), Value: aws.String(region)})
+	}
+	return types.Image{ImageId: aws.String(id), Name: aws.String("spawn-my-env-20261020"), Tags: tags}
+}
+
+func TestSpawnBuiltImageIsJudgedByItsBase(t *testing.T) {
+	for name, tc := range map[string]struct {
+		images    map[string]types.Image
+		needs     bool
+		wantCalls []string
+		why       string
+	}{
+		"built from AL2023": {
+			images:    map[string]types.Image{"us-west-2|ami-0000000000000a001": spawnBuilt("ami-0000000000000a001", "ami-0000000000000a002", ""), "us-west-2|ami-0000000000000a002": amazonAL2023("ami-0000000000000a002")},
+			wantCalls: []string{"us-west-2|ami-0000000000000a001", "us-west-2|ami-0000000000000a002"},
+		},
+		"built from AL2023 in its source region": {
+			images:    map[string]types.Image{"us-west-2|ami-0000000000000a001": spawnBuilt("ami-0000000000000a001", "ami-0000000000000a002", "eu-west-1"), "eu-west-1|ami-0000000000000a002": amazonAL2023("ami-0000000000000a002")},
+			wantCalls: []string{"us-west-2|ami-0000000000000a001", "eu-west-1|ami-0000000000000a002"},
+		},
+		"two spawn-built hops to AL2023": {
+			images: map[string]types.Image{"us-west-2|ami-0000000000000a001": spawnBuilt("ami-0000000000000a001", "ami-0000000000000a004", ""),
+				"us-west-2|ami-0000000000000a004": spawnBuilt("ami-0000000000000a004", "ami-0000000000000a002", ""), "us-west-2|ami-0000000000000a002": amazonAL2023("ami-0000000000000a002")},
+			wantCalls: []string{"us-west-2|ami-0000000000000a001", "us-west-2|ami-0000000000000a004", "us-west-2|ami-0000000000000a002"},
+		},
+		"built from Ubuntu": {
+			images:    map[string]types.Image{"us-west-2|ami-0000000000000a001": spawnBuilt("ami-0000000000000a001", "ami-0000000000000a003", ""), "us-west-2|ami-0000000000000a003": canonicalUbuntu("ami-0000000000000a003")},
+			needs:     true,
+			why:       "is a spawn-built image whose base ami-0000000000000a003 is not Amazon's Amazon Linux",
+			wantCalls: []string{"us-west-2|ami-0000000000000a001", "us-west-2|ami-0000000000000a003"},
+		},
+		"no base tag": {
+			images:    map[string]types.Image{"us-west-2|ami-0000000000000a001": spawnBuilt("ami-0000000000000a001", "", "")},
+			needs:     true,
+			why:       "is not Amazon's Amazon Linux",
+			wantCalls: []string{"us-west-2|ami-0000000000000a001"},
+		},
+		"a base tag without spawn:created-from is not create-ami's": {
+			images: map[string]types.Image{"us-west-2|ami-0000000000000a001": {ImageId: aws.String("ami-0000000000000a001"), Name: aws.String("custom"),
+				Tags: []types.Tag{{Key: aws.String(createAMIBaseTag), Value: aws.String("ami-0000000000000a002")}}}, "us-west-2|ami-0000000000000a002": amazonAL2023("ami-0000000000000a002")},
+			needs:     true,
+			wantCalls: []string{"us-west-2|ami-0000000000000a001"},
+		},
+		"the base cannot be read (deregistered)": {
+			images:    map[string]types.Image{"us-west-2|ami-0000000000000a001": spawnBuilt("ami-0000000000000a001", "ami-0000000000000a007", "")},
+			needs:     true,
+			why:       "is a spawn-built image whose base ami-0000000000000a007 could not be read",
+			wantCalls: []string{"us-west-2|ami-0000000000000a001", "us-west-2|ami-0000000000000a007"},
+		},
+		"a chain deeper than the bound": {
+			images: map[string]types.Image{"us-west-2|ami-0000000000000a001": spawnBuilt("ami-0000000000000a001", "ami-0000000000000a005", ""),
+				"us-west-2|ami-0000000000000a005": spawnBuilt("ami-0000000000000a005", "ami-0000000000000a006", ""), "us-west-2|ami-0000000000000a006": spawnBuilt("ami-0000000000000a006", "ami-0000000000000a002", ""),
+				"us-west-2|ami-0000000000000a002": amazonAL2023("ami-0000000000000a002")},
+			needs:     true,
+			why:       "more than 3 deep",
+			wantCalls: []string{"us-west-2|ami-0000000000000a001", "us-west-2|ami-0000000000000a005", "us-west-2|ami-0000000000000a006"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls []string
+			api := func(region string) describeImagesAPI {
+				return imageAPI{region: region, images: tc.images, calls: &calls}
+			}
+			v := describeAWSCLINeed(context.Background(), api, "us-west-2", "ami-0000000000000a001")
+			if (v.need != "") != tc.needs {
+				t.Errorf("need = %q, want a need %v", v.need, tc.needs)
+			}
+			if tc.why != "" && !strings.Contains(v.need, tc.why) {
+				t.Errorf("need = %q, want it to say %q", v.need, tc.why)
+			}
+			if v.need != "" {
+				for _, w := range []string{"a NAT route", BootstrapEgressFlag} {
+					if !strings.Contains(v.need, w) {
+						t.Errorf("need %q does not name %q", v.need, w)
+					}
+				}
+				if InternetNeedHost(v.need) != awsCLIDownloadHost {
+					t.Errorf("need %q names host %q, want %s", v.need, InternetNeedHost(v.need), awsCLIDownloadHost)
+				}
+			}
+			if strings.Join(calls, " ") != strings.Join(tc.wantCalls, " ") {
+				t.Errorf("DescribeImages calls %v, want %v", calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// Through the wire: a spawn-built AL2023 image launches with no NAT and no
+// opt-in, reading the image and its base once each across repeated checks.
+func TestPreflightNoPublicIPSpawnBuiltALImageNeedsNothing(t *testing.T) {
+	f := privateFake(allEndpointsXML(), "")
+	f.imagesXML = ""
+	f.imagesByID = map[string]string{
+		"ami-0123456789abcdef0": `<item><imageId>ami-0123456789abcdef0</imageId><name>spawn-my-env-20261020</name>` +
+			`<tagSet><item><key>spawn:created-from</key><value>i-0abc</value></item>` +
+			`<item><key>spawn:base-ami</key><value>ami-0aaaaaaaaaaaaaaaa</value></item></tagSet></item>`,
+		"ami-0aaaaaaaaaaaaaaaa": strings.Replace(al2023ImageXML, "ami-0123456789abcdef0", "ami-0aaaaaaaaaaaaaaaa", 1),
+	}
+	c := newFakeEC2Client(t, f)
+	for i := 0; i < 2; i++ {
+		cfg := imageCfg("")
+		check, err := c.PreflightNoPublicIP(context.Background(), &cfg, nil, io.Discard)
+		if err != nil {
+			t.Fatalf("a spawn-built AL2023 image was refused: %v", err)
+		}
+		if len(check.ViaEgressProxy) != 0 {
+			t.Errorf("ViaEgressProxy = %q", check.ViaEgressProxy)
+		}
+	}
+	if n := countAction(f, "DescribeImages"); n != 2 {
+		t.Errorf("%d DescribeImages calls, want 2 (the image and its base, once)", n)
+	}
+
+	// Its base Ubuntu instead: refused, naming the flag and NAT.
+	f.imagesByID["ami-0aaaaaaaaaaaaaaaa"] = strings.Replace(ubuntuImageXML, "ami-0123456789abcdef0", "ami-0aaaaaaaaaaaaaaaa", 1)
+	c = newFakeEC2Client(t, f)
+	cfg := imageCfg("")
+	_, err := c.PreflightNoPublicIP(context.Background(), &cfg, nil, io.Discard)
+	if !errors.Is(err, ErrPrivateNetworkIncomplete) || !strings.Contains(err.Error(), "base ami-0aaaaaaaaaaaaaaaa is not Amazon's Amazon Linux") ||
+		!strings.Contains(err.Error(), "a NAT route or "+BootstrapEgressFlag+" reaches it") {
+		t.Errorf("err = %v, want the refusal naming the base, NAT and %s", err, BootstrapEgressFlag)
 	}
 }
