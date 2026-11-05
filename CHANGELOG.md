@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.159.0] - 2026-11-04
+
 ### Changed
 
 - **The AWS CLI regional mirror (#1494) is retired: the Linux bootstrap installs the pinned AWS CLI only from `awscli.amazonaws.com`, and a `--no-public-ip` launch of an image that may lack it now needs a NAT route or `--bootstrap-egress proxy`** (#1515, phase 7). spawn does not mirror third-party artifacts; the opt-in egress proxy (v0.158.0) is how a no-NAT subnet reaches the AWS CLI's origin.
@@ -13354,7 +13356,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.158.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.159.0...HEAD
+[0.159.0]: https://github.com/spore-host/spawn/compare/v0.158.0...v0.159.0
 [0.158.0]: https://github.com/spore-host/spawn/compare/v0.157.0...v0.158.0
 [0.157.0]: https://github.com/spore-host/spawn/compare/v0.156.0...v0.157.0
 [0.156.0]: https://github.com/spore-host/spawn/compare/v0.155.0...v0.156.0
