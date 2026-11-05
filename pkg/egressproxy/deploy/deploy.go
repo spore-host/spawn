@@ -10,9 +10,11 @@
 //   - [EnsureGroups] and [DeleteGroups]: the two security groups, and their
 //     deleter.
 //   - [Find] and [Evaluate]: which running proxy, if any, a launch may reuse.
-//   - [Create], [WaitReady] and [Terminate]: a new proxy, its readiness, and
-//     its teardown.
-//   - [FindOrCreate]: the launch path's use of all of them.
+//   - [Create], [CheckReady], [WaitReady] and [Terminate]: a new proxy, one
+//     look at its readiness and the wait over those looks, and its teardown.
+//   - [FindOrCreate]: the launch path's use of all of them, blocking.
+//   - [EnsureSweep]: the sweep orchestrator's, one bounded look per poll, for
+//     a detached sweep's recorded [SweepTarget] (#1515 PR B).
 //
 // Every AWS call goes through [EC2] and [Prober], so tests need no AWS.
 package deploy
