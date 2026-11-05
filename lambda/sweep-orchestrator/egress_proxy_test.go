@@ -8,18 +8,22 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/egressproxy/deploy"
+	"github.com/spore-host/spawn/pkg/egressproxy/sweepproxy"
 	"github.com/spore-host/spawn/pkg/launcher"
+	"github.com/spore-host/spawn/pkg/sweep"
 )
 
 const (
@@ -354,4 +358,41 @@ func TestCancelTerminatesOnlyItsCreatingProxy(t *testing.T) {
 		t.Errorf("re-run made EC2 calls %v, want none", extra)
 	}
 	_ = h
+}
+
+// The record the CLI writes (pkg/sweep) carries the targets to this
+// function's record through DynamoDB, field for field, and back.
+func TestEgressProxiesRoundTripTheRecord(t *testing.T) {
+	want := deploy.SweepTarget{
+		Region: "us-east-1", VPCID: proxyVPC, AvailabilityZone: "us-east-1a",
+		PublicSubnets: []sweepproxy.Subnet{{SubnetID: "subnet-pub", AvailabilityZone: "us-east-1a"}},
+		Idle:          72 * time.Hour, Version: "0.160.0", InstanceProfile: spawnaws.SporedInstanceProfileName,
+		AMI: "ami-1", UserData: "ud", BaseTags: map[string]string{"spawn:managed": "true"},
+		RenderedAddr: renderedAddr, RenderedClientsGroupID: renderedGroup,
+		Phase: deploy.PhaseCreating, ProxyID: "i-new", ClientsGroupID: renderedGroup, ProxyGroupID: "sg-proxy-1",
+		CreatingSince: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC), Created: []string{"i-new"},
+	}
+	item, err := attributevalue.MarshalMap(&sweep.SweepRecord{SweepID: "sw", EgressProxies: []deploy.SweepTarget{want}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state SweepRecord
+	if err := attributevalue.UnmarshalMap(item, &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.EgressProxies) != 1 {
+		t.Fatalf("targets %+v", state.EgressProxies)
+	}
+	got := state.EgressProxies[0]
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip:\n got %+v\nwant %+v", got, want)
+	}
+	// And this function's save keeps them.
+	again, err := attributevalue.MarshalMap(&state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := again["egress_proxies"]; !ok {
+		t.Error("the orchestrator's save drops egress_proxies")
+	}
 }
