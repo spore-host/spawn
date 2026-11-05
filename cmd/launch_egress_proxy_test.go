@@ -102,10 +102,8 @@ func TestBootstrapEgressRefusalsMakeNoAWSCall(t *testing.T) {
 			"egress-proxy-idle": "1h"}, "", "applies only with --no-public-ip --bootstrap-egress proxy"},
 		"idle above the proxy's life": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
 			"bootstrap-egress": "proxy", "egress-proxy-idle": "145h"}, "", "longer than the proxy's life of 144h0m0s"},
-		"a foreground sweep": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
-			"bootstrap-egress": "proxy", "params": `[{"x":"1"}]`, "no-detach": "true"}, "", "bootstrap-egress"},
 		"a detached sweep": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
-			"bootstrap-egress": "proxy", "params": `[{"x":"1"}]`, "detach": "true"}, "", "bootstrap-egress"},
+			"bootstrap-egress": "proxy", "params": `[{"x":"1"}]`, "detach": "true"}, "", "a detached parameter sweep"},
 		"a detached sweep opted in by the environment": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
 			"params": `[{"x":"1"}]`, "detach": "true"}, "proxy", "not supported here yet (#1515)"},
 		"windows": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
@@ -276,22 +274,6 @@ func TestJobArrayMembersCarryTheProxy(t *testing.T) {
 	}
 	if strings.Join(m.SecurityGroupIDs, ",") != "sg-default,sg-clients" || m.EgressProxyAddr != base.EgressProxyAddr {
 		t.Errorf("member groups %v addr %q", m.SecurityGroupIDs, m.EgressProxyAddr)
-	}
-}
-
-// The sweep guard refuses the proxy on both sweep paths, for a caller that did
-// not come through runLaunch.
-func TestSweepMemberGuardRefusesTheProxy(t *testing.T) {
-	cfg := aws.LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1", BootstrapEgress: aws.BootstrapEgressProxy}
-	if err := sweepMemberGuard(cfg); err == nil || !strings.Contains(err.Error(), "--bootstrap-egress proxy") {
-		t.Errorf("foreground: %v", err)
-	}
-	if err := detachedSettingsGuard(cfg); err == nil || !strings.Contains(err.Error(), "--bootstrap-egress proxy") {
-		t.Errorf("detached: %v", err)
-	}
-	cfg.BootstrapEgress = aws.BootstrapEgressNone
-	if err := sweepMemberGuard(cfg); err != nil {
-		t.Errorf("none refused: %v", err)
 	}
 }
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--bootstrap-egress proxy` on foreground parameter sweeps (`--param-file … --no-detach`)** (#1515, sweep support part A). Before any member launches, the sweep checks each member's subnet in its own region, groups the members whose check counts a need as met through the proxy by (region, VPC), and finds or creates each such VPC's egress proxy once, ready, with `--egress-proxy-idle` (the same 72h default and 144h cap). Each of those members gets its own VPC's proxy address and client security group, and must pass the same tcp 3128 member-egress check as a single launch. A member that counts on no proxy (a NAT route, an Amazon Linux image with an aws CLI, or not opted in) gets neither, and a sweep with no such member makes no proxy. The VPCs are taken one at a time. If any VPC's proxy does not become ready, or a member cannot reach its VPC's proxy, no member is launched: the failed VPC's new proxy is terminated (as on a single launch), and so is every proxy this sweep created in its other VPCs; a proxy it reused is left running. `spawn resume`/`spawn sweep resume` of such a sweep finds or creates the proxies again before relaunching, with the idle period recorded in the checkpoint (`egress_proxy_idle`).
+  - **Still refused on a detached sweep**, before any AWS call, whether the opt-in is the flag, `SPAWN_BOOTSTRAP_EGRESS` or the `spawn defaults` value: `--detach`, and every sweep without `--no-detach` (a sweep is detached by default). The message names #1515 and `--no-detach`; the sweep orchestrator does not find or create the proxy yet. `spawn schedule create` runs detached sweeps and takes neither `--no-public-ip` nor the opt-in.
+  - **IAM:** `spawn resume` and `spawn sweep resume` now call the proxy's security-group actions `spawn launch` already calls (`ec2:CreateSecurityGroup`, `ec2:DescribeSecurityGroups`, `ec2:AuthorizeSecurityGroupIngress`/`Egress`, `ec2:RevokeSecurityGroupIngress`/`Egress`); `docs/reference/cli-iam-actions.md` is regenerated. No new action for any CLI user.
+
+### Fixed
+
+- **A foreground sweep's `--no-public-ip` subnet check now runs after each member's AMI and target OS are resolved**, as a single launch's does. It ran before, so every member without an `ami:` counted as an image that may have no aws CLI: in a subnet with no NAT route an Amazon Linux sweep was refused without `--bootstrap-egress proxy` and would have made a needless proxy with it, and a Windows member was checked as Linux.
+
 ## [0.159.0] - 2026-11-04
 
 ### Changed

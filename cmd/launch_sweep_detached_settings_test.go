@@ -140,6 +140,7 @@ var sampleValues = map[string]interface{}{
 	"SpotInterruptionWebhookURL": "https://hooks.example.org/spot", "CompletionWebhookURL": "https://hooks.example.org/done",
 	"NotifyURL": "https://notify.example.org/", "NotifyPlatform": "teams", "AppMode": "web", "WebAuth": "none",
 	"TargetOS": "windows", "IdleCPUPercent": 12.5, "EFASecondaryType": "efa",
+	"BootstrapEgress": "proxy", "EgressProxyAddr": "10.0.1.5:3128",
 }
 
 func sampleField(f reflect.Value, name string) bool {

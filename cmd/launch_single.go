@@ -65,11 +65,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 
 	// --bootstrap-egress (#1515): its value by flag > env > config file >
 	// default, and what it cannot be combined with, on every path, before any
-	// AWS call. A sweep with the proxy is refused here.
+	// AWS call. A detached sweep with the proxy is refused here (#1515).
 	if err := resolveBootstrapEgressFlag(cmd.Flags().Changed("bootstrap-egress")); err != nil {
 		return err
 	}
-	if err := validateBootstrapEgressFlags(cmd.Flags().Changed("egress-proxy-idle"), isSweepLaunch()); err != nil {
+	if err := validateBootstrapEgressFlags(cmd.Flags().Changed("egress-proxy-idle"), isSweepLaunch() && !noDetach); err != nil {
 		return err
 	}
 
