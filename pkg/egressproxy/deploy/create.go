@@ -255,60 +255,77 @@ var ErrNotReady = errors.New("the egress proxy did not become ready")
 // terminalStates are states from which a proxy can no longer serve.
 var terminalStates = map[string]bool{"shutting-down": true, "terminated": true, "stopping": true, "stopped": true}
 
-// WaitReady waits, up to timeout, until the proxy is ready: spored is up on
-// it (its spawn:last-heartbeat tag, the evidence `spawn launch` verifies every
-// instance's spored by) and its port carries a CONNECT through to the
-// internet ([ProbeCommand], over SSM, which reaches the proxy through its own
-// public IP). It returns the proxy with its private IP.
+// CheckReady is one look at whether the proxy is ready: spored is up on it
+// (its spawn:last-heartbeat tag, the evidence `spawn launch` verifies every
+// instance's spored by) and its port carries a CONNECT through to the internet
+// ([ProbeCommand], over SSM, which reaches the proxy through its own public
+// IP). It makes at most one DescribeInstances and one probe, so it is bounded
+// by the probe's timeout: [WaitReady] loops over it, and the sweep
+// orchestrator, which must not block an invocation for minutes, calls it once
+// per poll ([EnsureSweep]).
+//
+// It returns the proxy with its private IP, and whether it is ready; when it
+// is not, why not. An error, wrapping [ErrNotReady], means it never will be:
+// it is shutting down or gone, or spawn may not read it or probe it.
+func CheckReady(ctx context.Context, d Deps, region string, p Proxy) (Proxy, bool, string, error) {
+	out, err := d.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{p.InstanceID}})
+	switch {
+	case spawnaws.IsAccessDenied(err):
+		return p, false, "", fmt.Errorf("%w: %s: cannot read it: %v", ErrNotReady, p.InstanceID, err)
+	case err != nil:
+		return p, false, "DescribeInstances: " + err.Error(), nil
+	}
+	inst, ok := findInstance(out, p.InstanceID)
+	if !ok {
+		return p, false, "DescribeInstances does not list it yet", nil
+	}
+	state := ""
+	if inst.State != nil {
+		state = string(inst.State.Name)
+	}
+	if terminalStates[state] {
+		return p, false, "", fmt.Errorf("%w: %s is %s", ErrNotReady, p.InstanceID, state)
+	}
+	if ip := aws.ToString(inst.PrivateIpAddress); ip != "" {
+		p.PrivateIP = ip
+	}
+	if tagMap(inst.Tags)[spawnaws.HeartbeatTag] == "" {
+		return p, false, "spored has not written " + spawnaws.HeartbeatTag + " yet (" + orUnknown(state) + ")", nil
+	}
+	if p.PrivateIP == "" {
+		return p, false, "it has no private IP yet", nil
+	}
+	res, perr := d.Prober.RunShellScript(ctx, region, p.InstanceID, ProbeCommand(p.PrivateIP), probeTimeout)
+	switch {
+	case spawnaws.IsAccessDenied(perr):
+		return p, false, "", fmt.Errorf("%w: %s: spored is up, but spawn cannot check its port over SSM: %v", ErrNotReady, p.InstanceID, perr)
+	case perr != nil:
+		return p, false, "the port probe could not run over SSM: " + perr.Error(), nil
+	case res.Status == "Success":
+		return p, true, "", nil
+	default:
+		return p, false, fmt.Sprintf("the port probe (%s) ended %s: %s", ProbeCommand(p.PrivateIP), res.Status,
+			strings.TrimSpace(strings.TrimSpace(res.Stdout)+" "+strings.TrimSpace(res.Stderr))), nil
+	}
+}
+
+// WaitReady waits, up to timeout, until the proxy is ready ([CheckReady],
+// every readyPoll). It returns the proxy with its private IP.
 func WaitReady(ctx context.Context, d Deps, region string, p Proxy, timeout time.Duration) (Proxy, error) {
 	if timeout <= 0 {
 		timeout = ReadyTimeout
 	}
 	deadline := d.now().Add(timeout)
-	var last string
 	for {
-		out, err := d.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{p.InstanceID}})
+		var ready bool
+		var last string
+		var err error
+		p, ready, last, err = CheckReady(ctx, d, region, p)
 		switch {
-		case spawnaws.IsAccessDenied(err):
-			return p, fmt.Errorf("%w: %s: cannot read it: %v", ErrNotReady, p.InstanceID, err)
 		case err != nil:
-			last = "DescribeInstances: " + err.Error()
-		default:
-			inst, ok := findInstance(out, p.InstanceID)
-			if !ok {
-				last = "DescribeInstances does not list it yet"
-				break
-			}
-			state := ""
-			if inst.State != nil {
-				state = string(inst.State.Name)
-			}
-			if terminalStates[state] {
-				return p, fmt.Errorf("%w: %s is %s", ErrNotReady, p.InstanceID, state)
-			}
-			if ip := aws.ToString(inst.PrivateIpAddress); ip != "" {
-				p.PrivateIP = ip
-			}
-			if tagMap(inst.Tags)[spawnaws.HeartbeatTag] == "" {
-				last = "spored has not written " + spawnaws.HeartbeatTag + " yet (" + orUnknown(state) + ")"
-				break
-			}
-			if p.PrivateIP == "" {
-				last = "it has no private IP yet"
-				break
-			}
-			res, perr := d.Prober.RunShellScript(ctx, region, p.InstanceID, ProbeCommand(p.PrivateIP), probeTimeout)
-			switch {
-			case spawnaws.IsAccessDenied(perr):
-				return p, fmt.Errorf("%w: %s: spored is up, but spawn cannot check its port over SSM: %v", ErrNotReady, p.InstanceID, perr)
-			case perr != nil:
-				last = "the port probe could not run over SSM: " + perr.Error()
-			case res.Status == "Success":
-				return p, nil
-			default:
-				last = fmt.Sprintf("the port probe (%s) ended %s: %s", ProbeCommand(p.PrivateIP), res.Status,
-					strings.TrimSpace(strings.TrimSpace(res.Stdout)+" "+strings.TrimSpace(res.Stderr)))
-			}
+			return p, err
+		case ready:
+			return p, nil
 		}
 		if !d.now().Before(deadline) {
 			return p, fmt.Errorf("%w within %v: %s: %s", ErrNotReady, timeout, p.InstanceID, last)
