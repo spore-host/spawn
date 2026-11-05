@@ -152,12 +152,12 @@ func sweepTargetFor(ctx context.Context, p egressProxyFor, k egressProxyVPC, n a
 		return deploy.SweepTarget{}, fmt.Errorf("the egress proxy's tags: %w", err)
 	}
 	t := deploy.SweepTarget{
-		Region: k.region, VPCID: k.vpcID, AvailabilityZone: n.AvailabilityZone, PublicSubnets: n.PublicSubnets,
+		Region: k.region, VPCID: k.vpcID, AvailabilityZone: n.AvailabilityZone, PublicSubnets: deploy.SweepSubnets(n.PublicSubnets),
 		Idle: idle, Version: version(), InstanceProfile: p.profile, AMI: ami, UserData: proxyUserData,
 		BaseTags:     deploy.BaseTagMap(tags),
 		RenderedAddr: p.result.Proxy.Addr(), RenderedClientsGroupID: p.result.Groups.ClientsID,
 	}
-	t.SetReady(p.result.Proxy, p.result.Groups)
+	deploy.SetReady(&t, p.result.Proxy, p.result.Groups)
 	return t, nil
 }
 

@@ -217,7 +217,7 @@ func (gt *gateTarget) rebind(ctx context.Context, t deploy.SweepTarget, config m
 	checked, done := gt.checked[key]
 	if !done {
 		ip, _, _ := net.SplitHostPort(to.Addr)
-		checked = checkMemberProxyEgress(ctx, gt.deps.EC2, settings.SecurityGroupIDs, t.Groups(), ip)
+		checked = checkMemberProxyEgress(ctx, gt.deps.EC2, settings.SecurityGroupIDs, deploy.TargetGroups(t), ip)
 		gt.checked[key] = checked
 	}
 	if checked != nil {

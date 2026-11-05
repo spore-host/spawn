@@ -78,6 +78,25 @@ aws iam create-role \
 # as on every spawn terminate path (#922). The members' requests are untagged,
 # so the grant cannot take the spawn:managed condition; it is no wider than the
 # unconditioned TerminateInstances beside it, and cancelling never terminates.
+#
+# The egress proxy (#1515 PR B). A detached --no-public-ip --bootstrap-egress
+# proxy sweep's members count on the VPC's spawn egress proxy, and the
+# orchestrator ensures it before each launch: if it has gone (idle expiry,
+# rotation under the reaper's ceiling, a delete) it launches a new one and
+# probes it over SSM until it is ready (pkg/egressproxy/deploy EnsureSweep).
+# What that calls beyond the grants above (RunInstances, CreateTags,
+# TerminateInstances, DescribeInstances, DescribeSecurityGroups, and the
+# PassRole of spored-instance-role, the proxy's profile):
+#   - the proxy's two security groups, re-created if the reaper deleted them,
+#     and their rules reconciled: CreateSecurityGroup only of a group tagged
+#     spawn:managed=true at creation (and in any VPC, which carries no spawn
+#     tag), and Authorize/Revoke only on spawn:managed groups (ec2: keys, on
+#     ec2: actions);
+#   - the readiness probe: SendCommand of AWS-RunShellScript only, and only to
+#     instances tagged spawn:managed=true and spawn:egress-proxy=vpc-* (ssm:
+#     keys, on an ssm: action; ec2:ResourceTag there is an implicit deny), and
+#     GetCommandInvocation, which has no resource-level ARN and only reads the
+#     result of a command this role sent.
 POLICY_DOCUMENT=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -137,6 +156,65 @@ POLICY_DOCUMENT=$(cat <<EOF
       "Resource": [
         "arn:aws:iam::${CURRENT_ACCOUNT_ID}:role/spawn-instance-nested-*"
       ]
+    },
+    {
+      "Sid": "EgressProxyCreateManagedGroups",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:*:${CURRENT_ACCOUNT_ID}:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "EgressProxyCreateGroupsInVPC",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:*:${CURRENT_ACCOUNT_ID}:vpc/*"
+    },
+    {
+      "Sid": "EgressProxyManageManagedGroupRules",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress"
+      ],
+      "Resource": "arn:aws:ec2:*:${CURRENT_ACCOUNT_ID}:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "EgressProxyProbeProxies",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:*:${CURRENT_ACCOUNT_ID}:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/spawn:managed": "true"
+        },
+        "StringLike": {
+          "ssm:resourceTag/spawn:egress-proxy": "vpc-*"
+        }
+      }
+    },
+    {
+      "Sid": "EgressProxyProbeDocument",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ssm:*::document/AWS-RunShellScript"
+    },
+    {
+      "Sid": "EgressProxyProbeResult",
+      "Effect": "Allow",
+      "Action": "ssm:GetCommandInvocation",
+      "Resource": "*"
     },
     {
       "Effect": "Allow",

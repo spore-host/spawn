@@ -284,7 +284,9 @@ var principals = []principal{
 		build:  build{dir: "lambda/sweep-orchestrator", pkg: ".", goos: []string{"linux"}},
 		passes: sporeRolesToEC2,
 		contexts: []credContext{
-			{name: "member account", services: []string{"ec2", "iam"}, variants: []variant{
+			// ssm: the egress proxy's readiness probe (#1515), on the
+			// assumed role in the member account, like its EC2 calls.
+			{name: "member account", services: []string{"ec2", "iam", "ssm"}, variants: []variant{
 				{"SpawnSweepCrossAccountRole", shellPolicy("scripts/setup-sweep-cross-account-role.sh")},
 			}},
 			{name: "function role", variants: []variant{

@@ -12,6 +12,7 @@ import (
 
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/egressproxy"
+	"github.com/spore-host/spawn/pkg/egressproxy/sweepproxy"
 	"github.com/spore-host/spawn/pkg/launcher"
 )
 
@@ -20,7 +21,7 @@ import (
 func sweepTarget(g Groups) *SweepTarget {
 	return &SweepTarget{
 		Region: "us-west-2", VPCID: testVPC, AvailabilityZone: "us-west-2a",
-		PublicSubnets: []spawnaws.PublicSubnet{{SubnetID: "subnet-pub", AvailabilityZone: "us-west-2a"}},
+		PublicSubnets: []sweepproxy.Subnet{{SubnetID: "subnet-pub", AvailabilityZone: "us-west-2a"}},
 		Idle:          egressproxy.DefaultIdle, Version: testVersion, InstanceProfile: testProfile,
 		AMI: "ami-1", UserData: "proxy-ud",
 		BaseTags:     map[string]string{"spawn:managed": "true", "spawn:version": testVersion},

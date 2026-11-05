@@ -18,6 +18,7 @@ import (
 
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/egressproxy"
+	"github.com/spore-host/spawn/pkg/egressproxy/sweepproxy"
 	"github.com/spore-host/spawn/pkg/launcher"
 )
 
@@ -45,17 +46,21 @@ import (
 // differs is rebound ([RebindUserData], [RebindGroups]) just before it is
 // launched. So a member always names the proxy that is ready when it starts.
 
+// The record's types (pkg/egressproxy/sweepproxy, which pkg/sweep's record
+// carries without linking this package).
+type (
+	// SweepTarget is one (region, VPC) of a detached sweep whose members
+	// count on the egress proxy, as the sweep's record carries it.
+	SweepTarget = sweepproxy.Target
+	// Binding is what a member names of its VPC's proxy.
+	Binding = sweepproxy.Binding
+)
+
 // Sweep target phases.
 const (
-	// PhaseReady: ProxyID was ready at its last check. Before each launch
-	// it is found again and re-evaluated ([Evaluate]); it is not re-probed.
-	PhaseReady = "ready"
-	// PhaseCreating: ProxyID was launched by the orchestrator at
-	// CreatingSince and is not yet ready. The target's members are held.
-	PhaseCreating = "creating"
-	// PhaseFailed: no proxy could be made ready ([SweepTarget.FailReason]).
-	// The target's members are failed with that reason, not launched.
-	PhaseFailed = "failed"
+	PhaseReady    = sweepproxy.PhaseReady
+	PhaseCreating = sweepproxy.PhaseCreating
+	PhaseFailed   = sweepproxy.PhaseFailed
 )
 
 // PendingAddr is the proxy address a detached member's user data is
@@ -67,89 +72,33 @@ const (
 // params never carry it.
 var PendingAddr = net.JoinHostPort("192.0.2.1", strconv.Itoa(egressproxy.Port))
 
-// SweepTarget is one (region, VPC) of a detached sweep whose members count on
-// the egress proxy, as the sweep's record carries it. Written by the CLI at
-// submit time; the orchestrator updates the proxy and its phase.
-type SweepTarget struct {
-	Region string `json:"region" dynamodbav:"region"`
-	VPCID  string `json:"vpc_id" dynamodbav:"vpc_id"`
-
-	// What a new proxy is launched with: the CLI's inputs at submit time, so
-	// a proxy the orchestrator launches is the one the CLI would have.
-	//
-	// AvailabilityZone is the first member's, which [PickSubnet] prefers.
-	AvailabilityZone string                  `json:"availability_zone,omitempty" dynamodbav:"availability_zone,omitempty"`
-	PublicSubnets    []spawnaws.PublicSubnet `json:"public_subnets" dynamodbav:"public_subnets"`
-	// Idle is the proxy's idle period (--egress-proxy-idle).
-	Idle time.Duration `json:"idle" dynamodbav:"idle"`
-	// Version is the submitting CLI's spawn version: the version its proxy
-	// carries, so the one a reusable proxy must carry ([Want.Version]).
-	Version string `json:"version" dynamodbav:"version"`
-	// InstanceProfile is the spored instance profile, which the CLI ensured.
-	InstanceProfile string `json:"instance_profile" dynamodbav:"instance_profile"`
-	// AMI is the AL2023 arm64 image the CLI resolved ([AMIParameter]).
-	AMI string `json:"ami" dynamodbav:"ami"`
-	// UserData is the proxy's encoded user data ([UserData]), rendered by
-	// the CLI, so it installs the CLI's spored release.
-	UserData string `json:"user_data" dynamodbav:"user_data"`
-	// BaseTags are the proxy's standard launch tags but its launch time,
-	// which [ProxyTags] sets when it is launched.
-	BaseTags map[string]string `json:"base_tags" dynamodbav:"base_tags"`
-
-	// RenderedAddr and RenderedClientsGroupID are the proxy address and
-	// clients group the uploaded members' user data and groups name.
-	RenderedAddr           string `json:"rendered_addr" dynamodbav:"rendered_addr"`
-	RenderedClientsGroupID string `json:"rendered_clients_group_id" dynamodbav:"rendered_clients_group_id"`
-
-	// The proxy now.
-	Phase          string `json:"phase" dynamodbav:"phase"`
-	ProxyID        string `json:"proxy_id,omitempty" dynamodbav:"proxy_id,omitempty"`
-	ProxyAddr      string `json:"proxy_addr,omitempty" dynamodbav:"proxy_addr,omitempty"`
-	ClientsGroupID string `json:"clients_group_id,omitempty" dynamodbav:"clients_group_id,omitempty"`
-	ProxyGroupID   string `json:"proxy_group_id,omitempty" dynamodbav:"proxy_group_id,omitempty"`
-	// CreatingSince is when the orchestrator launched ProxyID (PhaseCreating).
-	CreatingSince time.Time `json:"creating_since,omitzero" dynamodbav:"creating_since,omitempty"`
-	// Created are the proxies the orchestrator launched for this target. A
-	// sweep cancel may terminate one of them that is still creating, and
-	// nothing else.
-	Created []string `json:"created,omitempty" dynamodbav:"created,omitempty"`
-	// ErrorSince and LastError are a run of AWS errors before a proxy was
-	// launched; the target fails when it outlasts [ReadyTimeout].
-	ErrorSince time.Time `json:"error_since,omitzero" dynamodbav:"error_since,omitempty"`
-	LastError  string    `json:"last_error,omitempty" dynamodbav:"last_error,omitempty"`
-	// FailReason is why the target is PhaseFailed: what its members are
-	// failed with.
-	FailReason string `json:"fail_reason,omitempty" dynamodbav:"fail_reason,omitempty"`
-}
-
-// Binding is what a member names of its VPC's proxy.
-type Binding struct {
-	// Addr is the proxy's host:port, in the bootstrap's http_proxy.
-	Addr string
-	// ClientsGroupID is the clients group, among the member's groups.
-	ClientsGroupID string
-}
-
-// Rendered is what the uploaded members name.
-func (t SweepTarget) Rendered() Binding {
-	return Binding{Addr: t.RenderedAddr, ClientsGroupID: t.RenderedClientsGroupID}
-}
-
-// Current is what a member launched now must name. Valid in PhaseReady.
-func (t SweepTarget) Current() Binding {
-	return Binding{Addr: t.ProxyAddr, ClientsGroupID: t.ClientsGroupID}
-}
-
-// Groups are the target's two groups as last ensured.
-func (t SweepTarget) Groups() Groups {
+// TargetGroups are t's two groups as last ensured.
+func TargetGroups(t SweepTarget) Groups {
 	return Groups{ClientsID: t.ClientsGroupID, ProxyID: t.ProxyGroupID}
 }
 
-// SetReady records p, ready, as the target's proxy with groups g.
-func (t *SweepTarget) SetReady(p Proxy, g Groups) {
+// SetReady records p, ready, as t's proxy with groups g.
+func SetReady(t *SweepTarget, p Proxy, g Groups) {
 	t.Phase, t.ProxyID, t.ProxyAddr = PhaseReady, p.InstanceID, p.Addr()
 	t.ClientsGroupID, t.ProxyGroupID = g.ClientsID, g.ProxyID
 	t.CreatingSince, t.ErrorSince, t.LastError = time.Time{}, time.Time{}, ""
+}
+
+// SweepSubnets are publics as a target records them.
+func SweepSubnets(publics []spawnaws.PublicSubnet) []sweepproxy.Subnet {
+	out := make([]sweepproxy.Subnet, 0, len(publics))
+	for _, p := range publics {
+		out = append(out, sweepproxy.Subnet{SubnetID: p.SubnetID, AvailabilityZone: p.AvailabilityZone})
+	}
+	return out
+}
+
+func publicSubnets(subnets []sweepproxy.Subnet) []spawnaws.PublicSubnet {
+	out := make([]spawnaws.PublicSubnet, 0, len(subnets))
+	for _, s := range subnets {
+		out = append(out, spawnaws.PublicSubnet{SubnetID: s.SubnetID, AvailabilityZone: s.AvailabilityZone})
+	}
+	return out
 }
 
 // BaseTagMap is a proxy's base tags as a [SweepTarget] records them: without
@@ -238,19 +187,19 @@ func EnsureSweep(ctx context.Context, d Deps, t *SweepTarget) SweepStep {
 	now := d.now()
 	groups, err := EnsureGroups(ctx, d.EC2, t.VPCID, now)
 	if err != nil {
-		return t.awsError(now, fmt.Errorf("the egress proxy's security groups in %s: %w", t.VPCID, err))
+		return awsError(t, now, fmt.Errorf("the egress proxy's security groups in %s: %w", t.VPCID, err))
 	}
 	reusable, rejected, err := Find(ctx, d.EC2, Want{
 		VPCID: t.VPCID, Version: t.Version, ProxyGroupID: groups.ProxyID,
 		InstanceProfile: t.InstanceProfile, Now: now,
 	})
 	if err != nil {
-		return t.awsError(now, err)
+		return awsError(t, now, err)
 	}
 	for _, p := range reusable {
 		if t.Phase == PhaseReady && p.InstanceID == t.ProxyID {
-			changed := t.ProxyAddr != p.Addr() || t.Groups() != groups || !t.ErrorSince.IsZero()
-			t.SetReady(p, groups)
+			changed := t.ProxyAddr != p.Addr() || TargetGroups(*t) != groups || !t.ErrorSince.IsZero()
+			SetReady(t, p, groups)
 			return SweepStep{Outcome: SweepLaunch, Changed: changed}
 		}
 	}
@@ -261,7 +210,7 @@ func EnsureSweep(ctx context.Context, d Deps, t *SweepTarget) SweepStep {
 	for _, p := range reusable {
 		ready, ok, why, err := CheckReady(ctx, d, t.Region, p)
 		if ok {
-			t.SetReady(ready, groups)
+			SetReady(t, ready, groups)
 			return SweepStep{Outcome: SweepLaunch, Changed: true,
 				Reason: strings.Join(append(notes, "using egress proxy "+ready.InstanceID), "; ")}
 		}
@@ -273,11 +222,11 @@ func EnsureSweep(ctx context.Context, d Deps, t *SweepTarget) SweepStep {
 	}
 
 	spec := Spec{Region: t.Region, VPCID: t.VPCID, AvailabilityZone: t.AvailabilityZone,
-		PublicSubnets: t.PublicSubnets, Groups: groups, AMI: t.AMI, InstanceProfile: t.InstanceProfile,
+		PublicSubnets: publicSubnets(t.PublicSubnets), Groups: groups, AMI: t.AMI, InstanceProfile: t.InstanceProfile,
 		UserData: t.UserData, BaseTags: tagsOf(t.BaseTags)}
 	created, err := Create(ctx, d, spec)
 	if err != nil {
-		return t.awsError(now, err)
+		return awsError(t, now, err)
 	}
 	t.Phase, t.ProxyID, t.ProxyAddr = PhaseCreating, created.InstanceID, ""
 	t.ClientsGroupID, t.ProxyGroupID = groups.ClientsID, groups.ProxyID
@@ -301,7 +250,7 @@ func rejectionOf(id string, rejected []Rejection) string {
 func pollCreating(ctx context.Context, d Deps, t *SweepTarget) SweepStep {
 	p, ok, why, err := CheckReady(ctx, d, t.Region, Proxy{InstanceID: t.ProxyID})
 	if ok {
-		t.SetReady(p, t.Groups())
+		SetReady(t, p, TargetGroups(*t))
 		return SweepStep{Outcome: SweepLaunch, Changed: true, Reason: "egress proxy " + p.InstanceID + " is ready"}
 	}
 	elapsed := d.now().Sub(t.CreatingSince)
@@ -320,42 +269,27 @@ func pollCreating(ctx context.Context, d Deps, t *SweepTarget) SweepStep {
 	} else {
 		reason += "; terminated it"
 	}
-	t.fail(reason)
+	fail(t, reason)
 	return SweepStep{Outcome: SweepFail, Changed: true, Reason: reason}
 }
 
-func (t *SweepTarget) fail(reason string) {
+func fail(t *SweepTarget, reason string) {
 	t.Phase, t.FailReason, t.ProxyAddr = PhaseFailed, reason, ""
 }
 
 // awsError holds the members on an AWS error, until it has lasted
 // [ReadyTimeout]; an authorization error fails the target at once.
-func (t *SweepTarget) awsError(now time.Time, err error) SweepStep {
+func awsError(t *SweepTarget, now time.Time, err error) SweepStep {
 	if t.ErrorSince.IsZero() {
 		t.ErrorSince = now
 	}
 	t.LastError = err.Error()
 	if spawnaws.IsAccessDenied(err) || now.Sub(t.ErrorSince) >= ReadyTimeout {
 		reason := fmt.Sprintf("the sweep orchestrator could not make an egress proxy ready for %s in %s: %v", t.VPCID, t.Region, err)
-		t.fail(reason)
+		fail(t, reason)
 		return SweepStep{Outcome: SweepFail, Changed: true, Reason: reason}
 	}
 	return SweepStep{Outcome: SweepHold, Changed: true, Reason: "retrying: " + err.Error()}
-}
-
-// CreatingProxies are the proxies t's sweep orchestrator launched that are
-// not yet ready: the only proxies a sweep cancel may terminate. A ready
-// proxy, or one the CLI made, may be serving other sweeps and launches.
-func (t SweepTarget) CreatingProxies() []string {
-	if t.Phase != PhaseCreating || t.ProxyID == "" {
-		return nil
-	}
-	for _, id := range t.Created {
-		if id == t.ProxyID {
-			return []string{id}
-		}
-	}
-	return nil
 }
 
 // RebindUserData rewrites a member's encoded Linux user data (gzip, then

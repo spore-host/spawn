@@ -19,7 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
-	"github.com/spore-host/spawn/pkg/egressproxy/deploy"
+	"github.com/spore-host/spawn/pkg/egressproxy/sweepproxy"
 )
 
 const (
@@ -113,7 +113,7 @@ type SweepRecord struct {
 	// EgressProxies are the (region, VPC)s whose members count on the spawn
 	// egress proxy (#1515), as the CLI found or created them at submit time;
 	// the orchestrator ensures each again before it launches their members.
-	EgressProxies []deploy.SweepTarget `dynamodbav:"egress_proxies,omitempty" json:"egress_proxies,omitempty"`
+	EgressProxies []sweepproxy.Target `dynamodbav:"egress_proxies,omitempty" json:"egress_proxies,omitempty"`
 }
 
 // RegionConstraint defines constraints for region selection (embedded for DynamoDB compatibility)
