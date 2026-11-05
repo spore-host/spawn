@@ -73,6 +73,9 @@ func sweepRegions(state *SweepRecord) []string {
 	for _, inst := range state.Instances {
 		add(inst.Region)
 	}
+	for _, t := range state.EgressProxies {
+		add(t.Region)
+	}
 	regions := make([]string, 0, len(seen))
 	for r := range seen {
 		regions = append(regions, r)
@@ -94,7 +97,7 @@ func assumeMemberClients(ctx context.Context, state *SweepRecord) (map[string]me
 	}
 	clients := map[string]memberEC2API{}
 	for _, region := range sweepRegions(state) {
-		c, err := createEC2ClientWithCredentials(ctx, region, result.Credentials)
+		c, err := createEC2ClientWithCredentials(ctx, region, state.AWSAccountID, result.Credentials)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 client for %s: %w", region, err)
 		}
@@ -218,12 +221,76 @@ func cancelSweep(ctx context.Context, fresh *SweepRecord, clients map[string]mem
 			errs = append(errs, err)
 		}
 	}
+	// And the egress proxies this orchestrator launched for the sweep that
+	// are not yet ready, which nothing else will use (#1515). Never a ready
+	// one, or one the CLI made: other sweeps and launches in the VPC may use
+	// it, and it ends at its idle period or deadline.
+	if err := terminateCreatingProxies(ctx, fresh, clients); err != nil {
+		errs = append(errs, err)
+	}
 	if total > 0 || fresh.Status != "CANCELLED" {
 		if err := recordCancelOutcome(ctx, fresh.SweepID, total); err != nil {
 			errs = append(errs, fmt.Errorf("record cancel: %w", err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// terminateCreatingProxies terminates creatingEgressProxies(state).
+func terminateCreatingProxies(ctx context.Context, state *SweepRecord, clients map[string]memberEC2API) error {
+	var errs []error
+	for region, ids := range creatingEgressProxies(state) {
+		api, ok := clients[region]
+		if !ok {
+			errs = append(errs, fmt.Errorf("no client for %s to terminate egress proxies %v", region, ids))
+			continue
+		}
+		// Only those still live: a re-run of a cancel is a no-op.
+		live, err := liveInstances(ctx, api, ids)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("describe egress proxies %v in %s: %w", ids, region, err))
+			continue
+		}
+		if len(live) == 0 {
+			continue
+		}
+		ids = live
+		if _, err := api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids}); err != nil {
+			errs = append(errs, fmt.Errorf("terminate egress proxies %v in %s: %w (their idle period, deadline and the TTL reaper end them)", ids, region, err))
+			continue
+		}
+		log.Printf("Cancelled sweep %s: terminated egress proxies %v in %s, which it launched and which never became ready", state.SweepID, ids, region)
+	}
+	return errors.Join(errs...)
+}
+
+// liveInstances are those of ids that are pending, running, stopping or
+// stopped.
+func liveInstances(ctx context.Context, api memberEC2API, ids []string) ([]string, error) {
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	out, err := api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	var live []string
+	for _, r := range out.Reservations {
+		for _, inst := range r.Instances {
+			id := aws.ToString(inst.InstanceId)
+			if !want[id] || inst.State == nil {
+				continue
+			}
+			switch inst.State.Name {
+			case ec2types.InstanceStateNamePending, ec2types.InstanceStateNameRunning,
+				ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopped:
+				live = append(live, id)
+				delete(want, id)
+			}
+		}
+	}
+	return live, nil
 }
 
 // writeCancelOutcome records a cancel on the sweep record: status CANCELLED,

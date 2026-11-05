@@ -84,7 +84,7 @@ func TestBootstrapEgressConfigDefault(t *testing.T) {
 	if launchBootstrapEgress() != "" {
 		t.Errorf("a public launch carries %q", launchBootstrapEgress())
 	}
-	if err := validateBootstrapEgressFlags(false, false); err != nil {
+	if err := validateBootstrapEgressFlags(false); err != nil {
 		t.Errorf("a default from the config file refused a public launch: %v", err)
 	}
 }
@@ -102,10 +102,6 @@ func TestBootstrapEgressRefusalsMakeNoAWSCall(t *testing.T) {
 			"egress-proxy-idle": "1h"}, "", "applies only with --no-public-ip --bootstrap-egress proxy"},
 		"idle above the proxy's life": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
 			"bootstrap-egress": "proxy", "egress-proxy-idle": "145h"}, "", "longer than the proxy's life of 144h0m0s"},
-		"a detached sweep": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
-			"bootstrap-egress": "proxy", "params": `[{"x":"1"}]`, "detach": "true"}, "", "a detached parameter sweep"},
-		"a detached sweep opted in by the environment": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
-			"params": `[{"x":"1"}]`, "detach": "true"}, "proxy", "not supported here yet (#1515)"},
 		"windows": {map[string]string{"no-public-ip": "true", "subnet-id": "subnet-1",
 			"bootstrap-egress": "proxy", "os": "windows"}, "", "the egress proxy serves the Linux bootstrap only"},
 	} {

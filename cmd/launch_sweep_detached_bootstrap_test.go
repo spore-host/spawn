@@ -48,11 +48,11 @@ func testDetachedBootstrap(t *testing.T) detachedBootstrap {
 		},
 		// --no-public-ip's subnet check (#1437), passing, pinning a subnet
 		// for an AZ-only member as aws.Client.PreflightNoPublicIP does.
-		privateNetOf: func(cfg *aws.LaunchConfig) error {
+		privateNetOf: func(cfg *aws.LaunchConfig) (aws.PrivateCheck, error) {
 			if cfg.SubnetID == "" {
 				cfg.SubnetID = "subnet-in-" + cfg.AvailabilityZone
 			}
-			return nil
+			return aws.PrivateCheck{}, nil
 		},
 	}
 }

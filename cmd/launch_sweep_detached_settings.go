@@ -56,10 +56,14 @@ func detachedSettingsGuard(cfg aws.LaunchConfig) error {
 		return err
 	}
 	switch {
-	case (cfg.BootstrapEgress != "" && cfg.BootstrapEgress != aws.BootstrapEgressNone) || cfg.EgressProxyAddr != "":
-		// The orchestrator does not find or create the egress proxy yet
-		// (#1515 PR B removes this); a foreground sweep does.
-		return refuseDetachedSweepEgressProxy("the member's config")
+	case cfg.EgressProxyAddr != "":
+		// --bootstrap-egress proxy is carried (#1515 PR B): the CLI finds or
+		// creates the proxy at --detach and binds the member to it
+		// (launch_sweep_detached_egress_proxy.go). An address the config
+		// already names was not found by that, and the orchestrator would
+		// never ensure it.
+		return fmt.Errorf("%w: a detached sweep member's egress proxy is found or created by spawn, not named "+
+			"in its config (%s)", errEgressProxyUnsupported, cfg.EgressProxyAddr)
 	case cfg.EFASecondaryType != "" && cfg.EFASecondaryType != aws.EFASecondaryTypeEFAOnly:
 		// Applies only to a multi-card EFA launch, which is refused below; named
 		// here so the refusal says which flag to drop (#1404).

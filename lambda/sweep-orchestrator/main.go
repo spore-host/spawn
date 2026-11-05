@@ -26,6 +26,7 @@ import (
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/spore-host/spawn/pkg/availability"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/egressproxy/deploy"
 )
 
 // Default configuration for shared infrastructure (with environment variable overrides)
@@ -115,6 +116,11 @@ type SweepRecord struct {
 	// Schedule integration
 	Source     string `dynamodbav:"source,omitempty"`      // "cli" | "scheduled"
 	ScheduleID string `dynamodbav:"schedule_id,omitempty"` // For traceability
+
+	// EgressProxies are the (region, VPC)s whose members count on the spawn
+	// egress proxy (#1515), recorded by the CLI and ensured before each
+	// launch (egress_proxy.go).
+	EgressProxies []deploy.SweepTarget `dynamodbav:"egress_proxies,omitempty"`
 }
 
 // RegionConstraint defines constraints for region selection
@@ -448,6 +454,7 @@ func createCrossAccountEC2Client(ctx context.Context, region, accountID string) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config: %w", err)
 	}
+	rememberMemberConfig(accountID, region, cfg)
 
 	return ec2.NewFromConfig(cfg), nil
 }
@@ -563,7 +570,12 @@ func runPollingLoop(ctx context.Context, state *SweepRecord, params *ParamFileFo
 // spored-instance-profile stops the sweep there (#1369): the members after it
 // are not attempted, and NextToLaunch moves past them so the polling loop
 // finishes the sweep.
+//
+// A member that counts on the egress proxy waits for it (#1515): while its
+// VPC's proxy is being made ready, neither it nor the members after it are
+// launched, and the batch ends there, to be retried on the next poll.
 func launchBatch(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord, params *ParamFileFormat, toLaunch int, launchDelay time.Duration) {
+	gate := newEgressGate(state)
 	for i := 0; i < toLaunch; i++ {
 		paramIndex := state.NextToLaunch
 		paramSet := params.Params[paramIndex]
@@ -571,9 +583,26 @@ func launchBatch(ctx context.Context, ec2Client *ec2.Client, state *SweepRecord,
 		// Merge defaults with param set
 		config := mergeParams(params.Defaults, paramSet)
 
+		verdict, reason := gate.admit(ctx, state.Region, config, paramIndex)
+		if verdict == admitHold {
+			log.Printf("Holding param %d and the %d after it: %s", paramIndex, state.TotalParams-paramIndex-1, reason)
+			if gate.Changed() {
+				if err := saveProgress(ctx, state); err != nil {
+					log.Printf("Failed to save state: %v", err)
+				}
+			}
+			return
+		}
+
 		// Launch instance
 		aborted := false
-		if err := launchInstance(ctx, ec2Client, state, config, paramIndex); err != nil {
+		launch := func() error {
+			if verdict == admitFail {
+				return errors.New(reason)
+			}
+			return launchInstance(ctx, ec2Client, state, config, paramIndex)
+		}
+		if err := launch(); err != nil {
 			log.Printf("Failed to launch instance %d: %v", paramIndex, err)
 			state.Failed++
 			state.Instances = append(state.Instances, SweepInstance{
@@ -1088,7 +1117,7 @@ func initializeRegionalOrchestrator(ctx context.Context, state *SweepRecord) (*R
 
 	// Create EC2 client for each region
 	for region := range state.RegionStatus {
-		client, err := createEC2ClientWithCredentials(ctx, region, result.Credentials)
+		client, err := createEC2ClientWithCredentials(ctx, region, state.AWSAccountID, result.Credentials)
 		if err != nil {
 			log.Printf("WARNING: Failed to create EC2 client for region %s: %v", region, err)
 			log.Printf("Region %s may be restricted or unavailable. Params in this region will be marked as failed.", region)
@@ -1130,7 +1159,7 @@ func initializeRegionalOrchestrator(ctx context.Context, state *SweepRecord) (*R
 }
 
 // createEC2ClientWithCredentials creates an EC2 client for a specific region using provided credentials
-func createEC2ClientWithCredentials(ctx context.Context, region string, creds *ststypes.Credentials) (*ec2.Client, error) {
+func createEC2ClientWithCredentials(ctx context.Context, region, accountID string, creds *ststypes.Credentials) (*ec2.Client, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
 		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
@@ -1145,6 +1174,7 @@ func createEC2ClientWithCredentials(ctx context.Context, region string, creds *s
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config: %w", err)
 	}
+	rememberMemberConfig(accountID, region, cfg)
 
 	return ec2.NewFromConfig(cfg), nil
 }
@@ -1479,7 +1509,9 @@ func launchAcrossRegions(ctx context.Context, orchestrator *RegionalOrchestrator
 		sort.Strings(regions)
 	}
 
-	// Launch instances concurrently per region
+	// Launch instances concurrently per region. A member that counts on the
+	// egress proxy waits for it, holding its region's queue (#1515).
+	gate := newEgressGate(state)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	// A legacy member refused for a missing spored-instance-profile stops the
@@ -1526,8 +1558,20 @@ func launchAcrossRegions(ctx context.Context, orchestrator *RegionalOrchestrator
 				// Merge defaults with param set
 				config := mergeParams(params.Defaults, paramSet)
 
+				verdict, reason := gate.admit(ctx, r, config, paramIndex)
+				if verdict == admitHold {
+					log.Printf("Region %s: holding param %d and the %d after it: %s", r, paramIndex, len(rs.NextToLaunch)-1, reason)
+					break
+				}
+				launch := func() error {
+					if verdict == admitFail {
+						return errors.New(reason)
+					}
+					return launchInstanceInRegion(ctx, c, state, config, paramIndex, r)
+				}
+
 				// Launch instance in this region
-				if err := launchInstanceInRegion(ctx, c, state, config, paramIndex, r); err != nil {
+				if err := launch(); err != nil {
 					log.Printf("Failed to launch instance %d in %s: %v", paramIndex, r, err)
 					mu.Lock()
 					state.Failed++

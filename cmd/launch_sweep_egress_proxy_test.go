@@ -326,10 +326,12 @@ func TestForegroundSweepFindsOrCreatesTheProxyBeforeAnyMember(t *testing.T) {
 	}
 }
 
-// A detached sweep is still refused, before any AWS call, whether the opt-in
+// A detached sweep is no longer refused (#1515 PR B), whether the opt-in
 // comes from the flag or the environment, and whether --detach is passed or
-// is the sweep's default. The refusal names #1515 and --no-detach.
-func TestDetachedSweepStillRefusesTheProxy(t *testing.T) {
+// is the sweep's default: runLaunch goes on to the detached path, which finds
+// or creates the proxy at submit time. (Here it stops at the first AWS call
+// the fake does not answer.)
+func TestDetachedSweepAcceptsTheProxy(t *testing.T) {
 	for name, tc := range map[string]struct {
 		flags map[string]string
 		env   string
@@ -343,38 +345,41 @@ func TestDetachedSweepStillRefusesTheProxy(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := &efaSubnetAWS{}
 			serveEFASubnetAWS(t, f)
+			withLogDir(t, false)
 			keepBootstrapEgressSource(t)
 			t.Setenv(bootstrapEgressEnv, tc.env)
 			setEFALaunchFlags(t, map[string]string{"efa": "false", "no-public-ip": "true", "subnet-id": "subnet-1",
-				"param-file": writeSweepParamFile(t)})
+				"param-file": writeSweepParamFile(t), "max-concurrent": "2"})
 			for k, v := range tc.flags {
 				setLaunchFlag(t, k, v)
 			}
+			// The detached path's first AWS step: the compute account's
+			// config, which the hermetic environment has none of.
 			err := runLaunch(launchCmd, nil)
-			if !errors.Is(err, errEgressProxyUnsupported) || !strings.Contains(err.Error(), "#1515") ||
-				!strings.Contains(err.Error(), "--no-detach") {
-				t.Fatalf("runLaunch = %v, want the detached-sweep refusal naming #1515 and --no-detach", err)
+			if errors.Is(err, errEgressProxyUnsupported) || err == nil || !strings.Contains(err.Error(), "load compute AWS config") {
+				t.Fatalf("runLaunch = %v, want it to reach the detached path (load compute AWS config)", err)
 			}
-			if len(f.actions) != 0 {
-				t.Errorf("AWS calls before the refusal: %v", f.actions)
+			if bootstrapEgress != aws.BootstrapEgressProxy {
+				t.Errorf("bootstrap egress %q, want proxy", bootstrapEgress)
 			}
 		})
 	}
 }
 
-// The backstops: the detached member guard refuses the proxy, and the
-// foreground one does not.
-func TestDetachedGuardRefusesTheProxyAndTheForegroundDoesNot(t *testing.T) {
+// The detached member guard accepts the opt-in, as the foreground one does,
+// and still refuses a proxy address the config names itself, which spawn did
+// not find or create and the orchestrator would never ensure.
+func TestDetachedGuardAcceptsTheProxyOptIn(t *testing.T) {
 	cfg := aws.LaunchConfig{NoPublicIP: true, SubnetID: "subnet-1", BootstrapEgress: aws.BootstrapEgressProxy}
 	if err := sweepMemberGuard(cfg); err != nil {
 		t.Errorf("foreground guard refused the proxy: %v", err)
 	}
-	if err := detachedSettingsGuard(cfg); !errors.Is(err, errEgressProxyUnsupported) {
-		t.Errorf("detached guard: %v, want the #1515 refusal", err)
-	}
-	cfg.BootstrapEgress = aws.BootstrapEgressNone
 	if err := detachedSettingsGuard(cfg); err != nil {
-		t.Errorf("none refused: %v", err)
+		t.Errorf("detached guard refused the opt-in: %v", err)
+	}
+	cfg.EgressProxyAddr = "10.0.0.1:3128"
+	if err := detachedSettingsGuard(cfg); !errors.Is(err, errEgressProxyUnsupported) {
+		t.Errorf("detached guard: %v, want a named address refused", err)
 	}
 }
 

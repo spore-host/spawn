@@ -69,7 +69,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	if err := resolveBootstrapEgressFlag(cmd.Flags().Changed("bootstrap-egress")); err != nil {
 		return err
 	}
-	if err := validateBootstrapEgressFlags(cmd.Flags().Changed("egress-proxy-idle"), isSweepLaunch() && !noDetach); err != nil {
+	if err := validateBootstrapEgressFlags(cmd.Flags().Changed("egress-proxy-idle")); err != nil {
 		return err
 	}
 

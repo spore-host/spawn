@@ -113,6 +113,7 @@ var reservedRowKeys = map[string]string{
 	detachedUserDataKey:       "it is written by spawn itself (a detached sweep's spored bootstrap, #1323); use --user-data to add your own script",
 	detachedTagsKey:           "it is written by spawn itself (a detached sweep member's instance tags, #1330); use --tag to add your own",
 	detachedLaunchSettingsKey: "it is written by spawn itself (a detached sweep member's launch settings, #1353)",
+	detachedEgressProxyVPCKey: "it is written by spawn itself (the VPC whose egress proxy a detached sweep member counts on, #1515)",
 
 	// Sweep-level settings that are CLI flags, not per-row values.
 	"max_concurrent": "--max-concurrent is a command-line flag, not a param-file key (spawn schedule reads max_concurrent from defaults:, but the launch path does not)",
