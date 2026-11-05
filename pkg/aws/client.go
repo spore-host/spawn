@@ -48,6 +48,10 @@ type Client struct {
 	// repeat check (Launch after the CLI's, each job array member) prints
 	// nothing it already printed (#1443).
 	privateNetReported sync.Map
+	// imageCLI caches, by region and AMI, whether a --no-public-ip launch's
+	// image needs the AWS CLI downloaded (imageAWSCLINeed, #1515), so the
+	// check Launch repeats reads the image once.
+	imageCLI sync.Map
 }
 
 // CallerVersion is the resolved version of the launching spawn binary,

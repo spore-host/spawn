@@ -409,16 +409,18 @@ func init() {
 		"Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a 0.0.0.0/0 route to a NAT gateway "+
 		"or to a working NAT instance (running, source/destination check off, a public IPv4 address, in a subnet routed to an internet gateway), "+
 		"or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the "+
-		"launch if not; a sweep checks each member's subnet, a detached one at --detach. spawn connect uses SSM. Refused with --dns and "+
+		"launch if not. On an image other than Amazon's Amazon Linux or a spawn create-ami image built from it (stock Ubuntu, say), which may have no aws CLI, the bootstrap also "+
+		"downloads it from awscli.amazonaws.com, so without a NAT route that launch needs --bootstrap-egress proxy. "+
+		"A sweep checks each member's subnet, a detached one at --detach. spawn connect uses SSM. Refused with --dns and "+
 		"--wait-for-ssh; the DNS record --name implies is skipped")
 	launchCmd.Flags().BoolVar(&allowMissingEndpoints, "allow-missing-endpoints", false, "With --no-public-ip: launch even when the subnet lacks a VPC endpoint or NAT route it needs. "+
 		"What is missing is still listed; without it the bootstrap may not install spored, spored may not enforce --ttl or --cost-limit, "+
 		"and spawn connect may not reach the instance")
 	launchCmd.Flags().StringVar(&bootstrapEgress, "bootstrap-egress", aws.BootstrapEgressNone, "With --no-public-ip: how the bootstrap reaches the few hosts outside AWS it fetches from "+
-		"(the EFA installer, say) when the subnet has no NAT route. none (default): it does not, and such a launch is refused, naming what it needs. "+
+		"(the EFA installer, and the AWS CLI on an image with none, such as stock Ubuntu) when the subnet has no NAT route. none (default): it does not, and such a launch is refused, naming what it needs. "+
 		"proxy: through a spawn egress proxy in the VPC, a t4g.micro in a public subnet that spawn finds or creates, which forwards only to "+
 		"spawn's own bootstrap hosts; members get its client security group, and their own groups must allow outbound tcp 3128 to it. "+
-		"Only spawn's own fetches use it (the EFA installer and the packages it installs, spawn's apt-get, the AWS CLI's origin fallback); "+
+		"Only spawn's own fetches use it (the EFA installer and the packages it installs, spawn's apt-get, the AWS CLI download); "+
 		"--command and --mpi-command never see it. The VPC needs a public subnet routed to an internet gateway. "+
 		"Also set by SPAWN_BOOTSTRAP_EGRESS, or once with spawn defaults set bootstrap-egress proxy. Not supported on parameter sweeps yet (#1515)")
 	launchCmd.Flags().DurationVar(&egressProxyIdle, "egress-proxy-idle", egressproxy.DefaultIdle, "With --bootstrap-egress proxy: how long a proxy this launch creates may go "+

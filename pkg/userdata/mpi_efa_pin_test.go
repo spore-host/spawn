@@ -62,10 +62,10 @@ func TestEFAInstallerNotThePinnedOneIsNeverUnpackedOrRun(t *testing.T) {
 	pinEFATarball(t, good)
 	bad := efaTarball(t, tamperedInstaller)
 	for name, served := range map[string]map[string][]byte{
-		"tampered at both sources":          {efaMirrorURL: bad, efaOriginURL: bad},
-		"tampered at the origin, no mirror": {efaOriginURL: bad},
-		"truncated":                         {efaOriginURL: good[:len(good)/2]},
-		"neither source serves it":          {},
+		"tampered at the origin":                         {efaOriginURL: bad},
+		"tampered at the origin, a good old mirror copy": {efaMirrorURL: good, efaOriginURL: bad},
+		"truncated":              {efaOriginURL: good[:len(good)/2]},
+		"the origin serves none": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := efaCohortServing(t, true, sandboxOpts{}, served)
@@ -76,8 +76,8 @@ func TestEFAInstallerNotThePinnedOneIsNeverUnpackedOrRun(t *testing.T) {
 			if l := leftovers(t, r.root); len(l) != 0 {
 				t.Errorf("left under /tmp after refusing the tarball (it must not even be unpacked): %q", l)
 			}
-			if got := curlLog(t, r); len(got) != 2 || got[0] != efaMirrorURL || got[1] != efaOriginURL {
-				t.Errorf("fetched %q, want the mirror and then the origin, each once", got)
+			if got := curlLog(t, r); len(got) != 1 || got[0] != efaOriginURL {
+				t.Errorf("fetched %q, want the origin alone, once (#1515: no mirror)", got)
 			}
 			if log, _ := r.read(t, "var/log/spawn-command.log"); !strings.Contains(log, "spawn: no EFA installer "+efaInstallerVersion+" with the pinned sha256") {
 				t.Errorf("the failure does not say why:\n%s", log)
@@ -89,28 +89,27 @@ func TestEFAInstallerNotThePinnedOneIsNeverUnpackedOrRun(t *testing.T) {
 	}
 }
 
-func TestEFAMirrorIsTriedFirstAndStillSHAChecked(t *testing.T) {
+// TestEFAInstallerOnlyFromTheOrigin (#1515): the regional spawn-binaries
+// copy is never fetched, even where a bucket exists and holds one (the 403 every
+// --efa member used to get first), and the origin's bytes are sha-checked.
+func TestEFAInstallerOnlyFromTheOrigin(t *testing.T) {
 	good := efaTarball(t, efaInstallerScript(true))
 	pinEFATarball(t, good)
-	bad := efaTarball(t, tamperedInstaller)
 	for name, c := range map[string]struct {
-		region  string
-		served  map[string][]byte
-		fetched []string
+		region string
+		served map[string][]byte
 	}{
-		"the mirror has it":            {served: map[string][]byte{efaMirrorURL: good, efaOriginURL: good}, fetched: []string{efaMirrorURL}},
-		"the mirror lacks it":          {served: map[string][]byte{efaOriginURL: good}, fetched: []string{efaMirrorURL, efaOriginURL}},
-		"the mirror's copy is altered": {served: map[string][]byte{efaMirrorURL: bad, efaOriginURL: good}, fetched: []string{efaMirrorURL, efaOriginURL}},
-		"a region with no spawn-binaries bucket": {region: "af-south-1",
-			served: map[string][]byte{efaOriginURL: good}, fetched: []string{efaOriginURL}},
+		"the origin serves it":                   {served: map[string][]byte{efaOriginURL: good}},
+		"an old mirror copy is ignored":          {served: map[string][]byte{efaMirrorURL: good, efaOriginURL: good}},
+		"a region with no spawn-binaries bucket": {region: "af-south-1", served: map[string][]byte{efaOriginURL: good}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := efaCohortServing(t, true, sandboxOpts{cfg: MPIConfig{Region: c.region}}, c.served)
 			if r.rc != 0 {
 				t.Fatalf("rank 0 exited %d", r.rc)
 			}
-			if got := curlLog(t, r); strings.Join(got, " ") != strings.Join(c.fetched, " ") {
-				t.Errorf("fetched %q, want %q", got, c.fetched)
+			if got := curlLog(t, r); strings.Join(got, " ") != efaOriginURL {
+				t.Errorf("fetched %q, want only %s", got, efaOriginURL)
 			}
 			if log, _ := r.read(t, "efa.log"); strings.TrimSpace(log) != "efa_installer.sh -y -g" {
 				t.Errorf("efa.log = %q, want the pinned installer run once with -y -g", log)
@@ -196,26 +195,23 @@ func TestEFAPinIsTheGoSourceOfTruth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmp := regexp.MustCompile(`(?m)^\s*\[ "\$\(sha256sum e\.tgz \| cut -d ' ' -f 1\)" = (\S+) \] && \{ r=0; break; \}$`).FindAllStringSubmatch(script, -1)
+	cmp := regexp.MustCompile(`(?m)^\s*if \[ "\$\(sha256sum e\.tgz \| cut -d ' ' -f 1\)" = (\S+) \]; then$`).FindAllStringSubmatch(script, -1)
 	if len(cmp) != 1 || cmp[0][1] != efaInstallerSHA256 {
 		t.Errorf("sha256 comparisons in the EFA step = %q, want exactly one, against efaInstallerSHA256 %s", cmp, efaInstallerSHA256)
 	}
-	loop := regexp.MustCompile(`(?m)^for u in (.+); do$`).FindAllStringSubmatch(script, -1)
-	if len(loop) != 1 {
-		t.Fatalf("want exactly one `for u in ...; do` source loop, found %d", len(loop))
+	src := regexp.MustCompile(`(?m)^u=(.+)$`).FindAllStringSubmatch(script, -1)
+	want := "'https://efa-installer.amazonaws.com/aws-efa-installer-" + efaInstallerVersion + ".tar.gz'"
+	if len(src) != 1 || src[0][1] != want {
+		t.Errorf("EFA source = %q, want exactly %s (#1515: no regional mirror)", src, want)
 	}
-	want := []string{
-		"'https://spawn-binaries-us-west-2.s3.us-west-2.amazonaws.com/spawn/efa/aws-efa-installer-" + efaInstallerVersion + ".tar.gz'",
-		"'https://efa-installer.amazonaws.com/aws-efa-installer-" + efaInstallerVersion + ".tar.gz'",
-	}
-	if got := strings.Fields(loop[0][1]); strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Errorf("EFA sources = %q, want %q", got, want)
+	if strings.Contains(script, "spawn/efa/") || strings.Contains(script, "for u in") {
+		t.Error("the EFA step still names the retired regional mirror or a source loop (#1515)")
 	}
 	if strings.Contains(script, "aws-efa-installer-latest") {
 		t.Error("the EFA step still names the moving aws-efa-installer-latest tarball")
 	}
 	// The download goes to the file the comparison reads.
 	if !regexp.MustCompile(`(?m)^\s*if curl -fsS [^\n]*-o e\.tgz "\$u"; then$`).MatchString(script) {
-		t.Error("the loop does not download each source to e.tgz")
+		t.Error("the EFA step does not download its source to e.tgz")
 	}
 }

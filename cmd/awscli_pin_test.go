@@ -8,7 +8,7 @@ import (
 	"github.com/spore-host/spawn/pkg/launcher"
 )
 
-// The release workflow mirrors what this prints (#1494); it must be exactly
+// The release workflow verifies what this prints (#1515); it must be exactly
 // the pins the bootstrap installs, one whitespace-separated line each.
 func TestAWSCLIPinCommandPrintsThePins(t *testing.T) {
 	var out bytes.Buffer
@@ -23,8 +23,8 @@ func TestAWSCLIPinCommandPrintsThePins(t *testing.T) {
 		t.Fatalf("spawn awscli-pin printed %d lines for %d pins:\n%s", len(lines), len(pins), out.String())
 	}
 	for i, p := range pins {
-		if got := strings.Fields(lines[i]); strings.Join(got, " ") != p.Arch+" "+p.Version+" "+p.SHA256+" "+p.MirrorKey || len(got) != 4 {
-			t.Errorf("line %d = %q, want %+v as <arch> <version> <sha256> <mirror key>", i, lines[i], p)
+		if got := strings.Fields(lines[i]); strings.Join(got, " ") != p.Arch+" "+p.Version+" "+p.SHA256 || len(got) != 3 {
+			t.Errorf("line %d = %q, want %+v as <arch> <version> <sha256>", i, lines[i], p)
 		}
 	}
 	if !awsCLIPinCmd.Hidden {

@@ -59,6 +59,14 @@ type fakeEC2 struct {
 	// DescribeRouteTables and DescribeVpcEndpoints answer with, for the
 	// --no-public-ip subnet check (#1433).
 	routeTablesXML, vpcEndpointsXML string
+
+	// imagesXML, when set, is the imagesSet DescribeImages answers with, for
+	// the --no-public-ip check's AWS CLI need (#1515); otherwise the call is
+	// refused, as before.
+	imagesXML string
+	// imagesByID, when it has the requested ImageId.1, answers with that
+	// item instead (a spawn-built image and its base, #1515).
+	imagesByID map[string]string
 }
 
 type fakeSubnet struct {
@@ -188,6 +196,19 @@ func (f *fakeEC2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "DescribeRouteTables":
 		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 		_, _ = w.Write([]byte(`<DescribeRouteTablesResponse ` + ns + `><requestId>r</requestId><routeTableSet>` + f.routeTablesXML + `</routeTableSet></DescribeRouteTablesResponse>`))
+	case "DescribeImages":
+		if x, ok := f.imagesByID[form.Get("ImageId.1")]; ok {
+			// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+			_, _ = w.Write([]byte(`<DescribeImagesResponse ` + ns + `><requestId>r</requestId><imagesSet>` + x + `</imagesSet></DescribeImagesResponse>`))
+			return
+		}
+		if f.imagesXML == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`<Response><Errors><Error><Code>InvalidAction</Code><Message>not in this fake</Message></Error></Errors><RequestID>r</RequestID></Response>`))
+			return
+		}
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
+		_, _ = w.Write([]byte(`<DescribeImagesResponse ` + ns + `><requestId>r</requestId><imagesSet>` + f.imagesXML + `</imagesSet></DescribeImagesResponse>`))
 	case "DescribeVpcEndpoints":
 		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter, go.lang.security.injection.raw-html-format.raw-html-format -- test fixture: a fake EC2 Query API answering the SDK in XML, not HTML served to a browser
 		_, _ = w.Write([]byte(`<DescribeVpcEndpointsResponse ` + ns + `><requestId>r</requestId><vpcEndpointSet>` + f.vpcEndpointsXML + `</vpcEndpointSet></DescribeVpcEndpointsResponse>`))

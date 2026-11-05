@@ -379,7 +379,7 @@ func TestMemberUserDataCarriesTheProxy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		hasBoot := strings.Contains(script, "SPAWN_PX_REGION=us-east-1\nhttp_proxy=http://10.0.1.5:3128 ")
+		hasBoot := strings.Contains(script, "\nhttp_proxy=http://10.0.1.5:3128 https_proxy=http://10.0.1.5:3128 no_proxy=")
 		hasMPI := strings.Contains(script, "spawn_px() { http_proxy=http://10.0.1.5:3128 ")
 		if want := addr != ""; hasBoot != want || hasMPI != want {
 			t.Errorf("addr %q: the bootstrap's AWS CLI install proxied %v, the MPI script %v; want %v", addr, hasBoot, hasMPI, want)

@@ -2,7 +2,6 @@ package userdata
 
 import (
 	"github.com/spore-host/spawn/pkg/security"
-	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
 // The EFA installer that --efa runs as root (spawn#1505): a pinned version and
@@ -40,31 +39,15 @@ var efaPinnedSHA256 = efaInstallerSHA256
 // efaInstallerOrigin is where AWS publishes the installer.
 const efaInstallerOrigin = "https://efa-installer.amazonaws.com/"
 
-// efaInstallerMirrorPrefix is where the pinned tarball is mirrored, under its
-// own file name, in each spawn-binaries-<region> bucket. The user data tries
-// the launch region's copy first, so a --no-public-ip member, which reaches S3
-// through the endpoint that flag requires but not efa-installer.amazonaws.com,
-// can still install it; the sha256 check applies to either source. The release
-// does not publish that copy yet (spawn#1507: it needs spawn/efa/* on the
-// release role), so until it does the mirror fetch fails fast and the origin
-// serves the tarball.
-const efaInstallerMirrorPrefix = "spawn/efa/"
-
-// efaInstallerFile is the pinned tarball's file name, the same at AWS and in
-// the mirror.
+// efaInstallerFile is the pinned tarball's file name at AWS.
 func efaInstallerFile() string { return "aws-efa-installer-" + efaInstallerVersion + ".tar.gz" }
 
-// efaInstallerSources are the URLs the user data tries, in order: the launch
-// region's mirror, when that region has a spawn-binaries bucket, then AWS.
-// Each is shell-quoted for the script.
-func efaInstallerSources(region string) []string {
-	var urls []string
-	if sporedinstall.Published(region) {
-		urls = append(urls, "https://spawn-binaries-"+region+".s3."+region+".amazonaws.com/"+efaInstallerMirrorPrefix+efaInstallerFile())
-	}
-	urls = append(urls, efaInstallerOrigin+efaInstallerFile())
-	for i, u := range urls {
-		urls[i] = security.ShellQuote(u)
-	}
-	return urls
-}
+// efaInstallerURL is the one URL the user data fetches the installer from,
+// shell-quoted for the script. There is no other source: spawn does not mirror
+// third-party artifacts (#1515), and the regional spawn-binaries copy spawn#1507
+// would have published was never made (closed as won't-do), so every --efa
+// member's first fetch used to be a 403 from its region's bucket. A
+// --no-public-ip member with no NAT route reaches efa-installer.amazonaws.com
+// through the spawn egress proxy (--bootstrap-egress proxy) or not at all,
+// which the preflight refuses.
+func efaInstallerURL() string { return security.ShellQuote(efaInstallerOrigin + efaInstallerFile()) }

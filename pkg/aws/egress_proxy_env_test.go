@@ -31,7 +31,7 @@ func allowlistExamples(t *testing.T) []string {
 // no_proxy sends every S3 and VPC-endpoint host direct and every allowlisted
 // host to the proxy, by curl's rule (#1515 phase 4). The proxy refuses
 // anything off its allowlist, so an S3 name it is sent (AL2023's dnf
-// repositories, the spawn-binaries mirror) breaks the member, and an
+// repositories, the spawn-binaries bucket) breaks the member, and an
 // allowlisted name sent direct cannot leave a no-NAT subnet.
 func TestEgressProxyNoProxySparesTheAllowlist(t *testing.T) {
 	for _, region := range []string{"us-east-1", "eu-west-2", "ap-southeast-4"} {
@@ -43,7 +43,7 @@ func TestEgressProxyNoProxySparesTheAllowlist(t *testing.T) {
 		}
 		direct := []string{
 			"169.254.169.254", "localhost", "127.0.0.1",
-			// The spawn-binaries mirror of spored, the EFA installer and the AWS CLI.
+			// The spawn-binaries bucket, where spored is published.
 			"spawn-binaries-" + region + ".s3." + region + ".amazonaws.com",
 			// S3's path, dual-stack and global forms.
 			"s3." + region + ".amazonaws.com",

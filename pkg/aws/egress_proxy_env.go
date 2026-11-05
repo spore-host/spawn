@@ -9,7 +9,7 @@ import (
 // A member that counts on the spawn egress proxy (#1515 phase 4) sets
 // http_proxy, https_proxy and no_proxy only around spawn's own fetches from
 // outside AWS: the EFA installer's download and run, the Ubuntu apt-get calls
-// spawn runs, and the AWS CLI zip's origin fallback. Never globally, and never
+// spawn runs, and the AWS CLI zip's download. Never globally, and never
 // for the user's --command or --mpi-command. These two functions are the one
 // source of the proxy URL and the no_proxy list pkg/userdata and pkg/launcher
 // render.
@@ -33,8 +33,8 @@ func EgressProxyURL(addr string) (string, error) {
 //
 //   - IMDS and the loopback names.
 //   - S3, in every form a fetch names it: the regional virtual-hosted
-//     (spawn-binaries-<region>.s3.<region>.amazonaws.com, the EFA and AWS CLI
-//     mirrors) and path forms, the form AL2023's dnf repositories use, and
+//     (spawn-binaries-<region>.s3.<region>.amazonaws.com, where spored is
+//     published) and path forms, the form AL2023's dnf repositories use, and
 //     the global form. The gateway endpoint --no-public-ip requires serves
 //     all of them. The AL2023 AMI's repositories come from its
 //     amazon-linux-repo-s3 package (2023.12.20261021, read from the package):

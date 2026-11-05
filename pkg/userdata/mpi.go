@@ -3,7 +3,6 @@ package userdata
 import (
 	"bytes"
 	"fmt"
-	"strings"
 	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -93,12 +92,12 @@ type mpiTemplateData struct {
 	NodeReadyFile    string
 	NodeReadyID      string
 	RemoteReadyProbe string
-	// EFAVersion, EFASHA256 and EFASources are the pinned EFA installer
-	// (efa.go, spawn#1505): its version, its tarball's sha256, and the
-	// shell-quoted URLs to try, mirror first.
+	// EFAVersion, EFASHA256 and EFAURL are the pinned EFA installer (efa.go,
+	// spawn#1505): its version, its tarball's sha256, and the shell-quoted
+	// URL at efa-installer.amazonaws.com, its only source (#1515).
 	EFAVersion string
 	EFASHA256  string
-	EFASources string
+	EFAURL     string
 	// ProxyEnv is the http_proxy/https_proxy/no_proxy assignments for one
 	// command (pkg/aws EgressProxyEnv), and AptProxy the apt-get options
 	// naming the proxy, with a leading space; both "" without a proxy.
@@ -134,7 +133,7 @@ func newMPITemplateData(config MPIConfig) (mpiTemplateData, error) {
 		RemoteReadyProbe:      security.ShellQuote("grep -qxF " + id + " " + MPINodeReadyFile),
 		EFAVersion:            efaInstallerVersion,
 		EFASHA256:             efaPinnedSHA256,
-		EFASources:            strings.Join(efaInstallerSources(config.Region), " "),
+		EFAURL:                efaInstallerURL(),
 		ProxyEnv:              proxyEnv,
 		AptProxy:              aptProxy,
 	}, nil
@@ -447,9 +446,9 @@ func GenerateMPIUserData(config MPIConfig) (string, error) {
 //     returns: nothing is exported, nothing goes to /etc/environment or
 //     profile.d, and the --mpi-command (run by mpirun from this shell, or on a
 //     peer over ssh) never sees them.
-//   - The EFA download runs under spawn_px. no_proxy names the S3 hosts, so
-//     curl fetches the regional mirror directly, through the S3 endpoint, and
-//     only efa-installer.amazonaws.com through the proxy.
+//   - The EFA download, from efa-installer.amazonaws.com only (there is no
+//     regional mirror, #1515), runs under spawn_px, so it goes through the
+//     proxy.
 //   - ./efa_installer.sh runs under spawn_px, for its own package installs:
 //     apt-get on Ubuntu (Ubuntu's mirrors, through the proxy) and dnf on
 //     AL2023, whose repositories are S3 buckets that no_proxy sends direct;
@@ -558,13 +557,15 @@ if command -v apt-get >/dev/null; then
 fi
 rm -rf /tmp/spawn-efa && mkdir -p /tmp/spawn-efa && cd /tmp/spawn-efa || exit 1
 r=1
-for u in {{.EFASources}}; do
-  if {{if .ProxyEnv}}spawn_px {{end}}curl -fsS --connect-timeout 10 --max-time 1800 --retry 3 -o e.tgz "$u"; then
-    [ "$(sha256sum e.tgz | cut -d ' ' -f 1)" = {{.EFASHA256}} ] && { r=0; break; }
+u={{.EFAURL}}
+if {{if .ProxyEnv}}spawn_px {{end}}curl -fsS --connect-timeout 10 --max-time 1800 --retry 3 -o e.tgz "$u"; then
+  if [ "$(sha256sum e.tgz | cut -d ' ' -f 1)" = {{.EFASHA256}} ]; then
+    r=0
+  else
     echo "spawn: EFA installer from $u: sha256 mismatch" >&2
+    rm -f e.tgz
   fi
-  rm -f e.tgz
-done
+fi
 if [ "$r" -ne 0 ]; then
   echo "spawn: no EFA installer {{.EFAVersion}} with the pinned sha256" | tee -a /var/log/spawn-command.log >&2
 elif tar -xzf e.tgz && rm -f e.tgz && cd aws-efa-installer; then

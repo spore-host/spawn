@@ -15,8 +15,9 @@ import (
 // The #1515 phase 4 gates for the bootstrap. Its one fetch from outside AWS
 // is the AWS CLI zip on an image with none (stock Ubuntu). With EgressProxy
 // set, the per-launch part installs it before the body, with the proxy
-// variables on that one call: the regional mirror direct (no_proxy names it),
-// awscli.amazonaws.com through the proxy, and nothing after it proxied.
+// variables on that one call: awscli.amazonaws.com, its only source since the
+// #1494 mirror was retired (#1515 phase 7), through the proxy, and nothing
+// after it proxied.
 // Without EgressProxy the user data is byte-identical to what it was.
 
 var testEgressProxy = &EgressProxy{Addr: "10.0.1.5:3128", Region: "eu-west-1"}
@@ -84,8 +85,9 @@ func TestAWSCLIOriginThroughTheEgressProxy(t *testing.T) {
 	pin := func(s string) string { return strings.ReplaceAll(s, awsCLISHA256x86_64, hex.EncodeToString(sum[:])) }
 	wantNo := strings.Join(aws.EgressProxyNoProxy("eu-west-1"), ",")
 	for name, tc := range map[string]struct{ mirror bool }{
-		"the mirror lacks it: the origin, through the proxy": {},
-		"the mirror has it: the proxy is not used":           {mirror: true},
+		"the origin, through the proxy": {},
+		// A bucket still holding the retired mirror's copy changes nothing.
+		"the old mirror populated: still the origin, through the proxy": {mirror: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := BootstrapConfig{Username: "ubuntu", Command: "env > /tmp/COMMAND_ENV", EgressProxy: testEgressProxy,
@@ -93,7 +95,7 @@ func TestAWSCLIOriginThroughTheEgressProxy(t *testing.T) {
 			setup := func(s *stubServer) {
 				s.put("awscli", awsCLIZipKey, zipBytes)
 				if tc.mirror {
-					s.put("eu-west-1", x86Pin(t).MirrorKey, zipBytes)
+					s.put("eu-west-1", retiredMirrorKey, zipBytes)
 				}
 			}
 			sb, out, err := fullBoot(t, cfg, "", bootOpts{standIns: map[string]string{"aws": "", "curl": proxyCurl(t)}, edit: pin, setup: setup})
@@ -113,23 +115,16 @@ func TestAWSCLIOriginThroughTheEgressProxy(t *testing.T) {
 					t.Errorf("curl %s ran with proxy variables (%+v): only the AWS CLI install is proxied", f.url, f)
 				}
 			}
-			want := 2
-			if tc.mirror {
-				want = 1
-			}
-			if len(cli) != want {
-				t.Fatalf("AWS CLI fetches %+v, want %d", cli, want)
+			if len(cli) != 1 {
+				t.Fatalf("AWS CLI fetches %+v, want exactly one, from the origin", cli)
 			}
 			for _, f := range cli {
 				if f.https != "http://10.0.1.5:3128" || f.no != wantNo {
 					t.Errorf("the AWS CLI fetch %s ran with %+v, want https_proxy http://10.0.1.5:3128 and no_proxy %s", f.url, f, wantNo)
 				}
 			}
-			if proxied(cli[0]) || realHost(cli[0].url) != "spawn-binaries-eu-west-1.s3.eu-west-1.amazonaws.com" {
-				t.Errorf("the first fetch, %s (%s), went through the proxy or is not the regional mirror", cli[0].url, realHost(cli[0].url))
-			}
-			if !tc.mirror && (!proxied(cli[1]) || realHost(cli[1].url) != "awscli.amazonaws.com") {
-				t.Errorf("the origin fetch %s (%s) did not go through the proxy", cli[1].url, realHost(cli[1].url))
+			if !proxied(cli[0]) || realHost(cli[0].url) != "awscli.amazonaws.com" {
+				t.Errorf("the AWS CLI fetch %s (%s) is not the origin through the proxy", cli[0].url, realHost(cli[0].url))
 			}
 			for _, f := range []string{"tmp/COMMAND_ENV", "tmp/USER_DATA_ENV"} {
 				env := sb.read(f)
@@ -147,7 +142,7 @@ func TestAWSCLIOriginThroughTheEgressProxy(t *testing.T) {
 // The body is published and signed: the proxy never reaches it.
 func TestEgressProxyLeavesTheBodyAndAPlainLaunchUnchanged(t *testing.T) {
 	body := BootstrapBody()
-	for _, w := range []string{"SPAWN_PX_REGION", "_proxy="} {
+	for _, w := range []string{"_proxy="} {
 		if strings.Contains(body, w) {
 			t.Errorf("the published body contains %q", w)
 		}
@@ -162,7 +157,7 @@ func TestEgressProxyLeavesTheBodyAndAPlainLaunchUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(plain, "_proxy=") || strings.Contains(plain, "SPAWN_PX_REGION") {
+			if strings.Contains(plain, "_proxy=") {
 				t.Errorf("%s/%q: without a proxy the user data names one", name, version)
 			}
 			cfg.EgressProxy = testEgressProxy
@@ -190,7 +185,7 @@ func TestEgressProxyLeavesTheBodyAndAPlainLaunchUnchanged(t *testing.T) {
 			if def := strings.Index(proxiedScript, "spawn_need_aws() {"); def < 0 || def > at {
 				t.Errorf("%s/%q: spawn_need_aws is defined at %d, after the egress proxy's call at %d", name, version, def, at)
 			}
-			for _, later := range []string{`spawn_need_aws "$SPAWN_ST_REGION"`, `spawn_need_aws "$REGION"`, bodyPath} {
+			for _, later := range []string{"spawn_need_aws || spawn_fatal_retire", "spawn_need_aws || { echo", bodyPath} {
 				if i := strings.Index(proxiedScript, later); i >= 0 && i < at {
 					t.Errorf("%s/%q: %q comes before the egress proxy's AWS CLI install", name, version, later)
 				}

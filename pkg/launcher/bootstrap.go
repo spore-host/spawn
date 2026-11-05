@@ -171,14 +171,13 @@ type BootstrapConfig struct {
 	// EgressProxy, when set, is the spawn egress proxy a --no-public-ip
 	// --bootstrap-egress proxy launch found or created in its VPC (#1515
 	// phase 4). The only fetch of the bootstrap's own that leaves AWS is the
-	// AWS CLI zip on an image with none (stock Ubuntu): with this set, the
-	// per-launch part installs it first, before the body or the staged
-	// files, with http_proxy/https_proxy/no_proxy set for that one call, so
-	// the regional mirror is still fetched directly through the S3 endpoint
-	// (no_proxy names it) and only awscli.amazonaws.com goes through the
-	// proxy. Nothing else in the bootstrap is proxied, and the published
-	// body is unchanged: see [egressProxyAWSCLI]. nil renders exactly what
-	// it always has.
+	// AWS CLI zip on an image with none (stock Ubuntu), from
+	// awscli.amazonaws.com: with this set, the per-launch part installs it
+	// first, before the body or the staged files, with
+	// http_proxy/https_proxy/no_proxy set for that one call, so it goes
+	// through the proxy. Nothing else in the bootstrap is proxied, and the
+	// published body is unchanged: see [egressProxyAWSCLI]. nil renders
+	// exactly what it always has.
 	EgressProxy *EgressProxy
 }
 
@@ -186,8 +185,8 @@ type BootstrapConfig struct {
 type EgressProxy struct {
 	// Addr is the proxy's private IP and port (aws.LaunchConfig.EgressProxyAddr).
 	Addr string
-	// Region is the launch region, which the AWS CLI mirror and no_proxy's
-	// S3 names carry.
+	// Region is the launch region, which no_proxy's S3 and VPC endpoint names
+	// carry.
 	Region string
 }
 
@@ -210,10 +209,9 @@ func egressProxyAWSCLI(p EgressProxy) (string, error) {
 		return "", fmt.Errorf("bootstrap: %w", err)
 	}
 	return fmt.Sprintf(`
-# The AWS CLI, with only its origin fallback through the egress proxy (#1515)
-SPAWN_PX_REGION=%s
-%s spawn_need_aws "$SPAWN_PX_REGION" || true
-`, p.Region, env), nil
+# The AWS CLI, from its origin through the egress proxy (#1515)
+%s spawn_need_aws || true
+`, env), nil
 }
 
 // StagedFiles is a per-launch object holding a launch's command and task
@@ -734,66 +732,58 @@ const (
 	awsCLISHA256aarch64 = "f6eb845fbacb11bee87de3f5fbe8043773cbe89d0414607b44b71e216eb9226b"
 )
 
-// awsCLIMirrorDir is where the release workflow mirrors the pinned AWS CLI
-// zips, byte for byte, in every spawn-binaries-<region> bucket (#1494):
-// <dir>/awscli-exe-linux-<arch>-<version>.zip, the official file name. An
-// instance with no internet route (a private subnet with only VPC endpoints,
-// which --no-public-ip requires to include S3) reaches its regional bucket but
-// not awscli.amazonaws.com. Under spawn/, which instances already read
-// anonymously. The release keeps the newest few pinned versions there and
-// deletes the rest.
-const awsCLIMirrorDir = "spawn/awscli"
-
 // AWSCLIPin is one architecture's pinned AWS CLI installer zip: what the Linux
-// bootstrap installs on an image with no aws CLI, and what the release
-// workflow mirrors, at MirrorKey, into every spawn-binaries-<region> bucket.
+// bootstrap installs on an image with no aws CLI, from awscli.amazonaws.com.
 type AWSCLIPin struct {
-	Arch      string // as uname -m prints it: x86_64 or aarch64
-	Version   string
-	SHA256    string
-	MirrorKey string
+	Arch    string // as uname -m prints it: x86_64 or aarch64
+	Version string
+	SHA256  string
 }
 
 // AWSCLIPins returns the pinned zips, one per architecture the bootstrap
-// installs on. `spawn awscli-pin` prints them for the release workflow, so the
-// bytes it mirrors and the key it writes are the ones this build fetches.
+// installs on. `spawn awscli-pin` prints them for the release workflow, which
+// checks before publishing that each is the sha256 of a zip the AWS CLI team
+// signed (scripts/verify-awscli-pin.sh), so a release never ships a pin the
+// bootstrap would install unsigned bytes for, or refuse at every boot.
 func AWSCLIPins() []AWSCLIPin {
 	var out []AWSCLIPin
 	for _, p := range [][2]string{{"x86_64", awsCLISHA256x86_64}, {"aarch64", awsCLISHA256aarch64}} {
-		out = append(out, AWSCLIPin{Arch: p[0], Version: awsCLIVersion, SHA256: p[1],
-			MirrorKey: awsCLIMirrorDir + "/awscli-exe-linux-" + p[0] + "-" + awsCLIVersion + ".zip"})
+		out = append(out, AWSCLIPin{Arch: p[0], Version: awsCLIVersion, SHA256: p[1]})
 	}
 	return out
 }
 
-// awsCLIInstallTemplate defines spawn_need_aws REGION, which returns 0 once
-// there is an aws CLI: the image's, or the pinned one it downloads, checks
-// against its sha256 and installs with AWS's own installer (into
-// /usr/local/aws-cli, with /usr/local/bin/aws). The zip comes from REGION's
-// spawn-binaries mirror first (#1494), at its regional S3 name (#1436), so an
-// S3 gateway or interface endpoint reaches it, and from awscli.amazonaws.com
-// second. Each source's bytes must match the pinned sha256 before anything is
-// unpacked: the mirror is no more trusted than the origin. Ubuntu has no
+// awsCLIInstallTemplate defines spawn_need_aws, which returns 0 once there is
+// an aws CLI: the image's, or the pinned one it downloads from
+// awscli.amazonaws.com, checks against its sha256 and installs with AWS's own
+// installer (into /usr/local/aws-cli, with /usr/local/bin/aws). The bytes must
+// match the pinned sha256 before anything is unpacked. There is no other
+// source: spawn does not mirror third-party artifacts (#1515), so an instance
+// with no route to awscli.amazonaws.com (a --no-public-ip subnet with no NAT)
+// reaches it only through the spawn egress proxy, and the --no-public-ip
+// preflight refuses an image that may need it without one. Ubuntu has no
 // unzip, so the zip is unpacked with python3, which cloud-init itself runs on,
 // keeping the modes the installer needs. The zip's name carries the
 // architecture as uname -m prints it. Any failure returns 1, having said why
 // (curl and python3 report their own errors), and the callers fail closed.
-// Filled in by awsCLIInstallFunc: the version, the x86_64 and aarch64 sha256,
-// and the mirror directory.
+// Filled in by awsCLIInstallFunc: the version, and the x86_64 and aarch64
+// sha256.
 const awsCLIInstallTemplate = `
-# spawn_need_aws REGION: an aws CLI, installed when the image has none (#1490).
+# spawn_need_aws: an aws CLI, installed when the image has none (#1490).
 spawn_need_aws() {
     command -v aws >/dev/null 2>&1 && return 0
-    local h=%[2]s r=1 u region=$1
+    local h=%[2]s r=1
     [ "$(uname -m)" != aarch64 ] || h=%[3]s
     echo "spawn: no aws CLI; installing AWS CLI %[1]s (#1490)"
     rm -rf /tmp/spawn-awscli
     mkdir -p /tmp/spawn-awscli
-    for u in "https://spawn-binaries-$region.s3.$region.amazonaws.com/%[4]s" https://awscli.amazonaws.com; do
-        curl -fsS --connect-timeout 10 --max-time 600 --retry 3 -o /tmp/spawn-awscli/c.zip "$u/awscli-exe-linux-$(uname -m)-%[1]s.zip" || continue
-        [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ] && r=0 && break
-        echo "spawn: AWS CLI zip from $u: sha256 mismatch" >&2
-    done
+    if curl -fsS --connect-timeout 10 --max-time 600 --retry 3 -o /tmp/spawn-awscli/c.zip "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-%[1]s.zip"; then
+        if [ "$(sha256sum /tmp/spawn-awscli/c.zip | cut -d ' ' -f 1)" = "$h" ]; then
+            r=0
+        else
+            echo "spawn: AWS CLI zip from https://awscli.amazonaws.com: sha256 mismatch" >&2
+        fi
+    fi
     [ "$r" = 0 ] &&
         python3 -c 'import os,sys,zipfile;z=zipfile.ZipFile(sys.argv[1]);[os.chmod(z.extract(i,sys.argv[2]),i.external_attr>>16&511 or 493) for i in z.infolist()]' /tmp/spawn-awscli/c.zip /tmp/spawn-awscli &&
         /tmp/spawn-awscli/aws/install >/dev/null &&
@@ -806,7 +796,7 @@ spawn_need_aws() {
 
 // awsCLIInstallFunc is awsCLIInstallTemplate filled in with the pinned release.
 func awsCLIInstallFunc() string {
-	return fmt.Sprintf(shellmin.Strip(awsCLIInstallTemplate), awsCLIVersion, awsCLISHA256x86_64, awsCLISHA256aarch64, awsCLIMirrorDir)
+	return fmt.Sprintf(shellmin.Strip(awsCLIInstallTemplate), awsCLIVersion, awsCLISHA256x86_64, awsCLISHA256aarch64)
 }
 
 // bodyMain is the part of the static body that runs: spored's install and
@@ -994,7 +984,7 @@ const stagedFilesTemplate = `
 SPAWN_ST_URI=%s
 SPAWN_ST_REGION=%s
 SPAWN_ST_SHA256=%s
-spawn_need_aws "$SPAWN_ST_REGION" || spawn_fatal_retire "no aws CLI to fetch this launch's staged files from $SPAWN_ST_URI, and it could not be installed"
+spawn_need_aws || spawn_fatal_retire "no aws CLI to fetch this launch's staged files from $SPAWN_ST_URI, and it could not be installed"
 mkdir -p /etc/spawn
 for SPAWN_ST_TRY in 1 2 3 4 5 6; do
     rm -f %[4]s
@@ -1262,7 +1252,7 @@ case "$INSTANCE_ID" in
     i-*) ;;
     *) echo "spawn: no instance ID from IMDS; stopping (#1490)" >&2; exit 1 ;;
 esac
-spawn_need_aws "$REGION" || { echo "spawn: no aws CLI to read this instance's tags with; stopping (#1490)" >&2; exit 1; }
+spawn_need_aws || { echo "spawn: no aws CLI to read this instance's tags with; stopping (#1490)" >&2; exit 1; }
 spawn_tag() {
     local n=0
     until aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=$1" --query "${2:-Tags[0].Value}" --output text; do
