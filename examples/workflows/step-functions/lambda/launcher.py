@@ -33,7 +33,7 @@ def handler(event, context):
     try:
         result = subprocess.run(
             ['spawn', 'launch',
-             '--params', params_file,
+             '--param-file', params_file,
              '--detach',
              '--output-id', '/tmp/sweep_id.txt'],
             capture_output=True,

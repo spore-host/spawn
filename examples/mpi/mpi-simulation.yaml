@@ -1,6 +1,17 @@
 # MPI Simulation Example
 #
 # Large-scale MPI simulation with EFA for low latency
+#
+# This file is NOT a param file, and is not passed to spawn: an MPI job is a
+# job array (--count with --mpi), and a parameter sweep refuses --mpi. It
+# describes the job; the settings below map to these flags (spawn#1540):
+#
+#   spawn launch my-mpi-run --count 16 --mpi --efa --instance-type c5n.18xlarge \
+#     --mpi-processes-per-node 36 --ttl 24h \
+#     --mpi-command "/opt/simulation input.dat output.dat"
+#
+# --mpi creates the placement group, sets up passwordless SSH and the hostfile,
+# and runs --mpi-command with mpirun from rank 0 across all 16 x 36 processes.
 
 sweep_name: mpi-simulation
 count: 16  # 16-node MPI job

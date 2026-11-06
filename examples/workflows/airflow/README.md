@@ -63,7 +63,7 @@ from airflow.operators.bash import BashOperator
 with DAG('spawn_sweep', ...) as dag:
     launch = BashOperator(
         task_id='launch',
-        bash_command='spawn launch --params sweep.yaml --detach --output-id /tmp/id.txt'
+        bash_command='spawn launch --param-file sweep.yaml --detach --output-id /tmp/id.txt'
     )
 ```
 

@@ -28,7 +28,7 @@ def sweep_id(context: AssetExecutionContext, config: SpawnSweepConfig) -> str:
 
     result = subprocess.run(
         ['spawn', 'launch',
-         '--params', config.params_file,
+         '--param-file', config.params_file,
          '--detach',
          '--output-id', str(output_file)],
         capture_output=True,
@@ -119,7 +119,7 @@ from dagster import job, op
 def launch_sweep_op(context, params_file: str) -> str:
     """Launch sweep operation."""
     result = subprocess.run(
-        ['spawn', 'launch', '--params', params_file,
+        ['spawn', 'launch', '--param-file', params_file,
          '--detach', '--output-id', '/tmp/sweep_id.txt'],
         capture_output=True,
         text=True,
@@ -140,7 +140,7 @@ def wait_sweep_op(context, sweep_id: str) -> dict:
 
     # Simple approach using --wait
     result = subprocess.run(
-        ['spawn', 'launch', '--params', 'sweep.yaml',
+        ['spawn', 'launch', '--param-file', 'sweep.yaml',
          '--detach', '--wait', '--wait-timeout', '2h'],
         capture_output=True,
         text=True

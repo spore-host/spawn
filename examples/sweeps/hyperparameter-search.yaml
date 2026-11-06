@@ -1,68 +1,49 @@
 # Hyperparameter Search Example
 #
-# Grid search over learning rates, batch sizes, and architectures
+# Grid search over learning rates, batch sizes, and architectures:
+# 4 learning rates x 3 batch sizes x 4 models = 48 trials, one instance each.
+#
+# Use with (from the repo root):
+#   spawn launch --param-file examples/sweeps/hyperparameter-search.yaml --sweep-name hyperparam-search
+#
+# Only defaults:, grid: and params: are read at the top level of a param file
+# (spawn#530). grid: is expanded into its cartesian product, one row per
+# combination; each grid key reaches the instance as a PARAM_<key> environment
+# variable, and SWEEP_ID / SWEEP_INDEX name the sweep and the row.
 
-sweep_name: hyperparam-search
-count: 48  # 4 × 3 × 4 combinations
+defaults:
+  region: us-east-1
+  instance_type: p3.2xlarge  # GPU for training
+  spot: true
+  ttl: 8h                    # Max 8 hours per trial
+  on_complete: terminate
+  command: |
+    set -e
+    echo "Trial ${SWEEP_INDEX}: lr=${PARAM_learning_rate}, bs=${PARAM_batch_size}, model=${PARAM_model}"
 
-# Define parameter grid
-parameters:
-  - learning_rate: [0.001, 0.01, 0.1, 0.5]
-    batch_size: [32, 64, 128]
-    model: [resnet18, resnet34, resnet50, efficientnet]
+    # Install PyTorch
+    pip3 install torch torchvision --quiet
 
-# Multi-region for faster completion
-regions:
-  - us-east-1
-  - us-west-2
-  - eu-west-1
+    # Download dataset (CIFAR-10)
+    python3 -c "import torchvision; torchvision.datasets.CIFAR10(root='/tmp/data', train=True, download=True)"
 
-distribution: fair-share  # Distribute evenly
-instance_type: p3.2xlarge  # GPU for training
-spot: true
-ttl: 8h  # Max 8 hours per trial
+    # Train model (bring your own train.py)
+    python3 /opt/train.py \
+      --model "${PARAM_model}" \
+      --lr "${PARAM_learning_rate}" \
+      --batch-size "${PARAM_batch_size}" \
+      --epochs 50 \
+      --data /tmp/data \
+      --output-json /tmp/metrics.json
 
-# Result collection
-result_bucket: s3://my-results/sweeps/
-result_file: metrics.json
+    # Upload results (pass --s3-write my-results at launch so the instance may)
+    aws s3 cp /tmp/metrics.json \
+      "s3://my-results/sweeps/${SWEEP_ID}/${SWEEP_INDEX}/metrics.json"
 
-base_command: |
-  #!/bin/bash
-  set -e
+grid:
+  learning_rate: [0.001, 0.01, 0.1, 0.5]
+  batch_size: [32, 64, 128]
+  model: [resnet18, resnet34, resnet50, efficientnet]
 
-  # Parse parameters
-  LR=$(echo $SWEEP_PARAMS | jq -r '.learning_rate')
-  BS=$(echo $SWEEP_PARAMS | jq -r '.batch_size')
-  MODEL=$(echo $SWEEP_PARAMS | jq -r '.model')
-
-  echo "Trial ${SWEEP_INDEX}: lr=$LR, bs=$BS, model=$MODEL"
-
-  # Install PyTorch
-  pip3 install torch torchvision --quiet
-
-  # Download dataset (CIFAR-10)
-  python3 -c "
-  import torchvision
-  torchvision.datasets.CIFAR10(root='/tmp/data', train=True, download=True)
-  "
-
-  # Train model
-  python3 /opt/train.py \
-    --model $MODEL \
-    --lr $LR \
-    --batch-size $BS \
-    --epochs 50 \
-    --data /tmp/data \
-    --output-json /tmp/metrics.json
-
-  # Upload results
-  aws s3 cp /tmp/metrics.json \
-    s3://my-results/sweeps/${SWEEP_ID}/${SWEEP_INDEX}/metrics.json
-
-  echo "Trial complete"
-
-# After sweep completes, collect results:
-# spawn collect-results --sweep-id <sweep-id> \
-#   --metric accuracy \
-#   --best 5 \
-#   --output top5.csv
+# After the sweep completes, collect results:
+# spawn sweep collect <sweep-id> --metric accuracy --best 5 --format csv --output-file top5.csv

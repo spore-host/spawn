@@ -65,11 +65,11 @@ Output: Filtered VCF
 
 ```bash
 # Launch base instance
-spawn launch \
+spawn launch cromwell-ami-build \
   --instance-type c6i.2xlarge \
   --ami ami-amazon-linux-2023 \
   --wait-for-ssh \
-  --storage 100GB
+  --volume-size 100
 
 # SSH and install
 ssh instance
@@ -189,14 +189,14 @@ aws s3 cp Mills_and_1000G_gold_standard.indels.hg38.vcf.gz s3://my-genomics-refe
 aws s3 cp inputs.json s3://my-workflows/inputs.json
 
 # Launch orchestrator
-spawn launch \
+spawn launch gatk-NA12878 \
   --instance-type c6i.4xlarge \
   --ami ami-cromwell-gatk-v85 \
   --ttl 8h \
   --spot \
-  --storage 500GB \
-  --iam-policy s3:FullAccess \
-  --tags pipeline=gatk-germline,sample=NA12878 \
+  --volume-size 500 \
+  --s3-read my-workflows --s3-read my-genomics-references --s3-write my-results \
+  --tag pipeline=gatk-germline --tag sample=NA12878 \
   --user-data "
     #!/bin/bash
     set -e
@@ -236,61 +236,62 @@ aws s3 sync s3://my-results/NA12878/ ./results/
 
 ---
 
-### Multiple Samples (spawn Array)
+### Multiple Samples (spawn Sweep)
 
-**1. Create sample manifest:**
+**1. Create sample manifest** (a param file: one row per sample, each row's
+keys reach the instance as `PARAM_<key>` environment variables):
 
 ```yaml
 # samples.yaml
-parameters:
-  sample_name: [NA12878, NA12879, NA12880, NA12881]
-  fastq_r1:
-    - s3://data/NA12878_R1.fastq.gz
-    - s3://data/NA12879_R1.fastq.gz
-    - s3://data/NA12880_R1.fastq.gz
-    - s3://data/NA12881_R1.fastq.gz
-  fastq_r2:
-    - s3://data/NA12878_R2.fastq.gz
-    - s3://data/NA12879_R2.fastq.gz
-    - s3://data/NA12880_R2.fastq.gz
-    - s3://data/NA12881_R2.fastq.gz
+defaults:
+  instance_type: c6i.4xlarge
+  ami: ami-cromwell-gatk-v85
+  region: us-east-1
+  volume_size: 500
+  spot: true
+  ttl: 8h
+  on_complete: terminate
+  command: |
+    # Create inputs.json for this sample
+    cat > /tmp/inputs.json <<EOF
+    {
+      "GatkGermline.sample_name": "${PARAM_sample_name}",
+      "GatkGermline.fastq_r1": "${PARAM_fastq_r1}",
+      "GatkGermline.fastq_r2": "${PARAM_fastq_r2}",
+      "GatkGermline.reference_fasta": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.fasta",
+      "GatkGermline.reference_fai": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.fasta.fai",
+      "GatkGermline.reference_dict": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.dict",
+      "GatkGermline.dbsnp_vcf": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.dbsnp138.vcf",
+      "GatkGermline.known_indels_vcf": "s3://my-genomics-references/GRCh38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"
+    }
+    EOF
 
-command: |
-  # Create inputs.json for this sample
-  cat > /tmp/inputs.json <<EOF
-  {
-    "GatkGermline.sample_name": "${sample_name}",
-    "GatkGermline.fastq_r1": "${fastq_r1}",
-    "GatkGermline.fastq_r2": "${fastq_r2}",
-    "GatkGermline.reference_fasta": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.fasta",
-    "GatkGermline.reference_fai": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.fasta.fai",
-    "GatkGermline.reference_dict": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.dict",
-    "GatkGermline.dbsnp_vcf": "s3://my-genomics-references/GRCh38/Homo_sapiens_assembly38.dbsnp138.vcf",
-    "GatkGermline.known_indels_vcf": "s3://my-genomics-references/GRCh38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"
-  }
-  EOF
+    # Run workflow
+    cd /workflows
+    java -Xmx8g -jar /usr/local/bin/cromwell.jar run gatk-germline.wdl --inputs /tmp/inputs.json
 
-  # Run workflow
-  cd /workflows
-  java -Xmx8g -jar /usr/local/bin/cromwell.jar run gatk-germline.wdl --inputs /tmp/inputs.json
+    # Upload results
+    aws s3 cp cromwell-executions/ s3://my-results/${PARAM_sample_name}/ --recursive
 
-  # Upload results
-  aws s3 cp cromwell-executions/ s3://my-results/${sample_name}/ --recursive
-
-instance-type: c6i.4xlarge
-ami: ami-cromwell-gatk-v85
-region: us-east-1
-storage: 500GB
+params:
+  - sample_name: NA12878
+    fastq_r1: s3://data/NA12878_R1.fastq.gz
+    fastq_r2: s3://data/NA12878_R2.fastq.gz
+  - sample_name: NA12879
+    fastq_r1: s3://data/NA12879_R1.fastq.gz
+    fastq_r2: s3://data/NA12879_R2.fastq.gz
+  - sample_name: NA12880
+    fastq_r1: s3://data/NA12880_R1.fastq.gz
+    fastq_r2: s3://data/NA12880_R2.fastq.gz
+  - sample_name: NA12881
+    fastq_r1: s3://data/NA12881_R1.fastq.gz
+    fastq_r2: s3://data/NA12881_R2.fastq.gz
 ```
 
-**2. Launch array:**
+**2. Launch the sweep** (one instance per row):
 
 ```bash
-spawn launch \
-  --params samples.yaml \
-  --array-size 4 \
-  --spot \
-  --ttl 8h
+spawn launch --param-file samples.yaml --sweep-name gatk-germline
 
 # Cost: 4 samples × $0.50 = $2.00 (vs $40 on HealthOmics)
 ```
@@ -358,7 +359,7 @@ java -Xmx16g -jar /usr/local/bin/cromwell.jar run pipeline.wdl
 **Solution:**
 ```bash
 # Increase storage or use instance with NVMe
-spawn launch --storage 1000GB ...
+spawn launch --volume-size 1000 ...
 # Or
 spawn launch --instance-type c6id.4xlarge ...  # 'd' = NVMe instance store
 ```
