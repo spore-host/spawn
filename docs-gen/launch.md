@@ -48,7 +48,7 @@ spawn launch <name> [flags]
 | `--config` |  | string |  | Launch config YAML file (supports plugins: list) |
 | `--cost-limit` |  | float64 |  | Total spend ceiling in USD, covering compute AND storage (0 = disabled). spored terminates the instance when compute + EBS + public IPv4 reaches it; a launch whose storage alone exceeds it is refused up front, because storage outlives the instance and spored cannot reclaim it against the cap. |
 | `--count` |  | int | `1` | Number of instances to launch (job array) |
-| `--detach` |  | bool |  | Run sweep orchestration in Lambda (auto-enabled for parameter sweeps) |
+| `--detach` |  | bool |  | Run sweep orchestration in Lambda (the default for parameter sweeps; without --max-concurrent, min(rows, 10) at a time) |
 | `--dns-api-endpoint` |  | string |  | Lambda Function URL of a custom DNS updater (https://&lt;id&gt;.lambda-url.&lt;region&gt;.on.aws/). Also SPAWN_DNS_API_ENDPOINT, dns.api_endpoint in ~/.spawn/config.yaml, or SSM /spawn/dns/api_endpoint |
 | `--dns-domain` |  | string |  | Register DNS under this zone instead of spore.host (needs an updater serving it; see docs/custom-dns.md). Also SPAWN_DNS_DOMAIN, dns.domain in ~/.spawn/config.yaml, or SSM /spawn/dns/domain |
 | `--dns-function-arn` |  | string |  | ARN of the Lambda function behind --dns-api-endpoint; the instance role is granted lambda:InvokeFunctionUrl on it (required with a custom endpoint). Also SPAWN_DNS_FUNCTION_ARN, dns.function_arn in ~/.spawn/config.yaml, or SSM /spawn/dns/function_arn |
@@ -96,7 +96,7 @@ spawn launch <name> [flags]
 | `--launch-delay` |  | string | `0s` | Delay between instance launches (e.g., 5s) |
 | `--max-concurrent-auto` |  | bool |  | Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492) |
 | `--max-concurrent-per-region` |  | int |  | Max instances running simultaneously per region (0 = unlimited) |
-| `--max-concurrent` |  | int |  | Max instances running simultaneously (0 = unlimited) |
+| `--max-concurrent` |  | int |  | Max instances running simultaneously. 0 (the default): a detached sweep runs min(rows, 10) at a time, a --no-detach sweep all at once |
 | `--metrics-bind` |  | string |  | With --metrics: the address to listen on, an IP address or localhost (default localhost; 0.0.0.0 for a scraper on another host) |
 | `--metrics-path` |  | string |  | With --metrics: the HTTP path to serve metrics on (default /metrics) |
 | `--metrics-port` |  | int |  | With --metrics: the metrics server's port, 1024-65535 (default 9090) |
@@ -163,7 +163,7 @@ spawn launch <name> [flags]
 | `--wait-for-running` |  | bool | `true` | Wait until running |
 | `--wait-for-ssh` |  | bool |  | Linux: also wait (up to 2 min) for SSH on port 22; refused at once if no attached security group allows tcp/22. Off by default: spawn connect uses SSM, and spored is verified either way. --wait-for-ssh=false, given explicitly, skips the spored check too (Windows: skips the password wait) |
 | `--wait-timeout` |  | string |  | Timeout for --wait (e.g., 2h, 30m, 0=no timeout) |
-| `--wait` |  | bool |  | Wait for sweep/launch to complete (requires --detach) |
+| `--wait` |  | bool |  | Wait for a detached parameter sweep to complete (not with --no-detach) |
 | `--webhook-correlation` |  | string |  | Opaque blob echoed verbatim in the spot-webhook/completion-webhook payload so a consumer can correlate the event to its own record (never parsed by spawn) |
 | `--webhook-timeout` |  | string |  | Hard cap on the spot-webhook/completion-webhook POST so it can't eat the reclamation window or delay the completion action (default: 2s) |
 | `--yes` | `-y` | bool |  | Skip confirmation prompts: the launch summary and maximum-cost question on an interactive terminal, the cross-region data-locality warning, and launching without a TTL. Non-interactive runs never ask, but always print the maximum cost |
