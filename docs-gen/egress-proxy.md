@@ -54,6 +54,11 @@ whether the next --bootstrap-egress proxy launch would reuse it (and if not,
 why). For each VPC, also the two security groups and how many network
 interfaces use the clients group.
 
+The activity is what the proxy last published, and spored rewrites it at most
+every 10 minutes in steady use, so it can trail the proxy's real traffic: the
+last activity is "at or after" the time shown, and an idle expiry is "no
+earlier than" the one shown. The proxy itself ends on its own current clock.
+
 -o json prints the same as JSON, with stable snake_case keys.
 
 Read-only: ec2:DescribeInstances and ec2:DescribeSecurityGroups.

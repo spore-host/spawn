@@ -30,17 +30,33 @@ const (
 	ActivityPublishEvery = 10 * time.Minute
 )
 
-// ActivityPublisher decides when spored rewrites [ActivityTag]: at most once
-// per [ActivityPublishEvery], and only when the value it would write differs
-// from the last one written. The value has one-second resolution, so a proxy
-// in use writes about every ten minutes and an idle one never. Not safe for
-// concurrent use; spored calls it from one loop.
+// ActivityPublisher decides when spored rewrites [ActivityTag]. It writes only
+// when the value it would write differs from the last one written, and:
+//
+//   - after a quiet period, at once: when the published value is older than
+//     [ActivityPublishEvery], the first new activity is written on the tick
+//     that sees it (#1528). So once the tag says the proxy has been idle for
+//     the throttle window or longer, it is within a tick of the truth, and
+//     the edge that decides the idle expiry reaches the tag in seconds, not
+//     minutes;
+//   - otherwise, at most once per [ActivityPublishEvery] since the last
+//     attempt. A proxy in steady use writes once every ten minutes, and an
+//     idle one never. An after-quiet write can carry a value already minutes
+//     old, which then ages past the window early, so there can be two writes
+//     in one window, never three.
+//
+// A tag younger than the window can still trail the proxy's real last
+// activity by up to its own age, which is why `spawn egress-proxy status`
+// reports it as a lower bound. The value has one-second resolution. Not safe
+// for concurrent use; spored calls it from one loop.
 type ActivityPublisher struct {
 	// Every overrides [ActivityPublishEvery] when positive. Tests only.
 	Every time.Duration
 
-	attempted time.Time
-	written   string
+	attempted      time.Time // when the last write was attempted
+	attemptedValue string    // what it tried to write
+	written        string    // the last value that reached the tags
+	writtenTime    time.Time // written, parsed
 }
 
 // ActivityValue is how t is written into [ActivityTag].
@@ -49,7 +65,8 @@ func ActivityValue(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 // Due reports whether last should be written now, and the value to write. A
 // write that is due counts as an attempt whether or not it then succeeds (see
 // [ActivityPublisher.Written]), so a refused CreateTags is retried at the
-// throttle's pace, not every tick.
+// throttle's pace, not every tick: the after-quiet exemption applies only when
+// the previous attempt succeeded.
 func (p *ActivityPublisher) Due(last, now time.Time) (string, bool) {
 	if last.IsZero() {
 		return "", false
@@ -62,12 +79,23 @@ func (p *ActivityPublisher) Due(last, now time.Time) (string, bool) {
 	if every <= 0 {
 		every = ActivityPublishEvery
 	}
-	if !p.attempted.IsZero() && now.Sub(p.attempted) < every {
+	if !p.attempted.IsZero() && now.Sub(p.attempted) < every && !p.quiet(now, every) {
 		return "", false
 	}
-	p.attempted = now
+	p.attempted, p.attemptedValue = now, v
 	return v, true
 }
 
+// quiet reports whether the published value is at least every old and the
+// last attempt was the write that published it.
+func (p *ActivityPublisher) quiet(now time.Time, every time.Duration) bool {
+	return p.written != "" && p.attemptedValue == p.written && now.Sub(p.writtenTime) >= every
+}
+
 // Written records that v reached the instance's tags.
-func (p *ActivityPublisher) Written(v string) { p.written = v }
+func (p *ActivityPublisher) Written(v string) {
+	p.written = v
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		p.writtenTime = t
+	}
+}
