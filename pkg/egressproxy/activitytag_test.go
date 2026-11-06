@@ -167,10 +167,16 @@ func TestActivityPublisherProperties(t *testing.T) {
 	var last time.Time = t0
 	var writes []time.Time
 	pub := ""
+	busy, spell := false, 0
 	for i := 0; i < 20000; i++ {
 		now := t0.Add(time.Duration(i) * time.Minute)
-		// Bursty traffic: busy spells and quiet spells of random length.
-		if (i/int(1+rng.IntN(40)))%2 == 0 && rng.IntN(3) > 0 {
+		// Bursty traffic: busy and quiet spells of 1-40 ticks; a busy tick
+		// carries traffic two times in three, at a random second.
+		if spell == 0 {
+			busy, spell = !busy, 1+rng.IntN(40)
+		}
+		spell--
+		if busy && rng.IntN(3) > 0 {
 			last = now.Add(-time.Duration(rng.IntN(60)) * time.Second)
 		}
 		if v, due := p.Due(last, now); due {
