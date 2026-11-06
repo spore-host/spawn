@@ -50,7 +50,7 @@ with DAG(
     # Task 2: Wait for sweep completion
     wait_sweep = BashSensor(
         task_id='wait_sweep',
-        bash_command='spawn status $(cat /tmp/sweep_id.txt) --check-complete',
+        bash_command='spawn sweep status "$(cat /tmp/sweep_id.txt)" --check-complete',
         poke_interval=60,  # Check every 60 seconds
         timeout=7200,  # 2 hour timeout
         mode='poke',
@@ -63,7 +63,7 @@ with DAG(
             sweep_id = f.read().strip()
 
         result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--json'],
+            ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
             capture_output=True,
             text=True,
             check=True
@@ -72,12 +72,12 @@ with DAG(
         import json
         status = json.loads(result.stdout)
 
-        if status['Status'] != 'COMPLETED':
-            raise Exception(f"Sweep not completed: {status['Status']}")
+        if status['status'] != 'COMPLETED':
+            raise Exception(f"Sweep not completed: {status['status']}")
 
         print(f"Sweep {sweep_id} completed successfully!")
-        print(f"Total instances launched: {status['Launched']}")
-        print(f"Failed instances: {status['Failed']}")
+        print(f"Total instances launched: {status['launched']}")
+        print(f"Failed instances: {status['failed']}")
 
         return sweep_id
 

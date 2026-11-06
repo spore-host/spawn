@@ -11,7 +11,8 @@ manage.
 You run `nextflow` as usual (on your laptop or a head node). The plugin
 dispatches each task with `spawn launch`, the instance runs the task script,
 signals completion via `spored complete`, and terminates. Nextflow polls
-`spawn status` to detect completion.
+each task's instance with `spawn status <instance-id>` to detect completion (a
+task is one instance, not a sweep).
 
 ```
 process → spawn launch nf-<hash> --on-complete terminate → runs task → spored complete → terminates

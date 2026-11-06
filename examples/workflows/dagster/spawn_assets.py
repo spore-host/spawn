@@ -57,7 +57,7 @@ def sweep_completion(context: AssetExecutionContext, sweep_id: str, config: Spaw
 
         # Check status
         result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--check-complete'],
+            ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
             capture_output=True
         )
 
@@ -77,16 +77,16 @@ def sweep_completion(context: AssetExecutionContext, sweep_id: str, config: Spaw
 
     # Get final status
     result = subprocess.run(
-        ['spawn', 'status', sweep_id, '--json'],
+        ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
         capture_output=True,
         text=True,
         check=True
     )
 
     status = json.loads(result.stdout)
-    context.log.info(f"Final status: {status['Status']}")
-    context.log.info(f"Launched: {status['Launched']}/{status['TotalParams']}")
-    context.log.info(f"Failed: {status['Failed']}")
+    context.log.info(f"Final status: {status['status']}")
+    context.log.info(f"Launched: {status['launched']}/{status['total_params']}")
+    context.log.info(f"Failed: {status['failed']}")
 
     return status
 
@@ -98,10 +98,10 @@ def sweep_results(context: AssetExecutionContext, sweep_completion: dict) -> dic
 
     # Extract key metrics
     results = {
-        'total_params': sweep_completion['TotalParams'],
-        'launched': sweep_completion['Launched'],
-        'failed': sweep_completion['Failed'],
-        'success_rate': sweep_completion['Launched'] / sweep_completion['TotalParams'],
+        'total_params': sweep_completion['total_params'],
+        'launched': sweep_completion['launched'],
+        'failed': sweep_completion['failed'],
+        'success_rate': sweep_completion['launched'] / sweep_completion['total_params'],
     }
 
     context.log.info(f"Success rate: {results['success_rate']:.1%}")
@@ -135,23 +135,34 @@ def launch_sweep_op(context, params_file: str) -> str:
 
 @op
 def wait_sweep_op(context, sweep_id: str) -> dict:
-    """Wait for sweep completion operation."""
+    """Wait for the sweep launch_sweep_op started, then return its status.
+
+    This polls the existing sweep. It must not run `spawn launch` again: that
+    starts a second sweep. To launch and wait in one step instead, launch with
+    `--detach --wait --wait-timeout 2h`.
+    """
     context.log.info(f"Waiting for: {sweep_id}")
 
-    # Simple approach using --wait
-    result = subprocess.run(
-        ['spawn', 'launch', '--param-file', 'sweep.yaml',
-         '--detach', '--wait', '--wait-timeout', '2h'],
-        capture_output=True,
-        text=True
-    )
-
-    if result.returncode != 0:
-        raise Exception(f"Sweep failed: {result.stderr}")
+    deadline = time.time() + 2 * 3600
+    while True:
+        # Exit codes: 0=complete 1=failed 2=running 3=error
+        result = subprocess.run(
+            ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
+            capture_output=True
+        )
+        if result.returncode == 0:
+            break
+        if result.returncode == 1:
+            raise Exception(f"Sweep failed: {sweep_id}")
+        if result.returncode == 3:
+            raise Exception(f"Error querying status: {sweep_id}")
+        if time.time() > deadline:
+            raise Exception(f"Sweep timeout: {sweep_id}")
+        time.sleep(60)
 
     # Get status
     result = subprocess.run(
-        ['spawn', 'status', sweep_id, '--json'],
+        ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
         capture_output=True,
         text=True,
         check=True

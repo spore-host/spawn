@@ -41,13 +41,13 @@ async def launch_spawn_sweep(params_file: str) -> str:
 async def check_sweep_status(sweep_id: str) -> dict:
     """Check sweep status using --check-complete."""
     result = subprocess.run(
-        ['spawn', 'status', sweep_id, '--check-complete'],
+        ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
         capture_output=True
     )
 
     # Get detailed status
     status_result = subprocess.run(
-        ['spawn', 'status', sweep_id, '--json'],
+        ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
         capture_output=True,
         text=True,
         check=True
@@ -57,10 +57,10 @@ async def check_sweep_status(sweep_id: str) -> dict:
 
     return {
         'exit_code': result.returncode,
-        'status': status['Status'],
-        'launched': status['Launched'],
-        'total': status['TotalParams'],
-        'failed': status['Failed'],
+        'status': status['status'],
+        'launched': status['launched'],
+        'total': status['total_params'],
+        'failed': status['failed'],
         'full_status': status
     }
 
@@ -73,10 +73,10 @@ async def process_sweep_results(status_data: dict) -> dict:
     full_status = status_data['full_status']
 
     results = {
-        'total_params': full_status['TotalParams'],
-        'launched': full_status['Launched'],
-        'failed': full_status['Failed'],
-        'success_rate': full_status['Launched'] / full_status['TotalParams']
+        'total_params': full_status['total_params'],
+        'launched': full_status['launched'],
+        'failed': full_status['failed'],
+        'success_rate': full_status['launched'] / full_status['total_params']
     }
 
     activity.logger.info(f"Success rate: {results['success_rate']:.1%}")

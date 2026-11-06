@@ -59,8 +59,9 @@ func (l exampleLaunch) partial() bool {
 	return false
 }
 
-// placeholderMarker stands for a non-literal Python expression in a
-// subprocess list, e.g. params_file or str(output_file).
+// placeholderMarker stands for a CWL input's value. A non-literal Python
+// expression in a subprocess list (params_file, str(output_file)) becomes
+// {expr:<the expression>}, a placeholder that keeps its text.
 const placeholderMarker = "{expr}"
 
 func isPlaceholder(s string) bool {
@@ -75,6 +76,25 @@ var (
 
 // findExampleLaunches walks examples/ and extracts every invocation.
 func findExampleLaunches(t *testing.T, root string) []exampleLaunch {
+	t.Helper()
+	return findExampleInvocations(t, root, invocationPattern{shell: shellLaunch, py: pyListLaunch, cwl: true})
+}
+
+// invocationPattern says which invocations findExampleInvocations extracts.
+// A regexp with a capture group starts the extracted argv at the group (so
+// `spawn sweep status x` yields [sweep status x]); one without starts it after
+// the match (so `spawn launch x` yields [x]).
+type invocationPattern struct {
+	shell, py *regexp.Regexp
+	// cwl: also read `baseCommand: [spawn, launch]` CWL tools.
+	cwl bool
+	// quotedInPython: in a .py file, take a shell form only inside a string
+	// literal, so a docstring's "launch a spawn sweep and wait" is prose.
+	quotedInPython bool
+}
+
+// findExampleInvocations walks root and extracts every invocation p matches.
+func findExampleInvocations(t *testing.T, root string, p invocationPattern) []exampleLaunch {
 	t.Helper()
 	var out []exampleLaunch
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -97,14 +117,16 @@ func findExampleLaunches(t *testing.T, root string) []exampleLaunch {
 		lines := strings.Split(string(b), "\n")
 		switch {
 		case strings.HasSuffix(path, ".md"):
-			out = append(out, markdownLaunches(path, lines)...)
+			out = append(out, shellInvocations(path, lines, markdownCode(lines), p)...)
 		case strings.HasSuffix(path, ".py"):
-			out = append(out, pythonLaunches(path, lines)...)
-			out = append(out, shellLaunches(path, lines, nil)...)
+			out = append(out, pythonInvocations(path, lines, p.py)...)
+			out = append(out, shellInvocations(path, lines, nil, p)...)
 		case strings.HasSuffix(path, ".cwl"):
-			out = append(out, cwlLaunches(path, lines)...)
+			if p.cwl {
+				out = append(out, cwlLaunches(path, lines)...)
+			}
 		default:
-			out = append(out, shellLaunches(path, lines, nil)...)
+			out = append(out, shellInvocations(path, lines, nil, p)...)
 		}
 		return nil
 	})
@@ -122,9 +144,10 @@ func exampleTextFile(name string) bool {
 	return name == "Snakefile"
 }
 
-// markdownLaunches reads only code: fenced blocks, and inline `code` spans
-// in prose, since prose may say "spawn launch" in a sentence.
-func markdownLaunches(path string, lines []string) []exampleLaunch {
+// markdownCode marks the lines of a Markdown file that are code: only those,
+// and inline `code` spans in prose, are read, since prose may say "spawn
+// launch" in a sentence.
+func markdownCode(lines []string) []bool {
 	inFence := make([]bool, len(lines))
 	fenced := false
 	for i, l := range lines {
@@ -134,16 +157,25 @@ func markdownLaunches(path string, lines []string) []exampleLaunch {
 		}
 		inFence[i] = fenced
 	}
-	return shellLaunches(path, lines, inFence)
+	return inFence
 }
 
-// shellLaunches extracts shell-form invocations. With code non-nil (a
+// argvStart is where the argv of a match of a pattern's regexp begins: at its
+// capture group if it has one, else after the match.
+func argvStart(loc []int) int {
+	if len(loc) >= 4 && loc[2] >= 0 {
+		return loc[2]
+	}
+	return loc[1]
+}
+
+// shellInvocations extracts shell-form invocations. With code non-nil (a
 // Markdown file), a line outside a fence contributes only its backtick spans.
-func shellLaunches(path string, lines []string, code []bool) []exampleLaunch {
+func shellInvocations(path string, lines []string, code []bool, p invocationPattern) []exampleLaunch {
 	var out []exampleLaunch
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
-		for _, loc := range shellLaunch.FindAllStringIndex(line, -1) {
+		for _, loc := range p.shell.FindAllStringSubmatchIndex(line, -1) {
 			start := loc[0]
 			// The delimiter a quoted or inline-code invocation ends at.
 			var closer byte
@@ -156,7 +188,10 @@ func shellLaunches(path string, lines []string, code []bool) []exampleLaunch {
 			if code != nil && !code[i] && closer != '`' {
 				continue // prose
 			}
-			text, last := line[loc[1]:], i
+			if p.quotedInPython && closer == 0 && strings.HasSuffix(path, ".py") {
+				continue // a docstring or comment
+			}
+			text, last := line[argvStart(loc):], i
 			if closer != 0 {
 				j := strings.IndexByte(text, closer)
 				if j >= 0 {
@@ -255,18 +290,21 @@ func shellWords(s string) []string {
 	return words
 }
 
-// pythonLaunches extracts ['spawn', 'launch', ...] subprocess lists, which may
-// span lines. A string literal is a word; anything else is a placeholder.
-func pythonLaunches(path string, lines []string) []exampleLaunch {
+// pythonInvocations extracts ['spawn', 'launch', ...] subprocess lists (or
+// whatever re matches), which may span lines. A string literal is a word;
+// anything else is a placeholder that keeps the expression's text, so
+// {expr:sweep_id} still says what it stands for.
+func pythonInvocations(path string, lines []string, re *regexp.Regexp) []exampleLaunch {
 	var out []exampleLaunch
 	src := strings.Join(lines, "\n")
-	for _, loc := range pyListLaunch.FindAllStringIndex(src, -1) {
-		end := strings.IndexByte(src[loc[1]:], ']')
+	for _, loc := range re.FindAllStringSubmatchIndex(src, -1) {
+		from := argvStart(loc)
+		end := strings.IndexByte(src[from:], ']')
 		if end < 0 {
 			continue
 		}
 		var argv []string
-		for _, item := range strings.Split(src[loc[1]:loc[1]+end], ",") {
+		for _, item := range strings.Split(src[from:from+end], ",") {
 			item = strings.TrimSpace(item)
 			if i := strings.Index(item, "#"); i >= 0 && !strings.ContainsAny(item[:i], `'"`) {
 				item = strings.TrimSpace(item[:i])
@@ -277,7 +315,7 @@ func pythonLaunches(path string, lines []string) []exampleLaunch {
 			if m := pyQuoted.FindStringSubmatch(item); m != nil && !strings.HasPrefix(item, "f") {
 				argv = append(argv, m[2])
 			} else {
-				argv = append(argv, placeholderMarker)
+				argv = append(argv, "{expr:"+item+"}")
 			}
 		}
 		line := 1 + strings.Count(src[:loc[0]], "\n")

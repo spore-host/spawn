@@ -1,52 +1,58 @@
-# Machine Learning Training with Data Staging
+# Machine Learning Training against a Staged Dataset, across Regions
 #
-# This example demonstrates staging a large training dataset
-# across multiple regions for distributed training
+# Trains one ensemble member per row, each in its own region, against a copy
+# of the training dataset you have already staged in that region (spawn stage
+# was removed in #805: copy it once per region with aws s3 cp, or use an FSx
+# data-repository association via --fsx-import-path). Reading an in-region
+# copy avoids paying cross-region transfer for every instance that reads it.
+#
+# Use with (from the repo root):
+#   spawn launch --param-file examples/staging/ml-training.yaml --sweep-name ml-training \
+#     --s3-read my-training-data-us-east-1 --s3-read my-training-data-us-west-2 \
+#     --s3-read my-training-data-eu-west-1 --s3-write my-results
+#
+# Only defaults:, grid: and params: are read at the top level of a param file
+# (spawn#530). A row's region overrides the default; its other keys reach the
+# instance as $PARAM_<key> (here $PARAM_data_bucket and $PARAM_seed), and
+# SWEEP_ID / SWEEP_INDEX name the sweep and the row. The rows train
+# independently: a sweep does not wire instances together, so this is an
+# ensemble, not one distributed job (for that, see --count with --mpi).
 
-# Step 1: Stage training data
-# spawn stage upload imagenet-2012.tar.gz \
-#   --regions us-east-1,us-west-2,eu-west-1 \
-#   --dest /mnt/data/training.tar.gz
+defaults:
+  instance_type: p3.2xlarge  # 1x V100 GPU
+  spot: true
+  ttl: 12h
+  on_complete: terminate
+  command: |
+    set -e
+    mkdir -p /mnt/data && cd /mnt/data
 
-# Step 2: Launch distributed training
-sweep_name: ml-training
-stage_id: stage-imagenet-abc123  # From step 1
-count: 30
-distribution: even  # 10 instances per region
+    # The dataset staged in this row's region
+    echo "Fetching training data from s3://${PARAM_data_bucket}..."
+    aws s3 cp "s3://${PARAM_data_bucket}/imagenet-2012.tar.gz" training.tar.gz
+    tar xzf training.tar.gz
 
-regions:
-  - us-east-1
-  - us-west-2
-  - eu-west-1
+    pip3 install torch torchvision --quiet
 
-instance_type: p3.2xlarge  # 1× V100 GPU
-spot: true
+    # Train one ensemble member (bring your own train.py)
+    echo "Training ensemble member ${SWEEP_INDEX} (seed ${PARAM_seed})..."
+    python3 /opt/train.py \
+      --data /mnt/data/imagenet/ \
+      --seed "${PARAM_seed}" \
+      --batch-size 256 \
+      --epochs 90 \
+      --output /tmp/model.pt
 
-base_command: |
-  #!/bin/bash
-  set -e
+    aws s3 cp /tmp/model.pt "s3://my-results/models/${SWEEP_ID}/member-${SWEEP_INDEX}.pt"
+    echo "Training complete"
 
-  # Training data already downloaded to /mnt/data/training.tar.gz
-  echo "Extracting training data..."
-  cd /mnt/data
-  tar xzf training.tar.gz
-
-  # Install dependencies
-  pip3 install torch torchvision --quiet
-
-  # Distributed training with PyTorch
-  echo "Starting training (rank ${SWEEP_INDEX}/30)..."
-  python3 /opt/train_distributed.py \
-    --data /mnt/data/imagenet/ \
-    --rank ${SWEEP_INDEX} \
-    --world-size 30 \
-    --batch-size 256 \
-    --epochs 90 \
-    --output s3://my-results/models/rank-${SWEEP_INDEX}.pt
-
-  echo "Training complete"
-
-# Cost savings:
-# Without staging: 200GB × 30 instances × 2 regions × $0.09/GB = $1,080
-# With staging: 200GB × 2 regions × $0.02/GB = $8
-# Savings: $1,072 (99.3%)
+params:
+  - region: us-east-1
+    data_bucket: my-training-data-us-east-1
+    seed: 1
+  - region: us-west-2
+    data_bucket: my-training-data-us-west-2
+    seed: 2
+  - region: eu-west-1
+    data_bucket: my-training-data-eu-west-1
+    seed: 3
