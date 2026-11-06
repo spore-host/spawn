@@ -389,9 +389,12 @@ func runSlurmSubmit(cmd *cobra.Command, args []string) error {
 // slurmLaunchArgs is the spawn command line that launches the param file
 // converted from job, without the leading binary name.
 //
-//   - The spore name is required by launch (#1217: submit used to pass none, so
-//     every submit failed after the user approved the cost). It comes from
-//     slurm.SporeName, which makes a valid DNS label of the job name.
+//   - The spore name, from slurm.SporeName, which makes a valid DNS label of
+//     the job name. #1217: launch required one and submit passed none, so every
+//     submit failed after the user approved the cost. A sweep no longer needs
+//     one (#1532), but each row is named from the same SporeName (convert.go),
+//     so passing it is harmless, and keeps the printed "To launch:" line valid
+//     on an older spawn.
 //   - --no-detach, because a detached sweep launches its rows with no user data
 //     and so never runs their command (#1323); the foreground path runs it.
 //   - --max-concurrent carries --array's %N limit, which launch accepts only as
