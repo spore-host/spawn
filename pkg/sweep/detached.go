@@ -382,7 +382,7 @@ func ValidateParameterSets(ctx context.Context, cfg aws.Config, params *ParamFil
 	stsClient := sts.NewFromConfig(cfg)
 
 	// Assume cross-account role
-	roleArn := fmt.Sprintf("arn:aws:iam::%s:role/SpawnSweepCrossAccountRole", accountID)
+	roleArn := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, CrossAccountRoleName)
 	assumeResult, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
 		RoleArn:         aws.String(roleArn),
 		RoleSessionName: aws.String("spawn-validate-" + time.Now().Format("20060102-150405")),
@@ -457,7 +457,7 @@ func TerminateSweepInstances(ctx context.Context, cfg aws.Config, accountID, reg
 	stsClient := sts.NewFromConfig(cfg)
 
 	// Assume cross-account role
-	roleArn := fmt.Sprintf("arn:aws:iam::%s:role/SpawnSweepCrossAccountRole", accountID)
+	roleArn := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, CrossAccountRoleName)
 	assumeResult, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
 		RoleArn:         aws.String(roleArn),
 		RoleSessionName: aws.String("spawn-cancel-" + time.Now().Format("20060102-150405")),

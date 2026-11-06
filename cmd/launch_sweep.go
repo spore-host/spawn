@@ -19,17 +19,10 @@ import (
 )
 
 func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, plat *platform.Platform, auditLog *audit.AuditLogger) error {
-	// Validate mutually exclusive flags
-	if detach && noDetach {
-		return fmt.Errorf("--detach and --no-detach are mutually exclusive")
-	}
-	if maxConcurrentAuto && maxConcurrent > 0 {
-		return fmt.Errorf("--max-concurrent-auto and --max-concurrent are mutually exclusive — pick one")
-	}
-
-	// Validate workflow integration flags
-	if wait && !detach {
-		return fmt.Errorf("--wait requires --detach (only works with Lambda orchestration)")
+	// The flags' own consistency, before the param file is read. The path
+	// itself needs the row count, so it is decided once the file is parsed.
+	if _, err := sweepDispatch(detach, noDetach, maxConcurrent, maxConcurrentAuto, 1); err != nil {
+		return err
 	}
 
 	// Parse parameter file
@@ -128,33 +121,43 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// the CLI flag > the file's defaults:.
 	appliedControls = append(appliedControls, applyCLIVolumeSizeToSweep(paramFormat)...)
 
-	// AUTO-ENABLE DETACHED MODE for parameter sweeps to prevent zombie instances
-	// If the CLI disconnects (laptop sleep/shutdown), detached mode ensures:
+	// The orchestration path, decided once (#1535): the refusals, --wait, the
+	// summary and the dispatch below all read it. A sweep is detached unless
+	// --no-detach says otherwise, whether or not --detach was given.
+	dispatch, err := sweepDispatch(detach, noDetach, maxConcurrent, maxConcurrentAuto, len(paramFormat.Params))
+	if err != nil {
+		return err
+	}
+	if err := refuseWaitOnPath(wait, dispatch); err != nil {
+		return err
+	}
+
+	// DETACHED MODE is the default for parameter sweeps, to prevent zombie
+	// instances. If the CLI disconnects (laptop sleep/shutdown), detached mode
+	// ensures:
 	// - Sweep state persists in DynamoDB
 	// - Lambda continues orchestration
 	// - User can resume monitoring with 'spawn sweep status <sweep-id>'
-	if !detach && !noDetach {
-		detach = true
-		fmt.Fprintf(os.Stderr, "\n⚠️  Auto-enabling --detach for parameter sweep\n")
-		fmt.Fprintf(os.Stderr, "   This prevents zombie instances if CLI disconnects.\n")
-		fmt.Fprintf(os.Stderr, "   Resume monitoring with: spawn sweep status <sweep-id>\n")
-
-		// If maxConcurrent is 0 (launch all at once), set a reasonable default —
-		// unless --max-concurrent-auto will derive a real one below, in which
-		// case this arbitrary fallback would just be overwritten (and its
-		// stderr message would print out of order relative to the derived value).
-		if maxConcurrent == 0 && !maxConcurrentAuto {
-			// Default to number of params or 10, whichever is less
-			defaultConcurrent := len(paramFormat.Params)
-			if defaultConcurrent > 10 {
-				defaultConcurrent = 10
+	if dispatch.path == sweepDetached {
+		if dispatch.autoDetached {
+			fmt.Fprintf(os.Stderr, "\n⚠️  Auto-enabling --detach for parameter sweep\n")
+			fmt.Fprintf(os.Stderr, "   This prevents zombie instances if CLI disconnects.\n")
+			fmt.Fprintf(os.Stderr, "   Resume monitoring with: spawn sweep status <sweep-id>\n")
+		}
+		// No --max-concurrent (and no --max-concurrent-auto, which derives a
+		// real one below): min(rows, 10), the same for an explicit --detach
+		// as for the default one (#1535).
+		if dispatch.defaulted {
+			if !dispatch.autoDetached {
+				fmt.Fprintf(os.Stderr, "\n")
 			}
-			maxConcurrent = defaultConcurrent
-			fmt.Fprintf(os.Stderr, "   Setting --max-concurrent=%d for controlled launch\n", maxConcurrent)
+			fmt.Fprintf(os.Stderr, "   Setting --max-concurrent=%d for controlled launch\n", dispatch.maxConcurrent)
 			fmt.Fprintf(os.Stderr, "   (Override with --max-concurrent=N if needed)\n")
 		}
-		fmt.Fprintf(os.Stderr, "\n")
-	} else if noDetach {
+		if dispatch.autoDetached || dispatch.defaulted {
+			fmt.Fprintf(os.Stderr, "\n")
+		}
+	} else {
 		// User explicitly disabled detached mode - warn about zombie instances
 		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: --no-detach specified\n")
 		fmt.Fprintf(os.Stderr, "   If CLI disconnects (laptop sleep/shutdown), instances may become zombies.\n")
@@ -202,11 +205,10 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	}
 
 	// --max-concurrent-auto (#492): resolve region (if not already pinned) and
-	// derive a real quota-backed ceiling BEFORE the detached/non-detached branch
-	// below, since a sweep auto-enables --detach and that branch needs a
-	// concrete maxConcurrent > 0 to take the (cheaper, Lambda-orchestrated) path
-	// rather than falling through to the foreground one.
-	if maxConcurrentAuto {
+	// derive a real quota-backed ceiling BEFORE the dispatch below. The path is
+	// already decided (sweepDispatch); this only fills in the number, which is
+	// always at least 1.
+	if dispatch.deriveAuto {
 		region := baseConfig.Region
 		if region == "" {
 			resolved, why, derr := resolveLaunchRegion(ctx, "", baseConfig.InstanceType)
@@ -230,19 +232,19 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 			return fmt.Errorf("--max-concurrent-auto: %w", derr)
 		}
 		fmt.Fprintf(os.Stderr, "✓ --max-concurrent-auto: derived %d (account quota headroom in %s)\n", derived, region)
-		maxConcurrent = derived
+		dispatch = dispatch.withDerived(derived)
 	}
 
 	fmt.Fprintf(os.Stderr, "\n🧪 Parameter Sweep: %s\n", sweepID)
 	fmt.Fprintf(os.Stderr, "   Parameters: %d\n", len(paramFormat.Params))
-	if maxConcurrent > 0 {
-		fmt.Fprintf(os.Stderr, "   Max Concurrent: %d\n", maxConcurrent)
+	if dispatch.maxConcurrent > 0 {
+		fmt.Fprintf(os.Stderr, "   Max Concurrent: %d\n", dispatch.maxConcurrent)
 	} else {
 		fmt.Fprintf(os.Stderr, "   Mode: All at once\n")
 	}
-	if detach {
-		fmt.Fprintf(os.Stderr, "   Orchestration: Lambda (detached)\n")
-	}
+	// From the path the sweep takes, never from the flags (#1535): this line
+	// once said "Lambda (detached)" for a sweep the foreground path launched.
+	fmt.Fprintf(os.Stderr, "   Orchestration: %s\n", dispatch.orchestrationLine())
 	if len(appliedControls) > 0 {
 		fmt.Fprintf(os.Stderr, "   From the command line: %s (each row's own value wins)\n",
 			strings.Join(appliedControls, ", "))
@@ -256,9 +258,8 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// launchSweepDetached, which meant any sweep reaching the FOREGROUND path
 	// launched every row while the user was asking for a preview — via
 	// --no-detach (the documented advice for a heterogeneous sweep, since only
-	// the foreground path detects an AMI per config, #372), or via an explicit
-	// --detach with no --max-concurrent, which leaves maxConcurrent at 0 and so
-	// fails the `detach && maxConcurrent > 0` condition below.
+	// the foreground path detects an AMI per config, #372), or (until #1535) via
+	// an explicit --detach with no --max-concurrent.
 	//
 	// Deliberately placed before the AWS client is constructed, so a preview never
 	// builds the launch machinery. Pricing each row does now reach AWS — it asks
@@ -304,10 +305,17 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	//
 	// A foreground sweep launches with the caller's credentials, so it may use
 	// a nested-spawn role, but only on rows with a TTL (#1375). (A detached one
-	// refuses the role above, whatever the TTL, #1372.) Same condition as the
-	// dispatch below, so each sweep gets the refusal of the path it takes.
-	if detach && maxConcurrent > 0 {
+	// refuses the role above, whatever the TTL, #1372.) Keyed on the same
+	// decision as the dispatch below, so each sweep gets the refusal of the
+	// path it takes.
+	if dispatch.path == sweepDetached {
 		if err := refuseUnpassableDetachedProfiles(paramFormat); err != nil {
+			return err
+		}
+		// The orchestrator launches every member through
+		// SpawnSweepCrossAccountRole: without it the sweep could launch
+		// nothing, so refuse before anything is created (#1535).
+		if err := requireDetachedSweepRole(ctx, ""); err != nil {
 			return err
 		}
 	} else if err := refuseNestedSweepRowsWithoutTTL(paramFormat, instanceProfile); err != nil {
@@ -318,9 +326,8 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return err
 	}
 
-	// Check for detached mode (Lambda orchestration)
-	if detach && maxConcurrent > 0 {
-		return launchSweepDetached(ctx, paramFormat, baseConfig, plat, sweepID, name, maxConcurrent, launchDelay, iamRecord)
+	if dispatch.path == sweepDetached {
+		return launchSweepDetached(ctx, paramFormat, baseConfig, plat, sweepID, name, dispatch.maxConcurrent, launchDelay, iamRecord)
 	}
 
 	// The config the members are built from, for the checkpoint: a resume
@@ -539,7 +546,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	guard := newFleetGuard("sweep", os.Stderr, awsClient, launchFleetVerifier(awsClient), keepOnError)
 	return runSweepLaunch(ctx, awsClient, guard, sweepRun{
 		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
-		maxConcurrent: maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
+		maxConcurrent: dispatch.maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
 		record: record,
 	})
 }

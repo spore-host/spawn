@@ -137,53 +137,7 @@ type cmdListedPkg struct {
 // gate cannot drive it, so it cannot vouch for it.
 func discoverWrapSites(t *testing.T) []wrapSite {
 	t.Helper()
-	list := exec.Command("go", "list", "-deps", "-export", "-json", ".")
-	list.Stderr = os.Stderr
-	out, err := list.Output()
-	if err != nil {
-		t.Fatalf("go list: %v", err)
-	}
-	exports := map[string]string{}
-	var self cmdListedPkg
-	dec := json.NewDecoder(strings.NewReader(string(out)))
-	for {
-		var p cmdListedPkg
-		if err := dec.Decode(&p); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		exports[p.ImportPath] = p.Export
-		self = p // -deps lists the named package last
-	}
-	if !strings.HasSuffix(self.ImportPath, "/spawn/cmd") || len(self.CgoFiles) > 0 {
-		t.Fatalf("go list: last package is %s (cgo files %v), want package cmd without cgo", self.ImportPath, self.CgoFiles)
-	}
-
-	fset := token.NewFileSet()
-	var files []*ast.File
-	for _, name := range self.GoFiles {
-		f, err := parser.ParseFile(fset, filepath.Join(self.Dir, name), nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files = append(files, f)
-	}
-	imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
-		f, ok := exports[path]
-		if !ok || f == "" {
-			return nil, errors.New("no export data for " + path)
-		}
-		return os.Open(f)
-	})
-	info := &types.Info{
-		Uses:       map[*ast.Ident]types.Object{},
-		Defs:       map[*ast.Ident]types.Object{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-	}
-	if _, err := (&types.Config{Importer: imp}).Check(self.ImportPath, fset, files, info); err != nil {
-		t.Fatalf("type-check %s: %v", self.ImportPath, err)
-	}
+	fset, files, info := typeCheckCmdPackage(t)
 
 	var sites []wrapSite
 	errorCalls := 0
@@ -329,4 +283,60 @@ func isFmtErrorf(info *types.Info, call *ast.CallExpr) bool {
 	}
 	fn, ok := info.Uses[sel.Sel].(*types.Func)
 	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "fmt" && fn.Name() == "Errorf"
+}
+
+// typeCheckCmdPackage type-checks package cmd's non-test files from the
+// compiler's export data of its dependencies, for the source gates that need
+// to know what an identifier refers to.
+func typeCheckCmdPackage(t *testing.T) (*token.FileSet, []*ast.File, *types.Info) {
+	t.Helper()
+	list := exec.Command("go", "list", "-deps", "-export", "-json", ".")
+	list.Stderr = os.Stderr
+	out, err := list.Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	exports := map[string]string{}
+	var self cmdListedPkg
+	dec := json.NewDecoder(strings.NewReader(string(out)))
+	for {
+		var p cmdListedPkg
+		if err := dec.Decode(&p); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		exports[p.ImportPath] = p.Export
+		self = p // -deps lists the named package last
+	}
+	if !strings.HasSuffix(self.ImportPath, "/spawn/cmd") || len(self.CgoFiles) > 0 {
+		t.Fatalf("go list: last package is %s (cgo files %v), want package cmd without cgo", self.ImportPath, self.CgoFiles)
+	}
+
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, name := range self.GoFiles {
+		f, err := parser.ParseFile(fset, filepath.Join(self.Dir, name), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
+		f, ok := exports[path]
+		if !ok || f == "" {
+			return nil, errors.New("no export data for " + path)
+		}
+		return os.Open(f)
+	})
+	info := &types.Info{
+		Uses:       map[*ast.Ident]types.Object{},
+		Defs:       map[*ast.Ident]types.Object{},
+		Selections: map[*ast.SelectorExpr]*types.Selection{},
+	}
+	if _, err := (&types.Config{Importer: imp}).Check(self.ImportPath, fset, files, info); err != nil {
+		t.Fatalf("type-check %s: %v", self.ImportPath, err)
+	}
+
+	return fset, files, info
 }

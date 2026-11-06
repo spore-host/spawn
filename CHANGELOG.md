@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Help text:** `--max-concurrent` no longer says 0 is unlimited (a detached sweep runs min(rows, 10) at a time; only `--no-detach` runs all at once), `--detach` says it is the default and what it does without `--max-concurrent`, and `--wait` says it needs a detached sweep rather than `--detach`. `spawn resume` says that a detached sweep (the default) resumes with `--detach`, and a missing checkpoint now says so too (#1535).
+
+### Fixed
+
+- **An explicit `--detach` without `--max-concurrent` now really detaches** (#1535). It ran the sweep in the foreground: the CLI launched every member itself, nothing reached the sweep orchestrator and no orchestration record was written (`spawn sweep status <id>` said "not found"), while the summary printed `Orchestration: Lambda (detached)`. The dispatch took the orchestrator only for `detach && maxConcurrent > 0`, and only the default (no flag) sweep set a max-concurrent; an explicit `--detach` skipped that. It now gets the default's rule too: min(rows, 10) at a time, with the same "Setting --max-concurrent=N" message. A sweep with no detach flag is unchanged (detached, min(rows, 10)), and so is `--no-detach` (foreground, with its TTL or idle-timeout requirement on every row).
+  - **One decision:** the path is decided once (`sweepDispatch`), and the summary, `--wait`, the refusals and the dispatch all read it. A source gate fails CI if anything else reads the `--detach`/`--no-detach`/`--max-concurrent` globals.
+  - **The summary** prints the path taken: `Orchestration: Lambda (detached)` for a detached sweep, and `Orchestration: foreground (--no-detach: …)` for a foreground one, which used to print no orchestration line at all and now never mentions Lambda.
+  - **Refusals follow the path:** `--detach` without `--max-concurrent` used to get the foreground refusals (a nested-spawn role row needed `--ttl`, #1375) instead of the detached ones (#1331/#1372). It now gets the detached ones, like every detached sweep.
+  - **`--wait` follows the path:** it is accepted on a default (no flag) sweep, which is detached; it was refused there with "--wait requires --detach". It is still refused with `--no-detach`. `--detach --wait` without `--max-concurrent` used to launch in the foreground and return without waiting; it now waits for the orchestrator. The workflow examples (`examples/workflows/*`) pass exactly `--detach --wait`.
+  - **A detached sweep needs `SpawnSweepCrossAccountRole` in the account its members launch in**, as it always has: the orchestrator launches every member through it. A sweep that relied on `--detach` quietly running in the foreground now reaches the orchestrator and so needs the role. Without it, `spawn launch` and `spawn resume --detach` now refuse before creating anything (no IAM role, instance profile, egress proxy, params upload or orchestration record). They used to create all of that and report the sweep queued, and then the orchestrator launched nothing. The check is an `iam:GetRole`, which `spawn launch` already calls. Only a definite absence refuses; if the caller may not look, the sweep warns and goes on, as before. `--no-detach` needs no such role.
+  - **`--max-concurrent` must be 0 or more.** A negative value used to run the sweep in the foreground, all at once.
+
 ## [0.160.0] - 2026-11-05
 
 ### Added

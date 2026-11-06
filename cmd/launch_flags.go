@@ -461,11 +461,11 @@ func init() {
 	// So it is deprecated toward grid: rather than implemented a second time.
 	_ = launchCmd.Flags().MarkDeprecated("cartesian",
 		"it never did anything; use the param file's grid: key for a cartesian product")
-	launchCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max instances running simultaneously (0 = unlimited)")
+	launchCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max instances running simultaneously. 0 (the default): a detached sweep runs min(rows, 10) at a time, a --no-detach sweep all at once")
 	launchCmd.Flags().BoolVar(&maxConcurrentAuto, "max-concurrent-auto", false, "Derive --max-concurrent from the account's real AWS quota headroom for the sweep's instance type(s)/region, instead of a user-supplied number (spawn#492)")
 	launchCmd.Flags().IntVar(&maxConcurrentPerRegion, "max-concurrent-per-region", 0, "Max instances running simultaneously per region (0 = unlimited)")
 	launchCmd.Flags().StringVar(&launchDelay, "launch-delay", "0s", "Delay between instance launches (e.g., 5s)")
-	launchCmd.Flags().BoolVar(&detach, "detach", false, "Run sweep orchestration in Lambda (auto-enabled for parameter sweeps)")
+	launchCmd.Flags().BoolVar(&detach, "detach", false, "Run sweep orchestration in Lambda (the default for parameter sweeps; without --max-concurrent, min(rows, 10) at a time)")
 	launchCmd.Flags().BoolVar(&noDetach, "no-detach", false, "Disable auto-detach for parameter sweeps (requires --ttl or --idle-timeout)")
 	launchCmd.Flags().StringVar(&sweepName, "sweep-name", "", "Human-readable sweep identifier (auto-generated if empty)")
 	launchCmd.Flags().Float64Var(&budget, "budget", 0, "Budget limit in dollars for parameter sweeps (0 = no limit)")
@@ -525,7 +525,7 @@ func init() {
 
 	// Workflow integration
 	launchCmd.Flags().StringVar(&outputIDFile, "output-id", "", "Write sweep/instance ID to file for scripting")
-	launchCmd.Flags().BoolVar(&wait, "wait", false, "Wait for sweep/launch to complete (requires --detach)")
+	launchCmd.Flags().BoolVar(&wait, "wait", false, "Wait for a detached parameter sweep to complete (not with --no-detach)")
 	launchCmd.Flags().StringVar(&waitTimeout, "wait-timeout", "0", "Timeout for --wait (e.g., 2h, 30m, 0=no timeout)")
 
 	// Team sharing
