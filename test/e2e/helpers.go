@@ -78,13 +78,10 @@ func runID(t *testing.T) string {
 func loadAWSConfig(t *testing.T) aws.Config {
 	t.Helper()
 	ctx := context.Background()
-	profile := os.Getenv("AWS_PROFILE")
-	if profile == "" && os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-		profile = "spore-host-dev"
-	}
+	profile := e2eProfile()
 	var opts []func(*awsconfig.LoadOptions) error
 	opts = append(opts, awsconfig.WithRegion(testRegion))
-	if profile != "" && os.Getenv("AWS_ACCESS_KEY_ID") == "" {
+	if profile != "" {
 		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
@@ -94,13 +91,45 @@ func loadAWSConfig(t *testing.T) aws.Config {
 	return cfg
 }
 
+// e2eDefaultProfile is the profile the real-AWS tiers use when the caller
+// names neither a profile nor access keys: the spore.host team's dev account,
+// as the Makefile and README document. A test-harness default, not a spawn one.
+const e2eDefaultProfile = "spore-host-dev"
+
+// e2eProfile is the profile this harness's own AWS calls (verification and the
+// reaper) use, and the one spawnChildEnv hands the spawn binary: "" when access keys
+// are in the environment, else AWS_PROFILE, else e2eDefaultProfile.
+func e2eProfile() string {
+	if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+		return ""
+	}
+	if p := os.Getenv("AWS_PROFILE"); p != "" {
+		return p
+	}
+	return e2eDefaultProfile
+}
+
+// spawnChildEnv is the environment the spawn binary runs with. When the harness
+// falls back to e2eDefaultProfile it exports it as AWS_PROFILE, so the binary
+// launches in the account the harness verifies and reaps in. spawn's compute
+// path follows AWS_PROFILE since #1538; before, it used spore-host-dev by
+// default, and a harness defaulting to it without exporting it would now let
+// instances launch in an account the reaper never looks at.
+func spawnChildEnv() []string {
+	env := os.Environ()
+	if p := e2eProfile(); p != "" && os.Getenv("AWS_PROFILE") == "" {
+		env = append(env, "AWS_PROFILE="+p)
+	}
+	return env
+}
+
 // ── spawn CLI wrapper ─────────────────────────────────────────────────────────
 
 // spawn runs the spawn CLI and returns combined output.
 func spawn(t *testing.T, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(spawnBin(t), args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd.Env = os.Environ()
+	cmd.Env = spawnChildEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("spawn %s failed: %v\n%s", strings.Join(args, " "), err, out)
@@ -116,7 +145,7 @@ func spawn(t *testing.T, args ...string) string {
 func spawnMayFail(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(spawnBin(t), args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd.Env = os.Environ()
+	cmd.Env = spawnChildEnv()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -128,7 +157,7 @@ func spawnMayFail(t *testing.T, args ...string) (string, error) {
 func spawnStdout(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(spawnBin(t), args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd.Env = os.Environ()
+	cmd.Env = spawnChildEnv()
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	err := cmd.Run() // stderr goes to the child's /dev/null (not captured)

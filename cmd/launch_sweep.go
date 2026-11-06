@@ -318,6 +318,12 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		if err := requireDetachedSweepRole(ctx, ""); err != nil {
 			return err
 		}
+		// The CLI IAM flags' role is one the members use, so it is created
+		// in the account they launch in: the compute account (#1538).
+		awsClient, err = newComputeClient(ctx, "")
+		if err != nil {
+			return err
+		}
 	} else if err := refuseNestedSweepRowsWithoutTTL(paramFormat, instanceProfile); err != nil {
 		return err
 	}
@@ -1383,15 +1389,16 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 		fmt.Fprintf(os.Stderr, "🌍 Region: %s (%s)\n", sweepRegion, why)
 	}
 
-	// Load dev account config to get account ID
-	// IMPORTANT: Always use spore-host-dev profile for target account ID
-	// regardless of what AWS_PROFILE is set in environment
+	// The account the members launch in: the compute account
+	// (spawnconfig.ResolveComputeProfile), the caller's own unless
+	// SPAWN_COMPUTE_PROFILE or compute_profile names another (#1538).
+	// requireDetachedSweepRole checked the role in the same account and
+	// printed it, before anything was created.
 	devCfg, err := spawnconfig.LoadComputeAWSConfig(ctx, "")
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Get AWS account ID from dev account
 	accountID, err := aws.NewClientFromConfig(devCfg).GetAccountID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get AWS account ID: %w", err)
@@ -1409,7 +1416,12 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 	// uploaded params — and `ami` was never seeded, so it sent no ImageId and EC2
 	// rejected EVERY row. Must run BEFORE the upload below, and before validation,
 	// so what gets validated is what gets launched.
-	regionClient, rcErr := aws.NewClientWithRegion(ctx, sweepRegion)
+	//
+	// Everything below that the members depend on (their AMI and key pair,
+	// subnet checks, instance profile, egress proxies) is looked up or
+	// created in the account they launch in, the compute account, not the
+	// caller's (#1538); with no override the two are the same.
+	regionClient, rcErr := newComputeClient(ctx, sweepRegion)
 	if rcErr != nil {
 		return fmt.Errorf("failed to initialize AWS client for %s: %w", sweepRegion, rcErr)
 	}

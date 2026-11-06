@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -49,18 +50,83 @@ func GetInfraProfile() string {
 	return "spore-host-infra"
 }
 
-// GetComputeProfile returns the AWS named profile for compute/EC2 operations.
-// Precedence: SPAWN_COMPUTE_PROFILE env var → "spore-host-dev" default.
-// Set SPAWN_COMPUTE_PROFILE="" to use the ambient credential chain (or the
-// shared config's profile, if one is set — see GetInfraProfile).
-func GetComputeProfile() string {
-	if val, ok := os.LookupEnv("SPAWN_COMPUTE_PROFILE"); ok {
-		if val == "" {
-			return SharedProfile()
+// GetComputeProfile returns the AWS named profile for compute/EC2 operations:
+// the account instances (and a detached sweep's members) launch in. "" means
+// the ambient credential chain. See ResolveComputeProfile for the precedence.
+func GetComputeProfile() string { return ResolveComputeProfile().Name }
+
+// ComputeProfile is the resolved compute profile and where it came from.
+type ComputeProfile struct {
+	// Name is the AWS named profile; "" is the ambient credential chain.
+	Name string
+	// Source says what chose it: "SPAWN_COMPUTE_PROFILE",
+	// ComputeProfileConfigSource, or the shared config layer that named the
+	// caller's own profile ("--profile", "SPORE_PROFILE", "AWS_PROFILE", the
+	// spore config file). "" with Name "" is the ambient chain.
+	Source string
+	// Override is true when SPAWN_COMPUTE_PROFILE or compute_profile chose the
+	// profile, rather than the caller's own selection. Only an override can
+	// put compute in another account than the caller's credentials.
+	Override bool
+}
+
+// ComputeProfileConfigSource is ComputeProfile.Source for the config key.
+const ComputeProfileConfigSource = "compute_profile in ~/.spawn/config.yaml"
+
+// Describe is the profile and its source for one line of output, e.g.
+// "profile aws, from AWS_PROFILE" or "ambient credentials, no profile selected".
+func (p ComputeProfile) Describe() string {
+	if p.Name == "" {
+		if p.Source != "" {
+			return "ambient credentials, from " + p.Source
 		}
-		return val
+		return "ambient credentials, no profile selected"
 	}
-	return "spore-host-dev"
+	return fmt.Sprintf("profile %s, from %s", p.Name, p.Source)
+}
+
+// ResolveComputeProfile resolves the compute profile (#1538):
+//
+//  1. SPAWN_COMPUTE_PROFILE, when set and non-empty. Set but empty means
+//     "the caller's own" (step 3), skipping the config key.
+//  2. compute_profile under defaults: in ~/.spawn/config.yaml
+//     (`spawn defaults set compute-profile <name>`).
+//  3. The caller's own: the shared profile (--profile > SPORE_PROFILE >
+//     AWS_PROFILE > the spore config file), else the ambient chain.
+//
+// There is no hardcoded default. Until #1538 it was "spore-host-dev", the
+// spore.host team's dev account, so anything on the compute path (a detached
+// sweep's members, schedules, batch queues, collect-results) ignored
+// AWS_PROFILE/--profile and acted in whatever account a local profile of that
+// name pointed at. A team with a split setup sets compute_profile once.
+func ResolveComputeProfile() ComputeProfile {
+	if val, ok := os.LookupEnv("SPAWN_COMPUTE_PROFILE"); ok {
+		if val = strings.TrimSpace(val); val != "" {
+			return ComputeProfile{Name: val, Source: "SPAWN_COMPUTE_PROFILE", Override: true}
+		}
+		return callerComputeProfile()
+	}
+	if p := configComputeProfile(); p != "" {
+		return ComputeProfile{Name: p, Source: ComputeProfileConfigSource, Override: true}
+	}
+	return callerComputeProfile()
+}
+
+// callerComputeProfile is the caller's own profile, as every non-compute AWS
+// client spawn builds resolves it (spawnaws.NewClientWithRegion).
+func callerComputeProfile() ComputeProfile {
+	name, source := SharedProfileSource()
+	return ComputeProfile{Name: name, Source: source}
+}
+
+// configComputeProfile is defaults.compute_profile in ~/.spawn/config.yaml,
+// or "" when the file, or the key, is absent or unreadable.
+func configComputeProfile() string {
+	d, err := LoadLaunchDefaults()
+	if err != nil || d == nil {
+		return ""
+	}
+	return strings.TrimSpace(d.ComputeProfile)
 }
 
 // ── Service endpoint URLs ─────────────────────────────────────────────────────
@@ -224,22 +290,27 @@ func LoadInfraAWSConfig(ctx context.Context, region string) (aws.Config, error) 
 }
 
 // LoadComputeAWSConfig loads an AWS SDK config for compute/EC2 operations.
-// Uses the profile from GetComputeProfile(); empty profile uses ambient creds.
+// Uses the profile ResolveComputeProfile resolves; an empty profile uses the
+// ambient chain. When an override (SPAWN_COMPUTE_PROFILE or compute_profile)
+// names another profile than the caller's own, it prints a notice once if
+// the two resolve to different accounts (#1538).
 func LoadComputeAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 	opts := []func(*awsconfig.LoadOptions) error{}
 	if region != "" {
 		opts = append(opts, awsconfig.WithRegion(region))
 	}
-	if profile := GetComputeProfile(); profile != "" {
-		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
+	cp := ResolveComputeProfile()
+	if cp.Name != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(cp.Name))
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("load compute AWS config: %w", err)
+		return aws.Config{}, fmt.Errorf("load compute AWS config (%s): %w", cp.Describe(), err)
 	}
 	// Compute is where instances launch: always subject to the account guard.
 	if err := CheckAccount(ctx, cfg); err != nil {
 		return aws.Config{}, err
 	}
+	noteComputeOverride(ctx, cfg, cp)
 	return cfg, nil
 }

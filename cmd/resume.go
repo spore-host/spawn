@@ -567,7 +567,9 @@ func resumeSweepDetached(ctx context.Context, sweepID string) error {
 	// --no-public-ip (#1468): the pinned subnets the orchestrator will launch
 	// into are re-checked, as at --detach, before anything is re-created or
 	// re-invoked. The params are read (best-effort), not rewritten.
-	if err := detachedResumeRecheck(ctx, cfg, state, resumeAllowMissingEndpoints, aws.NewClient, os.Stderr); err != nil {
+	// In the compute account, where the members launch (#1538).
+	computeClient := func(ctx context.Context) (*aws.Client, error) { return newComputeClient(ctx, "") }
+	if err := detachedResumeRecheck(ctx, cfg, state, resumeAllowMissingEndpoints, computeClient, os.Stderr); err != nil {
 		return err
 	}
 
@@ -581,7 +583,7 @@ func resumeSweepDetached(ctx context.Context, sweepID string) error {
 	// The CLI IAM flags' profile may have been deleted as idle since the sweep
 	// last ran (#1385): re-create it before the orchestrator launches with it.
 	if err := ensureDetachedResumeProfile(ctx, sweepID, func(ctx context.Context) (resumeProfileEnsurer, error) {
-		return aws.NewClient(ctx)
+		return computeClient(ctx)
 	}); err != nil {
 		return err
 	}

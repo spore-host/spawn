@@ -49,14 +49,11 @@ func TestMain(m *testing.M) {
 // suite, but it guarantees leaks don't accumulate across runs.
 func reap(phase string) {
 	ctx := context.Background()
-	profile := os.Getenv("AWS_PROFILE")
-	if profile == "" && os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-		profile = "spore-host-dev"
-	}
+	profile := e2eProfile() // the account spawnChildEnv sends the spawn binary to
 
 	for _, region := range reapRegions {
 		opts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(region)}
-		if profile != "" && os.Getenv("AWS_ACCESS_KEY_ID") == "" {
+		if profile != "" {
 			opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
 		}
 		cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)

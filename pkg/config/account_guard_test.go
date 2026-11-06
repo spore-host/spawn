@@ -37,6 +37,11 @@ func isolateGuardEnv(t *testing.T) {
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(dir, "aws-credentials"))
 	t.Setenv("XDG_CONFIG_HOME", dir) // no spore config file
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	// No ~/.spawn/config.yaml (compute_profile, #1538) and no compute override.
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("SPAWN_COMPUTE_PROFILE", "")
+	_ = os.Unsetenv("SPAWN_COMPUTE_PROFILE")
 	SetSharedFlags("", "", "")
 	t.Cleanup(func() { SetSharedFlags("", "", "") })
 }

@@ -163,9 +163,38 @@ func requireSweepCrossAccountRole(ctx context.Context, c sweep.RoleGetter, accou
 	return nil
 }
 
+// memberAccountLine is the line a detached sweep prints, before it creates
+// anything, naming the account its members launch in and where that came
+// from (#1538). recordAccount is a resumed sweep's recorded account ("" at
+// launch): the orchestrator launches there, whatever these credentials are.
+func memberAccountLine(computeAccount, recordAccount string, cp spawnconfig.ComputeProfile) string {
+	if recordAccount != "" && recordAccount != computeAccount {
+		return fmt.Sprintf("🏦 Members launch in account %s (the sweep's record); the compute credentials are for account %s (%s)",
+			recordAccount, computeAccount, cp.Describe())
+	}
+	return fmt.Sprintf("🏦 Members launch in account %s (%s)", computeAccount, cp.Describe())
+}
+
+// newComputeClient is a client for the compute account
+// (spawnconfig.LoadComputeAWSConfig), in region, else the shared default
+// region, as spawnaws.NewClientWithRegion chooses one. What a detached
+// sweep's members depend on is created with it, in the account they launch
+// in (#1538). A variable so tests can see which account a path uses.
+var newComputeClient = func(ctx context.Context, region string) (*aws.Client, error) {
+	if region == "" {
+		region = spawnconfig.SharedRegion()
+	}
+	cfg, err := spawnconfig.LoadComputeAWSConfig(ctx, region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load compute AWS config: %w", err)
+	}
+	return aws.NewClientFromConfig(cfg), nil
+}
+
 // requireDetachedSweepRole is requireSweepCrossAccountRole for the account a
 // detached sweep's members launch in: the compute account, as
-// launchSweepDetached resolves it. recordAccount is the account a resumed
+// launchSweepDetached resolves it (spawnconfig.ResolveComputeProfile: the
+// caller's own unless an override names another, #1538). recordAccount is the account a resumed
 // sweep's record names ("" at launch); when the credentials are for another
 // account, the role there says nothing about this sweep, so nothing is
 // checked.
@@ -178,6 +207,8 @@ func requireDetachedSweepRole(ctx context.Context, recordAccount string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get AWS account ID: %w", err)
 	}
+	// Before anything is created, say where the members launch (#1538).
+	fmt.Fprintln(os.Stderr, memberAccountLine(accountID, recordAccount, spawnconfig.ResolveComputeProfile()))
 	warn := func(msg string) { fmt.Fprintf(os.Stderr, "⚠️  %s\n", msg) }
 	if recordAccount != "" && recordAccount != accountID {
 		warn(fmt.Sprintf("not checking %s: the sweep's members launch in account %s, and these credentials are for %s",

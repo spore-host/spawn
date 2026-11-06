@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spore-host/spawn/pkg/ttl"
 	"gopkg.in/yaml.v3"
@@ -21,6 +22,13 @@ type LaunchDefaults struct {
 	// BootstrapEgress is --bootstrap-egress's default (#1515): "none" or
 	// "proxy". The opt-in to the egress proxy, set once.
 	BootstrapEgress string `yaml:"bootstrap_egress,omitempty"`
+	// ComputeProfile is the AWS named profile compute operations use when
+	// SPAWN_COMPUTE_PROFILE is unset (#1538): where instances and a detached
+	// sweep's members launch. Unset, compute uses the caller's own profile
+	// (--profile / SPORE_PROFILE / AWS_PROFILE) or the ambient chain. For a
+	// split setup that launches in a dedicated account, e.g. the spore.host
+	// team's spore-host-dev.
+	ComputeProfile string `yaml:"compute_profile,omitempty"`
 }
 
 // knownDefaultKeys maps CLI flag names (with hyphens) to their display names.
@@ -31,6 +39,7 @@ var knownDefaultKeys = []string{
 	"idle-timeout",
 	"hibernate-on-idle",
 	"bootstrap-egress",
+	"compute-profile",
 }
 
 // KnownDefaultKeys returns the list of valid default key names.
@@ -107,6 +116,12 @@ func applyDefaultKey(d *LaunchDefaults, key, value string) error {
 			return err
 		}
 		d.BootstrapEgress = value
+	case "compute-profile":
+		value = strings.TrimSpace(value)
+		if strings.ContainsAny(value, " \t\n") {
+			return fmt.Errorf("invalid compute-profile %q: an AWS profile name has no whitespace", value)
+		}
+		d.ComputeProfile = value
 	default:
 		return fmt.Errorf("unknown default key %q — valid keys: %v", key, knownDefaultKeys)
 	}
@@ -134,6 +149,8 @@ func GetDefaultValue(d *LaunchDefaults, key string) string {
 			return "true"
 		}
 		return "false"
+	case "compute-profile":
+		return d.ComputeProfile
 	}
 	return ""
 }

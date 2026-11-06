@@ -269,9 +269,9 @@ func resultsReaderConfig(ctx context.Context, rec *sweep.SweepRecord, customPref
 	}
 	if acct != rec.AWSAccountID {
 		return aws.Config{}, fmt.Errorf("sweep %s ran in account %s, and its results are in that account's "+
-			"spawn-results-%s-<region> buckets, but the compute credentials (profile %q) are for account %s. "+
-			"Set SPAWN_COMPUTE_PROFILE to a profile for %s, or pass --s3-prefix",
-			rec.SweepID, rec.AWSAccountID, rec.AWSAccountID, spawnconfig.GetComputeProfile(), acct, rec.AWSAccountID)
+			"spawn-results-%s-<region> buckets, but the compute credentials (%s) are for account %s. "+
+			"Select a profile for %s (--profile / AWS_PROFILE, or SPAWN_COMPUTE_PROFILE / compute_profile in ~/.spawn/config.yaml), or pass --s3-prefix",
+			rec.SweepID, rec.AWSAccountID, rec.AWSAccountID, spawnconfig.ResolveComputeProfile().Describe(), acct, rec.AWSAccountID)
 	}
 	return cfg, nil
 }
