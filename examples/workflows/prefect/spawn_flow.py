@@ -48,7 +48,7 @@ def wait_for_sweep(sweep_id: str) -> dict:
 
     while True:
         result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--check-complete'],
+            ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
             capture_output=True
         )
 
@@ -77,7 +77,7 @@ def wait_for_sweep(sweep_id: str) -> dict:
 def get_sweep_stats(sweep_id: str) -> dict:
     """Get detailed sweep statistics."""
     result = subprocess.run(
-        ['spawn', 'status', sweep_id, '--json'],
+        ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
         capture_output=True,
         text=True,
         check=True
@@ -90,12 +90,12 @@ def get_sweep_stats(sweep_id: str) -> dict:
 def process_results(sweep_stats: dict):
     """Process sweep results."""
     print("Processing sweep results...")
-    print(f"  Status: {sweep_stats.get('Status')}")
-    print(f"  Total Params: {sweep_stats.get('TotalParams')}")
-    print(f"  Launched: {sweep_stats.get('Launched')}")
-    print(f"  Failed: {sweep_stats.get('Failed')}")
+    print(f"  Status: {sweep_stats.get('status')}")
+    print(f"  Total Params: {sweep_stats.get('total_params')}")
+    print(f"  Launched: {sweep_stats.get('launched')}")
+    print(f"  Failed: {sweep_stats.get('failed')}")
 
-    if sweep_stats.get('Failed', 0) > 0:
+    if sweep_stats.get('failed', 0) > 0:
         print("⚠️  Some instances failed - review logs")
 
     # Add your result processing logic here
@@ -140,7 +140,7 @@ def conditional_sweep_flow(params_file: str, followup_file: str = None):
     sweep_stats = wait_for_sweep(sweep_id)
 
     # Check if follow-up needed
-    if followup_file and sweep_stats.get('Failed', 0) == 0:
+    if followup_file and sweep_stats.get('failed', 0) == 0:
         print("Initial sweep succeeded, running follow-up...")
         followup_id = launch_spawn_sweep(followup_file)
         followup_stats = wait_for_sweep(followup_id)

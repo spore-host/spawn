@@ -81,7 +81,7 @@ def spawn_sweep_taskflow():
 
             # Check status
             result = subprocess.run(
-                ['spawn', 'status', sweep_id, '--check-complete'],
+                ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
                 capture_output=True
             )
 
@@ -101,15 +101,15 @@ def spawn_sweep_taskflow():
 
         # Get final status
         result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--json'],
+            ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
             capture_output=True,
             text=True,
             check=True
         )
 
         status = json.loads(result.stdout)
-        print(f"Final status: {status['Status']}")
-        print(f"Launched: {status['Launched']}/{status['TotalParams']}")
+        print(f"Final status: {status['status']}")
+        print(f"Launched: {status['launched']}/{status['total_params']}")
 
         return status
 
@@ -127,10 +127,10 @@ def spawn_sweep_taskflow():
         print("Processing sweep results...")
 
         results = {
-            'total_params': status['TotalParams'],
-            'launched': status['Launched'],
-            'failed': status['Failed'],
-            'success_rate': status['Launched'] / status['TotalParams'],
+            'total_params': status['total_params'],
+            'launched': status['launched'],
+            'failed': status['failed'],
+            'success_rate': status['launched'] / status['total_params'],
         }
 
         print(f"Success rate: {results['success_rate']:.1%}")
@@ -202,7 +202,7 @@ def spawn_sweep_simple():
     def verify_results(sweep_id: str):
         """Verify sweep completed successfully."""
         result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--json'],
+            ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
             capture_output=True,
             text=True,
             check=True
@@ -210,13 +210,13 @@ def spawn_sweep_simple():
 
         status = json.loads(result.stdout)
 
-        if status['Status'] != 'COMPLETED':
-            raise Exception(f"Unexpected status: {status['Status']}")
+        if status['status'] != 'COMPLETED':
+            raise Exception(f"Unexpected status: {status['status']}")
 
-        if status['Failed'] > 0:
-            print(f"⚠️  {status['Failed']} instances failed")
+        if status['failed'] > 0:
+            print(f"⚠️  {status['failed']} instances failed")
 
-        print(f"✅ Verified: {status['Launched']}/{status['TotalParams']} launched")
+        print(f"✅ Verified: {status['launched']}/{status['total_params']} launched")
 
     # Simple linear flow
     sweep_id = launch_and_wait()

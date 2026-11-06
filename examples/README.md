@@ -167,10 +167,9 @@ spawn queue results <queue-id> --output ./results/
 ### Staging Examples
 
 **`ml-training.yaml`**
-- 200GB training dataset
-- 30 instances across 3 regions
-- $1,072 cost savings (99.3%)
-- Distributed PyTorch training
+- One ensemble member per region (3 rows), each reading that region's copy of the dataset
+- Rows train independently: a sweep is not one distributed job
+- PyTorch training
 
 **`reference-genome.yaml`**
 - 100GB reference genome (hg38)

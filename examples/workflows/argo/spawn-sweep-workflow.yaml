@@ -83,7 +83,7 @@ spec:
 
         # Poll for completion
         while true; do
-          spawn status $SWEEP_ID --check-complete
+          spawn sweep status "$SWEEP_ID" --check-complete
           EXIT_CODE=$?
 
           if [ $EXIT_CODE -eq 0 ]; then

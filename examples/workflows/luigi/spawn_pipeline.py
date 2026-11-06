@@ -78,7 +78,7 @@ class WaitForSweep(luigi.Task):
 
             # Check status
             result = subprocess.run(
-                ['spawn', 'status', sweep_id, '--check-complete'],
+                ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
                 capture_output=True
             )
 
@@ -98,7 +98,7 @@ class WaitForSweep(luigi.Task):
 
         # Get final status
         result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--json'],
+            ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
             capture_output=True,
             text=True,
             check=True
@@ -133,23 +133,23 @@ class ProcessResults(luigi.Task):
             status = json.load(f)
 
         print("Processing sweep results...")
-        print(f"  Status: {status['Status']}")
-        print(f"  Total Params: {status['TotalParams']}")
-        print(f"  Launched: {status['Launched']}")
-        print(f"  Failed: {status['Failed']}")
+        print(f"  Status: {status['status']}")
+        print(f"  Total Params: {status['total_params']}")
+        print(f"  Launched: {status['launched']}")
+        print(f"  Failed: {status['failed']}")
 
-        success_rate = status['Launched'] / status['TotalParams']
+        success_rate = status['launched'] / status['total_params']
         print(f"  Success Rate: {success_rate:.1%}")
 
         # Write results
         with self.output().open('w') as f:
             f.write(f"Sweep Results\n")
             f.write(f"=============\n")
-            f.write(f"Status: {status['Status']}\n")
+            f.write(f"Status: {status['status']}\n")
             f.write(f"Success Rate: {success_rate:.1%}\n")
-            f.write(f"Total Params: {status['TotalParams']}\n")
-            f.write(f"Launched: {status['Launched']}\n")
-            f.write(f"Failed: {status['Failed']}\n")
+            f.write(f"Total Params: {status['total_params']}\n")
+            f.write(f"Launched: {status['launched']}\n")
+            f.write(f"Failed: {status['failed']}\n")
 
         print(f"✅ Results written to: {self.output().path}")
 

@@ -25,7 +25,7 @@ task spawn_sweep {
     echo "Sweep completed: $SWEEP_ID"
 
     # Get final status
-    spawn status $SWEEP_ID --json > sweep_status.json
+    spawn sweep status "$SWEEP_ID" --output json > sweep_status.json
 
     # Output sweep ID
     echo -n "$SWEEP_ID" > sweep_id_output.txt
@@ -61,12 +61,12 @@ import json
 with open('~{sweep_status}') as f:
     status = json.load(f)
 
-print(f"Status: {status['Status']}")
-print(f"Total Parameters: {status['TotalParams']}")
-print(f"Launched: {status['Launched']}")
-print(f"Failed: {status['Failed']}")
+print(f"Status: {status['status']}")
+print(f"Total Parameters: {status['total_params']}")
+print(f"Launched: {status['launched']}")
+print(f"Failed: {status['failed']}")
 
-if status['Failed'] > 0:
+if status['failed'] > 0:
     print("WARNING: Some instances failed!")
 CODE
 

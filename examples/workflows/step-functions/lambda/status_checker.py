@@ -33,7 +33,7 @@ def handler(event, context):
     try:
         # Check status with --check-complete for exit codes
         check_result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--check-complete'],
+            ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
             capture_output=True
         )
 
@@ -49,7 +49,7 @@ def handler(event, context):
 
         # Get detailed status
         status_result = subprocess.run(
-            ['spawn', 'status', sweep_id, '--json'],
+            ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
             capture_output=True,
             text=True,
             check=True
@@ -58,7 +58,7 @@ def handler(event, context):
         details = json.loads(status_result.stdout)
 
         print(f"Status: {state}")
-        print(f"Launched: {details.get('Launched', 0)}/{details.get('TotalParams', 0)}")
+        print(f"Launched: {details.get('launched', 0)}/{details.get('total_params', 0)}")
 
         return {
             'state': state,

@@ -131,7 +131,7 @@ class SpawnSweepOperator(BaseOperator):
 
             # Check status
             result = subprocess.run(
-                ['spawn', 'status', sweep_id, '--check-complete'],
+                ['spawn', 'sweep', 'status', sweep_id, '--check-complete'],
                 capture_output=True
             )
 
@@ -160,7 +160,7 @@ class SpawnSweepOperator(BaseOperator):
         """Log sweep statistics."""
         try:
             result = subprocess.run(
-                ['spawn', 'status', sweep_id, '--json'],
+                ['spawn', 'sweep', 'status', sweep_id, '--output', 'json'],
                 capture_output=True,
                 text=True,
                 check=True
@@ -169,10 +169,10 @@ class SpawnSweepOperator(BaseOperator):
             status = json.loads(result.stdout)
 
             self.log.info("Sweep Statistics:")
-            self.log.info(f"  Status: {status.get('Status')}")
-            self.log.info(f"  Total Parameters: {status.get('TotalParams')}")
-            self.log.info(f"  Launched: {status.get('Launched')}")
-            self.log.info(f"  Failed: {status.get('Failed')}")
+            self.log.info(f"  Status: {status.get('status')}")
+            self.log.info(f"  Total Parameters: {status.get('total_params')}")
+            self.log.info(f"  Launched: {status.get('launched')}")
+            self.log.info(f"  Failed: {status.get('failed')}")
 
         except Exception as e:
             self.log.warning(f"Could not fetch sweep stats: {e}")
