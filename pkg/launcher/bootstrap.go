@@ -1771,7 +1771,42 @@ echo "✅ Login banner created"
 # ran on an instance with no TTL (#1274). spored is started above now, and a
 # failure here is reported, not fatal.
 # Checked for first: Ubuntu has neither package manager (#1490).
-if { command -v dnf >/dev/null 2>&1 && dnf install -y acpid 2>/dev/null; } || { command -v yum >/dev/null 2>&1 && yum install -y acpid 2>/dev/null; }; then
+#
+# Exactly one package manager runs (#1521). This used to be
+# "dnf install || yum install", and on AL2023 yum IS dnf: when the OOM killer
+# took dnf on a t4g.nano, the same transaction ran again as yum, on a box that
+# had just run out, and that second run's OOM took spored and
+# systemd-resolved. Whichever manager exists is tried once and never retried
+# under the other name.
+#
+# And none runs below 768 MiB of MemTotal (#1521). The launch-time warning's
+# floor is 1 GiB of instance memory (aws.SporedMemoryFloorMiB: below it AL2023's
+# own package transactions are unreliable), but MemTotal is what the kernel
+# leaves after its own reservations, about 0.9 GiB on a 1 GiB type, so testing
+# 1 GiB here would skip the t4g.micro, which ran this dnf install fine (#1515).
+# 768 MiB sits between a 1 GiB type's MemTotal and a 0.5 GiB type's (under
+# 0.5 GiB), where the install was killed. Without acpid, stop/terminate is not
+# graceful; on such a box that is the cheaper loss. Unreadable MemTotal (not
+# Linux) falls through to the install, as before.
+#
+# First, though, acpid is looked for: the AL2023 AMI ships it, and there
+# "dnf install -y acpid" installs nothing yet still loads the full repo
+# metadata, which is the load that OOM-killed the t4g.nano (#1515). command -v
+# rather than systemctl list-unit-files: acpid is /usr/sbin/acpid, /usr/sbin is
+# on the bootstrap's PATH (it calls useradd unqualified), and the check costs
+# no output parsing. The same check decides the message afterwards, so "not
+# installed" is said only when acpid is absent.
+SPAWN_MEM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || true)
+if ! command -v acpid >/dev/null 2>&1; then
+    if [ "${SPAWN_MEM_KB:-786432}" -lt 786432 ] 2>/dev/null; then
+        echo "acpid skipped: MemTotal ${SPAWN_MEM_KB} kB < 768 MiB"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y acpid 2>/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y acpid 2>/dev/null || true
+    fi
+fi
+if command -v acpid >/dev/null 2>&1; then
     systemctl enable --now acpid 2>/dev/null || echo "acpid installed but not started; stop/terminate will not shut down gracefully"
 else
     echo "acpid not installed; stop/terminate will not shut down gracefully"

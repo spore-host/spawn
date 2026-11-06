@@ -164,7 +164,15 @@ func TestMinifyShellKeepsData(t *testing.T) {
 // reads and the guarded acpid install; the margin had 12 to spare. The same
 // holds: it lands in the published body, and a release launch's stub
 // carries spawn_need_aws only when it stages files (a task).
-const bootstrapGzipBudget = 8*1024 + 896
+//
+// Raised by 16 for #1521, in review: the acpid step now looks for an acpid
+// the AMI already ships before any package manager runs (on AL2023 the
+// no-op dnf install's metadata load is what OOM-killed a t4g.nano), runs
+// exactly one manager, and skips the install under 768 MiB. That is about 105
+// gzipped bytes; the margin had 101 to spare, so the bare bootstrap
+// (8067) was 3 over it after compacting the shell. Same reasoning as above:
+// it lands in the published body, not a release launch's stub.
+const bootstrapGzipBudget = 8*1024 + 896 + 16
 
 // bootstrapGzipMargin is the headroom under bootstrapGzipBudget the bare
 // bootstrap must keep (#1422). It reached 10 bytes before anything flagged

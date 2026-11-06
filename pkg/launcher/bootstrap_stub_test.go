@@ -445,6 +445,9 @@ func (sb *bootSandbox) run(script string) (string, error) {
 		"/run/", filepath.Join(sb.dir, "run")+"/",
 		"/tmp/", filepath.Join(sb.dir, "tmp")+"/",
 		"/dev/console", filepath.Join(sb.dir, "console"),
+		// The host's own meminfo would make the acpid memory floor (#1521)
+		// depend on the machine the tests run on; absent unless a test writes it.
+		"/proc/meminfo", filepath.Join(sb.dir, "proc", "meminfo"),
 		"/usr/local/bin/spored", filepath.Join(sb.dir, "spored"),
 		"http://169.254.169.254", sb.srv.srv.URL+"/imds",
 		"https://awscli.amazonaws.com", sb.srv.srv.URL+"/b/awscli",
@@ -720,6 +723,8 @@ type bootOpts struct {
 	edit func(string) string
 	// setup runs against the stand-in bucket before the boot.
 	setup func(*stubServer)
+	// meminfo, when set, is the instance's /proc/meminfo.
+	meminfo string
 }
 
 // fullBootPinned is fullBoot for a bootstrap pinned to spored version pin
@@ -784,6 +789,17 @@ func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publi
 		}
 	}
 	sb := newBootSandbox(t, srv, awsTerminates, standIns)
+	for _, o := range opts {
+		if o.meminfo == "" {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(sb.dir, "proc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sb.dir, "proc", "meminfo"), []byte(o.meminfo), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	out, err := sb.run(script)
 	return sb, srv, out, err
 }
