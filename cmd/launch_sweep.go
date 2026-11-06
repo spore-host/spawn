@@ -25,20 +25,10 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 		return err
 	}
 
-	// Parse parameter file
-	var paramFormat *ParamFileFormat
-	var err error
-
-	if paramFile != "" {
-		paramFormat, err = parseParamFile(paramFile)
-		if err != nil {
-			return fmt.Errorf("failed to parse parameter file: %w", err)
-		}
-	} else if params != "" {
-		// TODO: Parse inline JSON params
-		return fmt.Errorf("inline --params not yet implemented, use --param-file for now")
-	} else {
-		return fmt.Errorf("either --param-file or --params must be specified for parameter sweep")
+	// The parameters, from --param-file or inline --params (#1540).
+	paramFormat, err := loadSweepParams(paramFile, params)
+	if err != nil {
+		return err
 	}
 
 	// Reject TOP-LEVEL keys that look like dangerous spawn settings — ttl:,
@@ -48,7 +38,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// with both a mistaken top-level key AND a row-level typo gets the
 	// top-level error first — that one means a setting the user wrote was never
 	// even read, which is the more dangerous failure of the two.
-	if err := validateTopLevelParamKeys(paramFile, paramFormat.UnknownTopLevelKeys); err != nil {
+	if err := validateTopLevelParamKeys(sweepParamSource(paramFile), paramFormat.UnknownTopLevelKeys); err != nil {
 		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
 		return fmt.Errorf("unusable param-file keys")
 	}
@@ -551,7 +541,7 @@ func launchParameterSweep(ctx context.Context, baseConfig *aws.LaunchConfig, pla
 	// failure that ends the launch terminates every member launched so far.
 	guard := newFleetGuard("sweep", os.Stderr, awsClient, launchFleetVerifier(awsClient), keepOnError)
 	return runSweepLaunch(ctx, awsClient, guard, sweepRun{
-		sweepID: sweepID, name: name, paramFile: paramFile, totalParams: len(paramFormat.Params),
+		sweepID: sweepID, name: name, paramFile: paramFile, inlineParams: inlineParamsFor(paramFile, params), totalParams: len(paramFormat.Params),
 		maxConcurrent: dispatch.maxConcurrent, launchDelay: launchDelay, configs: launchConfigs,
 		record: record,
 	})
@@ -658,10 +648,13 @@ func defaultSweepMemberWith(cfg *aws.LaunchConfig, base aws.LaunchConfig, sweepN
 // sweepRun is what runSweepLaunch needs about the sweep.
 type sweepRun struct {
 	sweepID, name, paramFile string
-	totalParams              int
-	maxConcurrent            int
-	launchDelay              string
-	configs                  []*aws.LaunchConfig
+	// inlineParams is the --params document of a sweep that has no
+	// paramFile, kept in the checkpoint so spawn resume can rebuild it.
+	inlineParams  string
+	totalParams   int
+	maxConcurrent int
+	launchDelay   string
+	configs       []*aws.LaunchConfig
 	// record is the config the members were built from, recorded in the
 	// checkpoint so a resume rebuilds them the same (#1400): with the same
 	// IAM profile, which it can re-create (#1385), and the same bounds (#1394).
@@ -696,6 +689,7 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 			SweepName:     s.name,
 			CreatedAt:     time.Now(),
 			ParamFile:     s.paramFile,
+			InlineParams:  s.inlineParams,
 			TotalParams:   len(launchConfigs),
 			MaxConcurrent: s.maxConcurrent,
 			LaunchDelay:   s.launchDelay,
@@ -727,6 +721,7 @@ func runSweepLaunch(ctx context.Context, l sweepLauncher, guard *fleetGuard, s s
 		SweepName:     s.name,
 		CreatedAt:     time.Now(),
 		ParamFile:     s.paramFile,
+		InlineParams:  s.inlineParams,
 		TotalParams:   s.totalParams,
 		MaxConcurrent: s.maxConcurrent,
 		LaunchDelay:   s.launchDelay,

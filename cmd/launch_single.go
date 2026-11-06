@@ -48,6 +48,17 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		if err := sweepUnsupportedFlags(launchFlags); err != nil {
 			return err
 		}
+		// --params with --param-file, or inline --params that is not a
+		// usable JSON document (#1540), is refused here too, before any AWS
+		// call. A param file is still read where the sweep reads it.
+		if err := validateSweepParamFlags(paramFile, params); err != nil {
+			return err
+		}
+		if paramFile == "" {
+			if _, err := parseInlineParams(params); err != nil {
+				return err
+			}
+		}
 	}
 
 	// And --vpc with neither a subnet nor an --az to pick one in (#1389),
