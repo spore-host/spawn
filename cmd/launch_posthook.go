@@ -76,9 +76,14 @@ const (
 	modePipe                          // truffle JSON piped on stdin
 )
 
-// launchMode decides the input mode from the --interactive flag, whether
-// --instance-type was given, and whether stdin is a TTY.
+// launchMode decides the input mode from the --interactive flag, whether this
+// is a parameter sweep, whether --instance-type was given, and whether stdin
+// is a TTY.
 //
+//   - a parameter sweep (--param-file/--params) → flags. runLaunch sends it to
+//     the sweep path before the wizard, so it never sees the wizard or stdin,
+//     and its instance type may come from the param file's defaults: or rows
+//     rather than --instance-type (#1532).
 //   - explicit --interactive, or no instance type on a TTY → wizard.
 //   - no instance type and stdin is a pipe → pipe (consume truffle JSON).
 //   - otherwise (instance type given) → flags, and stdin is NOT read.
@@ -86,7 +91,10 @@ const (
 // The last rule is the #34 fix: a caller that passes --instance-type with a
 // piped, non-TTY stdin (e.g. a Java/ProcessBuilder subprocess) must use flags
 // mode, not try to parse an empty stdin as JSON.
-func launchMode(interactive bool, instanceType string, stdinIsTTY bool) launchInputMode {
+func launchMode(interactive, paramSweep bool, instanceType string, stdinIsTTY bool) launchInputMode {
+	if paramSweep {
+		return modeFlags
+	}
 	if interactive || (instanceType == "" && stdinIsTTY) {
 		return modeWizard
 	}
@@ -95,6 +103,18 @@ func launchMode(interactive bool, instanceType string, stdinIsTTY bool) launchIn
 	}
 	return modeFlags
 }
+
+// currentLaunchMode is launchMode for this invocation's flags and stdin. The
+// pre-flight guards (validateNoPublicIPPath, validateNestedSpawnRoleFlags) and
+// the dispatch all read it, so a guard judges the path the launch takes. The
+// sweep test is the dispatch's own (paramFile or params set).
+func currentLaunchMode() launchInputMode {
+	return launchMode(interactive, paramFile != "" || params != "", instanceType, stdinIsTerminal())
+}
+
+// stdinIsTerminal reports whether stdin is a TTY. A seam, so a test can drive
+// runLaunch as an interactive caller would.
+var stdinIsTerminal = func() bool { return isTerminal(os.Stdin) }
 
 // writeOutputID writes sweep/instance ID to file for workflow integration
 func writeOutputID(id, filepath string) error {
