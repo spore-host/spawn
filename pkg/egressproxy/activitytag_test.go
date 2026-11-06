@@ -1,7 +1,6 @@
 package egressproxy
 
 import (
-	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -161,7 +160,8 @@ func TestActivityPublisherRetriesAFailedAfterQuietWriteAtTheThrottlesPace(t *tes
 // once it is near; (2) writes stay rare — never more than two in any window,
 // and about one per window while the proxy is busy.
 func TestActivityPublisherProperties(t *testing.T) {
-	rng := rand.New(rand.NewPCG(1528, 1))
+	rng := new(lcg)
+	*rng = 1528
 	t0 := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
 	var p ActivityPublisher
 	var last time.Time = t0
@@ -173,11 +173,11 @@ func TestActivityPublisherProperties(t *testing.T) {
 		// Bursty traffic: busy and quiet spells of 1-40 ticks; a busy tick
 		// carries traffic two times in three, at a random second.
 		if spell == 0 {
-			busy, spell = !busy, 1+rng.IntN(40)
+			busy, spell = !busy, 1+rng.intN(40)
 		}
 		spell--
-		if busy && rng.IntN(3) > 0 {
-			last = now.Add(-time.Duration(rng.IntN(60)) * time.Second)
+		if busy && rng.intN(3) > 0 {
+			last = now.Add(-time.Duration(rng.intN(60)) * time.Second)
 		}
 		if v, due := p.Due(last, now); due {
 			p.Written(v)
@@ -200,4 +200,13 @@ func TestActivityPublisherProperties(t *testing.T) {
 		t.Fatalf("%d writes in %d ticks", len(writes), 20000)
 	}
 	t.Logf("%d writes in %d one-minute ticks", len(writes), 20000)
+}
+
+// lcg is a fixed-seed generator for the property test's traffic, so a failure
+// replays exactly. Not for anything that needs randomness.
+type lcg uint64
+
+func (g *lcg) intN(n int) int {
+	*g = *g*6364136223846793005 + 1442695040888963407
+	return int(uint64(*g)>>33) % n
 }
