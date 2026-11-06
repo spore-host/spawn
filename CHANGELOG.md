@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.161.0] - 2026-11-06
+
 ### Added
 
 - **Inline `--params`: a sweep's parameters as a JSON document on the command line** (#1540). `spawn launch --params '{"defaults":{"instance_type":"t4g.small","ttl":"1h"},"params":[{"lr":0.1},{"lr":0.01}]}'` runs the sweep that a `.json` param file holding the same document runs: the schema is the JSON param file's (`defaults:`, `params:`, `grid:`), read by the same parser (`pkg/params.ParseParamJSON`), so the two cannot drift. It used to fail with "inline --params not yet implemented, use --param-file for now". A `--no-detach` sweep's checkpoint keeps the document (`inline_params`), so `spawn resume` rebuilds it with no file to reload.
@@ -13433,7 +13435,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.160.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.161.0...HEAD
+[0.161.0]: https://github.com/spore-host/spawn/compare/v0.160.0...v0.161.0
 [0.160.0]: https://github.com/spore-host/spawn/compare/v0.159.0...v0.160.0
 [0.159.0]: https://github.com/spore-host/spawn/compare/v0.158.0...v0.159.0
 [0.158.0]: https://github.com/spore-host/spawn/compare/v0.157.0...v0.158.0
