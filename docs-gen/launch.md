@@ -68,7 +68,7 @@ spawn launch <name> [flags]
 | `--fsx-export-path` |  | string |  | S3 path to export to (e.g., s3://bucket/prefix) |
 | `--fsx-id` |  | string |  | Existing FSx Lustre filesystem ID to mount (fs-xxx) |
 | `--fsx-import-path` |  | string |  | S3 path to import from (e.g., s3://bucket/prefix) |
-| `--fsx-lifecycle` |  | string |  | FSx lifetime (REQUIRED with --fsx-create): 'ephemeral' (reclaimed asynchronously once the instance is gone — by the out-of-band reaper, not by `spawn terminate`) or 'durable' (persists; requires --fsx-ttl) |
+| `--fsx-lifecycle` |  | string |  | FSx lifetime (REQUIRED with --fsx-create): 'ephemeral' (reclaimed asynchronously once the instance is gone — by the out-of-band reaper, not by 'spawn terminate') or 'durable' (persists; requires --fsx-ttl) |
 | `--fsx-mount-point` |  | string | `/fsx` | FSx mount point (default: /fsx) |
 | `--fsx-recall` |  | string |  | Recall FSx filesystem by stack name (recreate from S3) |
 | `--fsx-s3-bucket` |  | string |  | S3 bucket for FSx import/export (required with --fsx-create) |
@@ -106,7 +106,7 @@ spawn launch <name> [flags]
 | `--mpi-command` |  | string |  | Command to run via mpirun across the MPI cohort (alternative to --command). Rank 0 runs mpirun as root. Its output goes to /var/log/spawn-command.log on rank 0 (read it with 'spawn array logs &lt;name&gt; --index 0'), and its exit code is recorded to /tmp/SPAWN_EXITCODE there. When it exits, pass or fail, every member is signalled, so --on-complete fires across the whole cohort. Background jobs a rank leaves running are not waited for: a rank ends at its command's own exit, after at most a 10 s drain of the output they hold, and they are killed when the instance terminates; 'wait' for any you need (#1479). |
 | `--mpi-processes-per-node` |  | int |  | MPI processes per node (default: vCPU count) |
 | `--mpi` |  | bool |  | Enable MPI cluster setup (requires --count &gt; 1) |
-| `--name` |  | string |  | Name your spore (sets Name tag, DNS, and hostname). Either this or the positional form `spawn launch <name>`; both are accepted (#499). |
+| `--name` |  | string |  | Name your spore (sets Name tag, DNS, and hostname). Either this or the positional form 'spawn launch &lt;name&gt;'; both are accepted (#499). |
 | `--nested-spawn` |  | bool |  | Give the instance an IAM role that lets a spawn CLI running on it launch, list, connect to, extend and terminate its own child instances (e.g. a workflow head node). Opt-in: the default spored-instance-role never gets these grants. Children are tagged spawn:managed=true and get their own TTL and spored; a nested spore cannot create IAM roles, so children use the default profile, an existing --instance-profile, or --nested-spawn. Requires --ttl. |
 | `--nested-virtualization` |  | bool |  | Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type. |
 | `--nist-800-171` |  | bool |  | Enable NIST 800-171 Rev 3 compliance mode |

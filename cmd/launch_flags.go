@@ -352,7 +352,7 @@ func init() {
 	launchCmd.Flags().StringVar(&sessionTimeout, "session-timeout", "30m", "Auto-logout idle shells (0 to disable)")
 
 	// Meta
-	launchCmd.Flags().StringVar(&name, "name", "", "Name your spore (sets Name tag, DNS, and hostname). Either this or the positional form `spawn launch <name>`; both are accepted (#499).")
+	launchCmd.Flags().StringVar(&name, "name", "", "Name your spore (sets Name tag, DNS, and hostname). Either this or the positional form 'spawn launch <name>'; both are accepted (#499).")
 	launchCmd.Flags().StringVar(&userData, "user-data", "", "User data (@file or inline)")
 	launchCmd.Flags().StringVar(&userDataFile, "user-data-file", "", "User data file")
 	launchCmd.Flags().StringVar(&dnsName, "dns", "", "Override DNS name if different from --name (advanced)")
@@ -435,7 +435,7 @@ func init() {
 
 	// FSx Lustre
 	launchCmd.Flags().BoolVar(&fsxCreate, "fsx-create", false, "Create new FSx Lustre filesystem with S3 backing (requires --fsx-lifecycle)")
-	launchCmd.Flags().StringVar(&fsxLifecycle, "fsx-lifecycle", "", "FSx lifetime (REQUIRED with --fsx-create): 'ephemeral' (reclaimed asynchronously once the instance is gone — by the out-of-band reaper, not by `spawn terminate`) or 'durable' (persists; requires --fsx-ttl)")
+	launchCmd.Flags().StringVar(&fsxLifecycle, "fsx-lifecycle", "", "FSx lifetime (REQUIRED with --fsx-create): 'ephemeral' (reclaimed asynchronously once the instance is gone — by the out-of-band reaper, not by 'spawn terminate') or 'durable' (persists; requires --fsx-ttl)")
 	launchCmd.Flags().StringVar(&fsxTTL, "fsx-ttl", "", "FSx time-to-live, required for --fsx-lifecycle=durable (e.g. 7d, 720h) — the filesystem is reaped this long after creation once no instance is using it")
 	launchCmd.Flags().StringVar(&fsxID, "fsx-id", "", "Existing FSx Lustre filesystem ID to mount (fs-xxx)")
 	launchCmd.Flags().BoolVar(&fsxSkipValidate, "fsx-skip-validate", false, "Skip FSx filesystem validation (for testing)")
