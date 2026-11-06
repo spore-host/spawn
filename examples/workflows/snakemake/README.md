@@ -34,7 +34,7 @@ a runnable `examples/Snakefile`.
 ## Alternative pattern: drive a spawn sweep from a Snakefile
 
 The `Snakefile` in this directory shows a *different* pattern — using
-`spawn launch --params …` from inside Snakemake rules to run and wait on a spawn
+`spawn launch --param-file …` from inside Snakemake rules to run and wait on a spawn
 parameter **sweep**, then analyze the results. This is the CLI-first orchestration
 approach (spawn as a launcher invoked by rules), useful when you want a Snakefile
 to coordinate a sweep rather than dispatch each rule to its own instance. It needs

@@ -293,7 +293,7 @@ func refuseOldCheckpointRoleDrift(state *SweepState, pf *ParamFileFormat, origPr
 			return fmt.Errorf("parameter set %d of this sweep was launched with instance profile %s, but resuming "+
 				"would launch the pending sets with %s: the checkpoint predates spawn recording the sweep's IAM flags "+
 				"(%s), so it cannot reproduce them. Nothing was launched. Set iam_role: %s under defaults: in %s "+
-				"to resume with the original profile", i, got, want, oldCheckpointIAMFlags, got, state.ParamFile)
+				"to resume with the original profile", i, got, want, oldCheckpointIAMFlags, got, sweepParamSource(state.ParamFile))
 		}
 	}
 	return nil

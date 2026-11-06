@@ -300,7 +300,7 @@ func validateSweepParamKeys(paramFormat *ParamFileFormat) error {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d unusable key(s) in %s:", len(problems), paramFile)
+	fmt.Fprintf(&b, "%d unusable key(s) in %s:", len(problems), sweepParamSource(paramFile))
 	for _, p := range problems {
 		fmt.Fprintf(&b, "\n   %s: %v", p.where, p.err)
 	}

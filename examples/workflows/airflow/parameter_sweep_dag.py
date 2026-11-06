@@ -40,7 +40,7 @@ with DAG(
         task_id='launch_sweep',
         bash_command=(
             'spawn launch '
-            '--params /opt/airflow/config/daily_sweep.yaml '
+            '--param-file /opt/airflow/config/daily_sweep.yaml '
             '--detach '
             '--output-id /tmp/sweep_id.txt'
         ),

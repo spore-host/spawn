@@ -120,8 +120,8 @@ spawn launch <name> [flags]
 | `--on-idle` |  | string |  | Action when the instance goes idle: stop (default) or hibernate. Mirrors --on-complete. NOTE: a stopped/hibernated instance keeps billing for its EBS volumes (and any attached Elastic IP) — for batch/headless work prefer --on-complete terminate so cost is fully bounded |
 | `--os` |  | string |  | Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset. |
 | `--output-id` |  | string |  | Write sweep/instance ID to file for scripting |
-| `--param-file` |  | string |  | Path to parameter sweep file (JSON/YAML/CSV) |
-| `--params` |  | string |  | Inline JSON parameters for sweep |
+| `--param-file` |  | string |  | Path to parameter sweep file (JSON/YAML/CSV). Not with --params |
+| `--params` |  | string |  | Inline JSON sweep parameters, in the schema of a JSON param file (defaults, params and/or grid), e.g. '{"defaults":{"instance_type":"t4g.small"},"params":[{"lr":0.1},{"lr":0.01}]}'. Not a path: for a file, use --param-file. Not with --param-file |
 | `--placement-group` |  | string |  | AWS Placement Group for MPI instances (auto-created if not specified) |
 | `--plugin` |  | stringArray |  | Plugin to install at launch (ref[@version], repeatable) |
 | `--pre-stop-timeout` |  | string |  | Max time to wait for --pre-stop command (default: 5m, spot: 90s; on spot never past the interruption) |

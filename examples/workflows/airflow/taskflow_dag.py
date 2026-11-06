@@ -43,7 +43,7 @@ def spawn_sweep_taskflow():
 
         result = subprocess.run(
             ['spawn', 'launch',
-             '--params', params_file,
+             '--param-file', params_file,
              '--detach',
              '--output-id', '/tmp/spawn_sweep_id.txt'],
             capture_output=True,
@@ -180,7 +180,7 @@ def spawn_sweep_simple():
 
         result = subprocess.run(
             ['spawn', 'launch',
-             '--params', params_file,
+             '--param-file', params_file,
              '--detach',
              '--wait',
              '--wait-timeout', '2h',

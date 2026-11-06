@@ -15,7 +15,7 @@ task spawn_sweep {
 
     echo "Launching spawn parameter sweep..."
     spawn launch \
-      --params ~{params_file} \
+      --param-file ~{params_file} \
       --detach \
       --wait \
       --wait-timeout ~{wait_timeout} \

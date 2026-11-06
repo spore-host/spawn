@@ -30,7 +30,7 @@ class LaunchSweep(luigi.Task):
 
         result = subprocess.run(
             ['spawn', 'launch',
-             '--params', self.params_file,
+             '--param-file', self.params_file,
              '--detach',
              '--output-id', self.output().path],
             capture_output=True,
@@ -173,7 +173,7 @@ class SimpleSweepTask(luigi.Task):
         # Use --wait for simplicity
         result = subprocess.run(
             ['spawn', 'launch',
-             '--params', self.params_file,
+             '--param-file', self.params_file,
              '--detach',
              '--wait',
              '--wait-timeout', '2h',

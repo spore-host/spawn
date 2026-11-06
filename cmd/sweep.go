@@ -28,10 +28,13 @@ type SweepConfig struct {
 
 // SweepState tracks the state of a parameter sweep
 type SweepState struct {
-	SweepID       string          `json:"sweep_id"`
-	SweepName     string          `json:"sweep_name"`
-	CreatedAt     time.Time       `json:"created_at"`
-	ParamFile     string          `json:"param_file"`
+	SweepID   string    `json:"sweep_id"`
+	SweepName string    `json:"sweep_name"`
+	CreatedAt time.Time `json:"created_at"`
+	ParamFile string    `json:"param_file"`
+	// InlineParams is the --params document of a sweep launched without a
+	// param file (#1540), which spawn resume parses in place of ParamFile.
+	InlineParams  string          `json:"inline_params,omitempty"`
 	TotalParams   int             `json:"total_params"`
 	MaxConcurrent int             `json:"max_concurrent"`
 	LaunchDelay   string          `json:"launch_delay"`
@@ -93,12 +96,17 @@ func parseParamFile(path string) (*ParamFileFormat, error) {
 		return nil, err
 	}
 
-	// Convert to cmd.ParamFileFormat (same structure)
+	return fromParserFormat(result), nil
+}
+
+// fromParserFormat converts pkg/params' result to cmd.ParamFileFormat (the
+// same structure, with grid: already expanded into Params).
+func fromParserFormat(result *paramparser.ParamFileFormat) *ParamFileFormat {
 	return &ParamFileFormat{
 		Defaults:            result.Defaults,
 		Params:              result.Params,
 		UnknownTopLevelKeys: result.UnknownTopLevelKeys,
-	}, nil
+	}
 }
 
 // parseCostLimit coerces a param-file `cost_limit:` value to USD. It accepts every

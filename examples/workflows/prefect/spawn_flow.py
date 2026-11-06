@@ -23,7 +23,7 @@ def launch_spawn_sweep(params_file: str) -> str:
 
     result = subprocess.run(
         ['spawn', 'launch',
-         '--params', params_file,
+         '--param-file', params_file,
          '--detach',
          '--output-id', '/tmp/spawn_sweep_id.txt'],
         capture_output=True,

@@ -52,7 +52,7 @@ spec:
       args:
       - |
         spawn launch \
-          --params {{workflow.parameters.sweep-file}} \
+          --param-file {{workflow.parameters.sweep-file}} \
           --detach \
           --output-id /work/sweep_id.txt
 

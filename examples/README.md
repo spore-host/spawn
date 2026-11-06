@@ -34,13 +34,13 @@ spawn slurm submit examples/slurm/bioinformatics.sbatch --spot
 
 > **`spawn stage` was removed in #805.** It uploaded to a bucket it never created,
 > nothing ever downloaded the staged data, and it published a "93% cost reduction"
-> figure for a path that had never run. The parameter file below still works for a
-> normal launch; stage the data yourself (`aws s3 cp`, or an FSx data-repository
+> figure for a path that had never run. The parameter file below is a sweep with one
+> row per sample; stage the data yourself (`aws s3 cp`, or an FSx data-repository
 > association via `--fsx-import-path`) and reference it by path.
 
 **Launch with the parameter file:**
 ```bash
-spawn launch my-genome-run --params examples/staging/reference-genome.yaml
+spawn launch --param-file examples/staging/reference-genome.yaml --sweep-name genome-analysis
 ```
 
 3. **Cost savings:**
@@ -52,7 +52,7 @@ spawn launch my-genome-run --params examples/staging/reference-genome.yaml
 
 1. **Launch hyperparameter search:**
 ```bash
-spawn launch my-sweep --params examples/sweeps/hyperparameter-search.yaml
+spawn launch --param-file examples/sweeps/hyperparameter-search.yaml --sweep-name hyperparam-search
 ```
 
 2. **Monitor progress:**
@@ -62,17 +62,20 @@ spawn sweep status <sweep-id>
 
 3. **Collect top results:**
 ```bash
-spawn collect-results --sweep-id <sweep-id> \
+spawn sweep collect <sweep-id> \
   --metric accuracy \
   --best 5 \
-  --output top5.csv
+  --format csv \
+  --output-file top5.csv
 ```
 
 ### MPI Jobs
 
 1. **Launch MPI simulation:**
 ```bash
-spawn launch my-mpi-run --params examples/mpi/mpi-simulation.yaml --mpi
+spawn launch my-mpi-run --count 16 --mpi --efa --instance-type c5n.18xlarge \
+  --mpi-processes-per-node 36 --ttl 24h \
+  --mpi-command "/opt/simulation input.dat output.dat"
 ```
 
 2. **Features:**
@@ -115,12 +118,12 @@ spawn schedule resume <schedule-id>
 
 1. **Launch sequential job pipeline:**
 ```bash
-spawn launch --batch-queue ml-pipeline-queue.json --instance-type g5.2xlarge
+spawn launch ml-pipeline --batch-queue ml-pipeline-queue.json --instance-type g5.2xlarge
 ```
 
 2. **Simple batch processing:**
 ```bash
-spawn launch --batch-queue simple-queue.json --instance-type t3.medium
+spawn launch simple-batch --batch-queue simple-queue.json --instance-type t3.medium
 ```
 
 3. **Monitor queue execution:**
@@ -171,7 +174,7 @@ spawn queue results <queue-id> --output ./results/
 
 **`reference-genome.yaml`**
 - 100GB reference genome (hg38)
-- 100 sample analysis
+- One sweep row per sample (4 shown; add rows for more)
 - $898 cost savings (99.8%)
 - BWA alignment pipeline
 
@@ -179,13 +182,12 @@ spawn queue results <queue-id> --output ./results/
 
 **`hyperparameter-search.yaml`**
 - 48-trial grid search
-- 4 learning rates × 3 batch sizes × 4 models
-- Multi-region distribution
-- Automatic result collection
+- 4 learning rates × 3 batch sizes × 4 models, expanded from `grid:`
+- Each trial uploads its metrics; rank them with `spawn sweep collect`
 
 ### MPI Examples
 
-**`mpi-simulation.yaml`**
+**`mpi-simulation.yaml`** (a description of the job, not a param file: MPI is `--count` with `--mpi`, which a sweep refuses)
 - 16-node MPI job (576 processes)
 - EFA-enabled for < 10μs latency
 - Placement groups for co-location

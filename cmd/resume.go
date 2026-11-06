@@ -184,21 +184,29 @@ func runResume(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "   Pending: %d\n", state.Pending)
 	fmt.Fprintf(os.Stderr, "   Failed: %d\n\n", state.Failed)
 
-	// Load original parameter file
-	if state.ParamFile == "" {
+	// Load the original parameters: the param file, or the inline --params
+	// document the checkpoint holds (#1540).
+	var paramFormat *ParamFileFormat
+	switch {
+	case state.ParamFile != "":
+		paramFormat, err = parseParamFile(state.ParamFile)
+		if err != nil {
+			return fmt.Errorf("failed to reload parameter file %q: %w", state.ParamFile, err)
+		}
+	case state.InlineParams != "":
+		paramFormat, err = parseInlineParams(state.InlineParams)
+		if err != nil {
+			return fmt.Errorf("failed to reload the sweep's inline --params: %w", err)
+		}
+	default:
 		return fmt.Errorf("parameter file path not found in sweep state")
-	}
-
-	paramFormat, err := parseParamFile(state.ParamFile)
-	if err != nil {
-		return fmt.Errorf("failed to reload parameter file %q: %w", state.ParamFile, err)
 	}
 
 	// Same top-level-key check launchParameterSweep runs (#530). The original
 	// launch would already have refused a file with a dangerous top-level key,
 	// but the file on disk can change between launch and resume, and resume
 	// reloads it fresh rather than trusting the saved state.
-	if err := validateTopLevelParamKeys(state.ParamFile, paramFormat.UnknownTopLevelKeys); err != nil {
+	if err := validateTopLevelParamKeys(sweepParamSource(state.ParamFile), paramFormat.UnknownTopLevelKeys); err != nil {
 		fmt.Fprintf(os.Stderr, "\n❌ ERROR: %v\n\n", err)
 		return fmt.Errorf("unusable param-file keys")
 	}
@@ -711,7 +719,7 @@ func relaunchPending(ctx context.Context, l sweepLauncher, state *SweepState, la
 	if err := refuseUnboundedResume(launchConfigs, pending); err != nil {
 		return nil, nil, 0, &resumeProfileError{err}
 	}
-	if err := ensureResumeProfiles(ctx, iam, state.iamRecord(), state.ParamFile, launchConfigs); err != nil {
+	if err := ensureResumeProfiles(ctx, iam, state.iamRecord(), sweepParamSource(state.ParamFile), launchConfigs); err != nil {
 		return nil, nil, 0, &resumeProfileError{err}
 	}
 	return launchWithRollingQueue(ctx, l, guard, state, launchConfigs, pending, maxConcurrent, state.LaunchDelay)

@@ -62,7 +62,7 @@ class SpawnSweepOperator(BaseOperator):
 
         cmd = [
             'spawn', 'launch',
-            '--params', self.params_file,
+            '--param-file', self.params_file,
             '--detach',
             '--wait',
             '--wait-timeout', self.wait_timeout,
@@ -95,7 +95,7 @@ class SpawnSweepOperator(BaseOperator):
         # Launch sweep
         cmd = [
             'spawn', 'launch',
-            '--params', self.params_file,
+            '--param-file', self.params_file,
             '--detach',
             '--output-id', '/tmp/spawn_sweep_id.txt'
         ]

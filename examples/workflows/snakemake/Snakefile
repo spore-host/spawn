@@ -17,9 +17,13 @@ rule launch_sweep:
         "logs/launch_sweep.log"
     shell:
         """
+        # --output-id writes the sweep ID as soon as the sweep exists; --wait
+        # then blocks until it completes (or --wait-timeout passes).
         spawn launch \
-            --params {SWEEP_FILE} \
+            --param-file {SWEEP_FILE} \
             --detach \
+            --wait \
+            --wait-timeout {SWEEP_TIMEOUT} \
             --output-id {output.sweep_id} \
             2>&1 | tee {log}
         """
@@ -34,13 +38,11 @@ rule wait_sweep:
     shell:
         """
         SWEEP_ID=$(cat {input.sweep_id})
-        echo "Waiting for sweep: $SWEEP_ID" | tee -a {log}
+        echo "Sweep complete: $SWEEP_ID" | tee -a {log}
 
-        # Wait for completion
-        spawn launch --params {SWEEP_FILE} --detach --wait --wait-timeout {SWEEP_TIMEOUT} 2>&1 | tee -a {log}
-
-        # Get final status
-        spawn status $SWEEP_ID --json > {output.status}
+        # Get final status (launch_sweep already waited for completion;
+        # launching again here would start a second sweep)
+        spawn sweep status "$SWEEP_ID" --output json > {output.status}
         """
 
 rule analyze_results:

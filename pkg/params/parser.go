@@ -3,6 +3,7 @@ package params
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -78,10 +79,37 @@ func parseJSON(path string) (*ParamFileFormat, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read parameter file: %w", err)
 	}
+	format, err := decodeJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JSON parameter file: %w", err)
+	}
+	if err := format.finalize(); err != nil {
+		return nil, err
+	}
+	return format, nil
+}
 
+// ParseParamJSON parses an inline JSON parameter document, the value of
+// spawn launch --params (#1540). It is the schema and the parser of a .json
+// param file (defaults, grid, params) applied to bytes instead of a path, so
+// the two cannot drift. A syntax or type error names its line and column.
+func ParseParamJSON(data []byte) (*ParamFileFormat, error) {
+	format, err := decodeJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse inline JSON parameters: %w", err)
+	}
+	if err := format.finalize(); err != nil {
+		return nil, err
+	}
+	return format, nil
+}
+
+// decodeJSON is the JSON half of parseJSON and ParseParamJSON: the strict
+// struct decode, then the generic one that reports unknown top-level keys.
+func decodeJSON(data []byte) (*ParamFileFormat, error) {
 	var format ParamFileFormat
 	if err := json.Unmarshal(data, &format); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON parameter file: %w", err)
+		return nil, withJSONPosition(data, err)
 	}
 
 	// A second, generic decode to see every top-level key the strict struct
@@ -94,11 +122,30 @@ func parseJSON(path string) (*ParamFileFormat, error) {
 	if err := json.Unmarshal(data, &raw); err == nil {
 		format.UnknownTopLevelKeys = unrecognizedTopLevelKeys(raw)
 	}
-
-	if err := format.finalize(); err != nil {
-		return nil, err
-	}
 	return &format, nil
+}
+
+// withJSONPosition adds the line and column of a JSON syntax or type error,
+// which encoding/json reports only as a byte offset it leaves out of the
+// message.
+func withJSONPosition(data []byte, err error) error {
+	var offset int64
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syn):
+		offset = syn.Offset
+	case errors.As(err, &typ):
+		offset = typ.Offset
+	default:
+		return err
+	}
+	// Offset counts the bytes read, the offending one included.
+	pos := int(min(max(offset-1, 0), int64(len(data))))
+	before := string(data[:pos])
+	line := 1 + strings.Count(before, "\n")
+	col := pos - strings.LastIndex(before, "\n")
+	return fmt.Errorf("line %d, column %d: %w", line, col, err)
 }
 
 // parseYAML parses a YAML parameter file

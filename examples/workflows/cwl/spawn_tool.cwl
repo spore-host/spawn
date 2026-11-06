@@ -13,7 +13,7 @@ inputs:
     type: File
     doc: "Parameter sweep YAML/JSON file"
     inputBinding:
-      prefix: --params
+      prefix: --param-file
 
   detach:
     type: boolean

@@ -173,7 +173,7 @@ func TestReservedTagFlagRefusedOnEveryLaunchPath(t *testing.T) {
 	})
 	for _, path := range []struct{ name, queueFile, params string }{
 		{"batch queue", "queue.json", ""},
-		{"parameter sweep", "", "alpha=1,2"},
+		{"parameter sweep", "", `{"params": [{"alpha": 1}, {"alpha": 2}]}`},
 	} {
 		batchQueueFile, params = path.queueFile, path.params
 		calls := 0

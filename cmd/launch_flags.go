@@ -462,15 +462,17 @@ func init() {
 	launchCmd.Flags().StringVar(&fsxMountPoint, "fsx-mount-point", "/fsx", "FSx mount point (default: /fsx)")
 
 	// Parameter sweep
-	launchCmd.Flags().StringVar(&paramFile, "param-file", "", "Path to parameter sweep file (JSON/YAML/CSV)")
-	launchCmd.Flags().StringVar(&params, "params", "", "Inline JSON parameters for sweep")
+	launchCmd.Flags().StringVar(&paramFile, "param-file", "", "Path to parameter sweep file (JSON/YAML/CSV). Not with --params")
+	launchCmd.Flags().StringVar(&params, "params", "", "Inline JSON sweep parameters, in the schema of a JSON param file "+
+		"(defaults, params and/or grid), e.g. '{\"defaults\":{\"instance_type\":\"t4g.small\"},\"params\":[{\"lr\":0.1},{\"lr\":0.01}]}'. "+
+		"Not a path: for a file, use --param-file. Not with --param-file")
 	launchCmd.Flags().BoolVar(&cartesian, "cartesian", false,
 		"Deprecated and inert: use the param file's grid: key, which IS the cartesian product")
 	// #674: parsed and read by NOTHING, and there is nothing for it to cross. The
 	// cartesian product already exists as the param file's `grid:` key
 	// (pkg/params.expandGrid), which takes named value lists and yields one param set
 	// per combination. The input this flag implies — a repeatable `--param lr=0.1,0.2`
-	// — does not exist; `--params` is inline JSON and currently fails closed, and
+	// — does not exist; `--params` is a whole inline JSON document (#1540), and
 	// `params:` in a file is already a list of complete sets with no lists to cross.
 	// So it is deprecated toward grid: rather than implemented a second time.
 	_ = launchCmd.Flags().MarkDeprecated("cartesian",
