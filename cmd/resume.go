@@ -57,9 +57,14 @@ var resumeCmd = &cobra.Command{
 	Short: "Resume an interrupted parameter sweep",
 	Long: `Resume an interrupted parameter sweep from checkpoint.
 
-Reads the sweep state from ~/.spawn/sweeps/<sweep-id>.json,
-queries EC2 for current instance states, and continues launching
-pending parameter sets with rolling queue orchestration.
+A sweep launched with --no-detach ran in the foreground: resume reads its
+state from ~/.spawn/sweeps/<sweep-id>.json, queries EC2 for current instance
+states, and continues launching pending parameter sets with rolling queue
+orchestration.
+
+A detached sweep (the default for spawn launch --param-file, and --detach) has
+no local checkpoint: resume it with --detach, which re-invokes the sweep
+orchestrator from the sweep's orchestration record.
 
 Examples:
   # Resume sweep with original settings
@@ -68,7 +73,7 @@ Examples:
   # Resume with different max-concurrent
   spawn resume --sweep-id <id> --max-concurrent 5
 
-  # Resume in detached mode (Lambda)
+  # Resume a detached sweep (Lambda)
   spawn resume --sweep-id <id> --detach
 
 Lifetime bounds: each relaunched member gets the lifetime flags the sweep
@@ -108,7 +113,7 @@ func init() {
 func registerResumeFlags(c *cobra.Command) {
 	c.Flags().IntVar(&resumeMaxConcurrent, "max-concurrent", 0, "Override max concurrent instances (0 = use original)")
 	c.Flags().BoolVar(&resumeMaxConcurrentAuto, "max-concurrent-auto", false, "Re-derive max concurrent instances from the account's real AWS quota headroom for the pending parameter sets' instance type(s)/region, instead of the original or a user-supplied number (spawn#494). Not yet supported with --detach.")
-	c.Flags().BoolVar(&resumeDetach, "detach", false, "Run sweep orchestration in Lambda")
+	c.Flags().BoolVar(&resumeDetach, "detach", false, "Resume a detached sweep (the default for a parameter sweep): re-invoke the sweep orchestrator from its record. A --no-detach sweep resumes without it")
 	c.Flags().BoolVar(&resumeKeepOnError, "keep-on-error", false, "Keep a relaunched instance whose spored never came up instead of terminating it. It then has no TTL/idle/cost-limit enforcement until spored is confirmed running")
 	c.Flags().StringVar(&resumeTTL, "ttl", "", "Time to live for each relaunched member (e.g. 4h, 1d), replacing the sweep's --ttl; may not be longer than it. A row's own ttl: still wins. Not supported with --detach")
 	c.Flags().StringVar(&resumeIdleTimeout, "idle-timeout", "", "Idle timeout for each relaunched member, replacing the sweep's --idle-timeout; may not be longer than it. A row's own idle_timeout: still wins. Not supported with --detach")
@@ -159,6 +164,13 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// Load sweep state (for locally-orchestrated sweeps)
 	state, err := loadSweepState(resumeSweepID)
 	if err != nil {
+		// Only a --no-detach sweep writes a local checkpoint; a detached one
+		// (the default) resumes from its orchestration record (#1535).
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("failed to load sweep state: %w\n"+
+				"Only a --no-detach sweep has a local checkpoint. A detached sweep (the default) resumes with: spawn resume --sweep-id %s --detach",
+				err, resumeSweepID)
+		}
 		return fmt.Errorf("failed to load sweep state: %w", err)
 	}
 
@@ -556,6 +568,13 @@ func resumeSweepDetached(ctx context.Context, sweepID string) error {
 	// into are re-checked, as at --detach, before anything is re-created or
 	// re-invoked. The params are read (best-effort), not rewritten.
 	if err := detachedResumeRecheck(ctx, cfg, state, resumeAllowMissingEndpoints, aws.NewClient, os.Stderr); err != nil {
+		return err
+	}
+
+	// The orchestrator relaunches through SpawnSweepCrossAccountRole: the same
+	// check a detached launch makes, before anything is re-created or
+	// re-invoked (#1535).
+	if err := requireDetachedSweepRole(ctx, state.AWSAccountID); err != nil {
 		return err
 	}
 
