@@ -269,11 +269,25 @@ func launchNameArgs(cmd *cobra.Command, args []string) error {
 	if len(args) == 1 && flagName != "" && args[0] != flagName {
 		return fmt.Errorf("conflicting names: positional %q and --name %q — pass one", args[0], flagName)
 	}
-	if len(args) == 0 && flagName == "" {
+	if len(args) == 0 && flagName == "" && !paramSweepArgs(cmd) {
 		return fmt.Errorf("a spore name is required: pass it positionally (spawn launch my-spore) " +
 			"or with --name my-spore")
 	}
 	return nil
+}
+
+// paramSweepArgs reports whether cmd's flags make this a parameter sweep, by
+// isSweepLaunch's rule, read from the parsed flags rather than the globals.
+//
+// A sweep needs no spore name (#1532): each member is named by its row's
+// name:, else <sweep-name>-<index> (defaultSweepMember), which is what the
+// examples rely on. A name given anyway is used as before, as every member's
+// Name tag unless its row sets one, and the conflicting-names check above
+// still applies.
+func paramSweepArgs(cmd *cobra.Command) bool {
+	get := func(flag string) string { v, _ := cmd.Flags().GetString(flag); return v }
+	return (get("param-file") != "" || get("params") != "") &&
+		get("batch-queue") == "" && get("queue-template") == ""
 }
 
 func init() {

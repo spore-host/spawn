@@ -59,7 +59,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// And --no-public-ip on a path that does not build its config from the
 	// launch flags (#1433), which would drop it and launch with a public IP.
 	if err := validateNoPublicIPPath(batchQueueFile != "" || queueTemplate != "",
-		launchMode(interactive, instanceType, isTerminal(os.Stdin)) == modeWizard); err != nil {
+		currentLaunchMode() == modeWizard); err != nil {
 		return err
 	}
 
@@ -95,7 +95,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	}
 	// And a nested-spawn role named by --instance-profile with no --ttl, or by
 	// --iam-role at all (#1375), on every path, before any AWS call.
-	if err := validateNestedSpawnRoleFlags(launchMode(interactive, instanceType, isTerminal(os.Stdin)) == modeWizard); err != nil {
+	if err := validateNestedSpawnRoleFlags(currentLaunchMode() == modeWizard); err != nil {
 		return err
 	}
 
@@ -199,7 +199,7 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 	// key fix (#34): pipe mode requires no --instance-type, so explicit flags
 	// never read stdin even when invoked with a piped (non-TTY) stdin, e.g. from
 	// a Java/ProcessBuilder subprocess.
-	switch launchMode(interactive, instanceType, isTerminal(os.Stdin)) {
+	switch currentLaunchMode() {
 	case modeWizard:
 		wiz := wizard.NewWizard(plat)
 		config, err = wiz.Run(ctx)
