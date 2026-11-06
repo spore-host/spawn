@@ -3,6 +3,7 @@ package params
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -465,5 +466,36 @@ func TestParseYAML_EmptyGridAndParamsErrors(t *testing.T) {
 	}
 	if _, err := ParseParamFile(f); err == nil {
 		t.Error("expected error when neither params nor grid is present, got nil")
+	}
+}
+
+// TestParseParamJSONIsTheJSONFileParser: inline --params (#1540) and a .json
+// param file are one parser, so the same bytes give the same result.
+func TestParseParamJSONIsTheJSONFileParser(t *testing.T) {
+	doc := `{"defaults": {"ttl": "1h"}, "params": [{"a": 1}], "grid": {"b": [1, 2]}, "note": "x"}`
+	f := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(f, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fromFile, err := ParseParamFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline, err := ParseParamJSON([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fromFile, inline) {
+		t.Errorf("file %#v\ninline %#v", fromFile, inline)
+	}
+	if len(inline.Params) != 3 || len(inline.UnknownTopLevelKeys) != 1 {
+		t.Errorf("params %d, unknown keys %v; want 3 and [note]", len(inline.Params), inline.UnknownTopLevelKeys)
+	}
+	if _, err := ParseParamJSON([]byte(`{"params": []}`)); err == nil {
+		t.Error("an empty document was accepted")
+	}
+	_, err = ParseParamJSON([]byte("{\n  \"params\": [1,]\n}"))
+	if err == nil || !strings.Contains(err.Error(), "line 2, column 16") {
+		t.Errorf("err = %v, want the syntax error at line 2, column 16", err)
 	}
 }
