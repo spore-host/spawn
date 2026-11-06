@@ -3,7 +3,7 @@
 # using different instance types optimized for each phase.
 #
 # Usage:
-#   spawn sweep --file workflow-ml-training.yaml --detach
+#   spawn launch --param-file workflow-ml-training.yaml --detach
 
 defaults:
   region: us-west-2

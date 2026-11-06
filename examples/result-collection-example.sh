@@ -1,5 +1,5 @@
 #!/bin/bash
-# Example: How to use spawn collect-results with parameter sweeps
+# Example: collect a parameter sweep's results with `spawn sweep collect <sweep-id>`
 #
 # This script demonstrates the full workflow:
 # 1. Run parameter sweep with result generation
@@ -115,14 +115,15 @@ EOF
 
 # Step 2: Launch the sweep
 echo "Launching parameter sweep..."
-SWEEP_ID=$(spawn sweep --file ml-training-sweep.yaml --detach | grep "Sweep ID:" | awk '{print $3}')
+spawn launch --param-file ml-training-sweep.yaml --detach --output-id sweep_id.txt
+SWEEP_ID=$(cat sweep_id.txt)
 
 echo "Sweep ID: $SWEEP_ID"
 echo "Waiting for sweep to complete... (this may take a while)"
 
 # Step 3: Wait for sweep to complete (poll status)
 while true; do
-  STATUS=$(spawn status --sweep-id $SWEEP_ID --json | jq -r '.status')
+  STATUS=$(spawn sweep status "$SWEEP_ID" --output json | jq -r '.status')
   if [ "$STATUS" = "COMPLETED" ] || [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "CANCELLED" ]; then
     break
   fi
@@ -137,16 +138,16 @@ echo ""
 echo "Collecting results..."
 
 # Collect all results to JSON
-spawn collect-results --sweep-id $SWEEP_ID --output-file results.json
+spawn sweep collect "$SWEEP_ID" --output-file results.json
 
 # Collect to CSV for spreadsheet analysis
-spawn collect-results --sweep-id $SWEEP_ID --output-file results.csv --format csv
+spawn sweep collect "$SWEEP_ID" --output-file results.csv --format csv
 
 # Find top 3 runs by accuracy
-spawn collect-results --sweep-id $SWEEP_ID --output-file best-accuracy.json --metric accuracy --best 3
+spawn sweep collect "$SWEEP_ID" --output-file best-accuracy.json --metric accuracy --best 3
 
 # Find top 3 runs by f1_score
-spawn collect-results --sweep-id $SWEEP_ID --output-file best-f1.json --metric f1_score --best 3
+spawn sweep collect "$SWEEP_ID" --output-file best-f1.json --metric f1_score --best 3
 
 echo ""
 echo "Results collected:"

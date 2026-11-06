@@ -3,7 +3,7 @@
 # for different test phases (unit, integration, e2e).
 #
 # Usage:
-#   spawn sweep --file workflow-ci-pipeline.yaml --detach
+#   spawn launch --param-file workflow-ci-pipeline.yaml --detach
 
 defaults:
   region: us-east-1

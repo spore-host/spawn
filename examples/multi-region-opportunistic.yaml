@@ -2,7 +2,7 @@
 # Launches instances across multiple regions, prioritizing regions with proven capacity
 #
 # Usage:
-#   spawn sweep --file multi-region-opportunistic.yaml --mode opportunistic --detach
+#   spawn launch --param-file multi-region-opportunistic.yaml --mode opportunistic --detach
 #
 # This example is useful for:
 # - Maximizing successful launches when capacity is constrained
