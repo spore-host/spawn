@@ -12,18 +12,27 @@ import (
 // #1521: the optional acpid install was `dnf install || yum install`, and on
 // AL2023 yum is dnf. On a t4g.nano the OOM killer took dnf, the same install
 // ran again as yum, and that second run's OOM took spored and
-// systemd-resolved. These run the whole inline bootstrap in the boot sandbox
-// with recording package-manager stand-ins.
+// systemd-resolved. And the AL2023 AMI ships acpid, so that install was a
+// no-op whose repo-metadata load was all it did. These run the whole inline
+// bootstrap in the boot sandbox with recording package-manager stand-ins.
 
 const (
 	acpidNotInstalled = "acpid not installed; stop/terminate will not shut down gracefully"
 	acpidSkipped      = "acpid skipped: MemTotal "
 )
 
+// acpidBin is an acpid on the sandbox's PATH, as the AL2023 AMI ships one.
+const acpidBin = "#!/bin/bash\nexit 0\n"
+
 // pm is a package-manager stand-in that records its arguments in
-// $HOME/<name>-calls and exits code.
+// $HOME/<name>-calls and exits code; exiting 0, it puts acpid on the PATH, as
+// a real install does.
 func pm(name string, code int) string {
-	return "#!/bin/bash\necho \"$*\" >> \"$HOME/" + name + "-calls\"\nexit " + strconv.Itoa(code) + "\n"
+	s := "#!/bin/bash\necho \"$*\" >> \"$HOME/" + name + "-calls\"\n"
+	if code == 0 {
+		s += "printf '#!/bin/bash\\nexit 0\\n' > \"$HOME/bin/acpid\"\nchmod +x \"$HOME/bin/acpid\"\n"
+	}
+	return s + "exit " + strconv.Itoa(code) + "\n"
 }
 
 func meminfo(kb int) string {
@@ -53,6 +62,42 @@ func acpidBoot(t *testing.T, o bootOpts) (*bootSandbox, string) {
 
 func TestAcpidInstallRunsExactlyOnePackageManager(t *testing.T) {
 	const big = 1900000 // a 2 GiB type's MemTotal (t4g.small)
+
+	// The live finding on the fix itself: every AL2023 type, the nano
+	// included, already had acpid, so the install only cost memory.
+	t.Run("acpid already present: no package manager runs and it is enabled", func(t *testing.T) {
+		for name, kb := range map[string]int{"t4g.small": big, "t4g.nano": 422188} {
+			sb, out := acpidBoot(t, bootOpts{meminfo: meminfo(kb), standIns: map[string]string{"acpid": acpidBin, "dnf": pm("dnf", 0), "yum": pm("yum", 0)}})
+			if got := sb.read("dnf-calls") + sb.read("yum-calls"); got != "" {
+				t.Errorf("%s: a package manager ran with acpid already installed: %q\n%s", name, got, out)
+			}
+			if !acpidEnabled(sb) {
+				t.Errorf("%s: the shipped acpid was not enabled\n%s", name, out)
+			}
+			for _, msg := range []string{acpidNotInstalled, acpidSkipped, "acpid installed but not started"} {
+				if strings.Contains(out, msg) {
+					t.Errorf("%s: printed %q though acpid is installed and enabled\n%s", name, msg, out)
+				}
+			}
+		}
+	})
+
+	t.Run("acpid present but the enable fails: says so", func(t *testing.T) {
+		sb, out, err := fullBoot(t, BootstrapConfig{Username: "tester"}, "acpid", bootOpts{meminfo: meminfo(big), standIns: map[string]string{"acpid": acpidBin}})
+		if err != nil || !sporedStarted(sb) {
+			t.Fatalf("err=%v spored=%v\n%s", err, sporedStarted(sb), out)
+		}
+		if !strings.Contains(out, "acpid installed but not started; stop/terminate will not shut down gracefully") || strings.Contains(out, acpidNotInstalled) {
+			t.Errorf("a failed enable of an installed acpid was misreported\n%s", out)
+		}
+	})
+
+	t.Run("an install that exits 0 but leaves no acpid is not called installed", func(t *testing.T) {
+		sb, out := acpidBoot(t, bootOpts{meminfo: meminfo(big), standIns: map[string]string{"dnf": "#!/bin/bash\nexit 0\n"}})
+		if !strings.Contains(out, acpidNotInstalled) || acpidEnabled(sb) {
+			t.Errorf("acpid is absent, so it must be reported not installed and not enabled\n%s", out)
+		}
+	})
 
 	t.Run("dnf present: only dnf runs", func(t *testing.T) {
 		sb, out := acpidBoot(t, bootOpts{meminfo: meminfo(big), standIns: map[string]string{"dnf": pm("dnf", 0), "yum": pm("yum", 0)}})

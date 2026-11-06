@@ -1789,21 +1789,24 @@ echo "✅ Login banner created"
 # graceful; on such a box that is the cheaper loss. Unreadable MemTotal (not
 # Linux) falls through to the install, as before.
 #
-# The inner if is the outer one's condition, so set -e and the ERR trap are off
-# for it: a killed dnf (137) is a false condition, not a failed bootstrap
-# (#1274). Its branches that install nothing end in false; an if with no branch
-# taken would otherwise be true and enable an acpid that is not there.
+# First, though, acpid is looked for: the AL2023 AMI ships it, and there
+# "dnf install -y acpid" installs nothing yet still loads the full repo
+# metadata, which is the load that OOM-killed the t4g.nano (#1515). command -v
+# rather than systemctl list-unit-files: acpid is /usr/sbin/acpid, /usr/sbin is
+# on the bootstrap's PATH (it calls useradd unqualified), and the check costs
+# no output parsing. The same check decides the message afterwards, so "not
+# installed" is said only when acpid is absent.
 SPAWN_MEM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || true)
-if if [ "${SPAWN_MEM_KB:-786432}" -lt 786432 ] 2>/dev/null; then
-    echo "acpid skipped: MemTotal ${SPAWN_MEM_KB} kB < 768 MiB"
-    false
-elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y acpid 2>/dev/null
-elif command -v yum >/dev/null 2>&1; then
-    yum install -y acpid 2>/dev/null
-else
-    false
-fi; then
+if ! command -v acpid >/dev/null 2>&1; then
+    if [ "${SPAWN_MEM_KB:-786432}" -lt 786432 ] 2>/dev/null; then
+        echo "acpid skipped: MemTotal ${SPAWN_MEM_KB} kB < 768 MiB"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y acpid 2>/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y acpid 2>/dev/null || true
+    fi
+fi
+if command -v acpid >/dev/null 2>&1; then
     systemctl enable --now acpid 2>/dev/null || echo "acpid installed but not started; stop/terminate will not shut down gracefully"
 else
     echo "acpid not installed; stop/terminate will not shut down gracefully"
