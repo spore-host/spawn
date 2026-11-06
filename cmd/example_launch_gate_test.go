@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/spf13/pflag"
+
+	"github.com/spore-host/spawn/internal/treewalk"
 )
 
 // The example gate (#1540, extending #1532's usage-line test): every
@@ -75,11 +78,20 @@ func findExampleLaunches(t *testing.T, root string) []exampleLaunch {
 	t.Helper()
 	var out []exampleLaunch
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !exampleTextFile(d.Name()) {
+		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
+		}
+		if d.IsDir() || !exampleTextFile(d.Name()) {
+			return nil
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
+			if treewalk.Vanished(root, path, err) {
+				return nil
+			}
 			return err
 		}
 		lines := strings.Split(string(b), "\n")
@@ -320,13 +332,8 @@ func typedSample(flagType string) (string, bool) {
 // name rule, the sweep flag rules and the param-source checks.
 func checkExampleLaunch(t *testing.T, l exampleLaunch) error {
 	t.Helper()
+	keepLaunchGlobals(t)
 	fs := launchCmd.Flags()
-	t.Cleanup(func() {
-		fs.Visit(func(f *pflag.Flag) {
-			_ = f.Value.Set(f.DefValue)
-			f.Changed = false
-		})
-	})
 	argv := append([]string(nil), l.argv...)
 	for i := 0; i+1 < len(argv); i++ {
 		name, ok := strings.CutPrefix(argv[i], "--")
@@ -339,15 +346,15 @@ func checkExampleLaunch(t *testing.T, l exampleLaunch) error {
 			}
 		}
 	}
-	err := launchCmd.ParseFlags(argv)
+	positional, err := parseExampleLaunchArgv(argv)
 	if err != nil && l.partial() && strings.Contains(err.Error(), "flag needs an argument") {
 		// A fragment may end at a flag: "spawn launch … --user-data".
-		err = launchCmd.ParseFlags(append(argv, "…"))
+		positional, err = parseExampleLaunchArgv(append(argv, "…"))
 	}
 	if err != nil {
 		return fmt.Errorf("spawn launch rejects the flags %q: %v", l.argv, err)
 	}
-	if err := launchNameArgs(launchCmd, fs.Args()); err != nil && !l.partial() {
+	if err := launchNameArgs(launchCmd, positional); err != nil && !l.partial() {
 		return fmt.Errorf("spawn launch %q: %v", l.argv, err)
 	}
 	if isSweepLaunch() {
@@ -437,4 +444,58 @@ func TestExampleLaunchGateCatchesParamsGivenAFile(t *testing.T) {
 			t.Log(err)
 		})
 	}
+}
+
+// parseExampleLaunchArgv parses argv as spawn launch's flags and sets them on
+// launchCmd, returning the positional arguments. It parses into a copy of the
+// flag definitions and then sets each value as setLaunchFlag does: pflag's
+// own Set on a slice flag marks an internal "changed" that nothing can clear,
+// so a later test's --tag would append to this one's. The caller is under
+// keepLaunchGlobals.
+func parseExampleLaunchArgv(argv []string) ([]string, error) {
+	clone := pflag.NewFlagSet("launch", pflag.ContinueOnError)
+	clone.SetOutput(io.Discard)
+	define := func(f *pflag.Flag) {
+		if clone.Lookup(f.Name) != nil {
+			return
+		}
+		switch f.Value.Type() {
+		case "bool":
+			clone.BoolP(f.Name, f.Shorthand, false, "")
+		case "stringSlice":
+			clone.StringSliceP(f.Name, f.Shorthand, nil, "")
+		default:
+			if _, ok := f.Value.(pflag.SliceValue); ok {
+				clone.StringArrayP(f.Name, f.Shorthand, nil, "")
+			} else {
+				clone.StringP(f.Name, f.Shorthand, "", "")
+			}
+		}
+	}
+	launchCmd.Flags().VisitAll(define)
+	launchCmd.InheritedFlags().VisitAll(define)
+	if err := clone.Parse(argv); err != nil {
+		return nil, err
+	}
+	var setErr error
+	clone.Visit(func(c *pflag.Flag) {
+		f := launchCmd.Flags().Lookup(c.Name)
+		if f == nil {
+			f = launchCmd.InheritedFlags().Lookup(c.Name)
+		}
+		if f == nil || setErr != nil {
+			return
+		}
+		var err error
+		if sv, ok := f.Value.(pflag.SliceValue); ok {
+			err = sv.Replace(c.Value.(pflag.SliceValue).GetSlice())
+		} else {
+			err = f.Value.Set(c.Value.String())
+		}
+		if err != nil {
+			setErr = fmt.Errorf("invalid argument %q for --%s: %v", c.Value.String(), c.Name, err)
+		}
+		f.Changed = true
+	})
+	return clone.Args(), setErr
 }
