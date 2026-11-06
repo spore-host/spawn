@@ -66,6 +66,11 @@ whether the next --bootstrap-egress proxy launch would reuse it (and if not,
 why). For each VPC, also the two security groups and how many network
 interfaces use the clients group.
 
+The activity is what the proxy last published, and spored rewrites it at most
+every 10 minutes in steady use, so it can trail the proxy's real traffic: the
+last activity is "at or after" the time shown, and an idle expiry is "no
+earlier than" the one shown. The proxy itself ends on its own current clock.
+
 -o json prints the same as JSON, with stable snake_case keys.
 
 Read-only: ec2:DescribeInstances and ec2:DescribeSecurityGroups.`,
@@ -257,6 +262,12 @@ type egressProxyInstanceState struct {
 	Activity        egressProxyActivity `json:"activity"`
 }
 
+// egressProxyActivity is what the proxy's activity tags say. spored throttles
+// the tag writes (egressproxy.ActivityPublisher), so the tag can trail the
+// proxy's real last activity, never lead it: LastActivity is a lower bound,
+// IdleSeconds (the tag's age) an upper bound on how long it has been idle, and
+// IdleExpiresAt a lower bound on the idle expiry (#1528). spored enforces the
+// expiry on its own, current clock.
 type egressProxyActivity struct {
 	// Known is whether the proxy published its activity tags.
 	Known             bool       `json:"known"`
@@ -266,7 +277,14 @@ type egressProxyActivity struct {
 	IdleExpiresAt     *time.Time `json:"idle_expires_at"`
 	// ExpiresAt is the earlier of the idle expiry and the deadline.
 	ExpiresAt *time.Time `json:"expires_at"`
-	Note      string     `json:"note,omitempty"`
+	// ExpiresAtIsLowerBound is true when ExpiresAt is the idle expiry, which
+	// later traffic, or traffic the tag does not show yet, moves later; false
+	// when it is the deadline, or unknown.
+	ExpiresAtIsLowerBound bool `json:"expires_at_is_lower_bound"`
+	// PublishIntervalSeconds is the most often spored rewrites the tag in
+	// steady use (egressproxy.ActivityPublishEvery); null when unknown.
+	PublishIntervalSeconds *int64 `json:"publish_interval_seconds"`
+	Note                   string `json:"note,omitempty"`
 }
 
 func timePtr(t time.Time) *time.Time {
@@ -316,15 +334,49 @@ func egressProxyVPCReport(region string, inv deploy.VPCInventory, cliVersion str
 			st.Activity = egressProxyActivity{Note: activityUnknownNote(), ExpiresAt: timePtr(p.Deadline)}
 		} else {
 			st.Activity = egressProxyActivity{Known: true, LastActivity: timePtr(l.LastActivity),
-				IdleSeconds: secondsPtr(now.Sub(l.LastActivity)), ExpiresAt: timePtr(l.Expiry())}
+				IdleSeconds: secondsPtr(now.Sub(l.LastActivity)), ExpiresAt: timePtr(l.Expiry()),
+				PublishIntervalSeconds: secondsPtr(egressproxy.ActivityPublishEvery)}
 			if l.Idle > 0 {
 				st.Activity.IdlePeriodSeconds = secondsPtr(l.Idle)
 				st.Activity.IdleExpiresAt = timePtr(l.IdleExpiry())
+				st.Activity.ExpiresAtIsLowerBound = l.IdleExpiry().Equal(l.Expiry())
 			}
 		}
 		out.Proxies = append(out.Proxies, st)
 	}
 	return out
+}
+
+// egressProxyActivityLines renders a proxy's known activity for the text
+// report: when it was last active and the expiry that follows, each stated as
+// the bound it is (#1528). The tag can trail the proxy's real activity, so the
+// activity is "at or after" its value and an idle expiry is "no earlier than"
+// the one it implies; the tag's age is shown so the reader can judge the gap.
+// The deadline is exact.
+func egressProxyActivityLines(a egressProxyActivity, now time.Time) []string {
+	activity := fmt.Sprintf("activity  last at or after %s (tag %s old", fmtStatusTime(a.LastActivity),
+		formatDuration(time.Duration(*a.IdleSeconds)*time.Second))
+	if a.PublishIntervalSeconds != nil {
+		activity += fmt.Sprintf("; spored updates it at most every %s in steady use",
+			formatDuration(time.Duration(*a.PublishIntervalSeconds)*time.Second))
+	}
+	lines := []string{activity + ")"}
+	if a.ExpiresAt == nil {
+		return lines
+	}
+	left := a.ExpiresAt.Sub(now)
+	if !a.ExpiresAtIsLowerBound {
+		if left > 0 {
+			return append(lines, fmt.Sprintf("expires   at its deadline, in %s", formatDuration(left)))
+		}
+		return append(lines, fmt.Sprintf("expires   at its deadline, passed %s ago", formatDuration(-left)))
+	}
+	idle := "idle period " + formatDuration(time.Duration(*a.IdlePeriodSeconds)*time.Second)
+	if left > 0 {
+		return append(lines, fmt.Sprintf("expires   no earlier than %s, in %s (%s)", fmtStatusTime(a.ExpiresAt), formatDuration(left), idle))
+	}
+	return append(lines, fmt.Sprintf("expires   no earlier than %s (%s; by the tag it passed %s ago, "+
+		"but spored ends it on its own clock, from its real last activity)", fmtStatusTime(a.ExpiresAt), idle, formatDuration(-left)))
 }
 
 func runEgressProxyStatus(cmd *cobra.Command, _ []string) error {
@@ -417,20 +469,9 @@ func renderEgressProxyStatus(w io.Writer, r egressProxyStatusReport, now time.Ti
 			if !a.Known {
 				fmt.Fprintf(w, "    activity  %s\n", a.Note)
 			} else {
-				line := fmt.Sprintf("idle for %s (last %s)", formatDuration(time.Duration(*a.IdleSeconds)*time.Second),
-					fmtStatusTime(a.LastActivity))
-				if a.ExpiresAt != nil {
-					why := "deadline"
-					if a.IdleExpiresAt != nil && a.IdleExpiresAt.Equal(*a.ExpiresAt) {
-						why = "idle period " + formatDuration(time.Duration(*a.IdlePeriodSeconds)*time.Second)
-					}
-					if left := a.ExpiresAt.Sub(now); left > 0 {
-						line += fmt.Sprintf(", expires in %s (%s)", formatDuration(left), why)
-					} else {
-						line += fmt.Sprintf(", expiry due (%s)", why)
-					}
+				for _, line := range egressProxyActivityLines(a, now) {
+					fmt.Fprintf(w, "    %s\n", line)
 				}
-				fmt.Fprintf(w, "    activity  %s\n", line)
 			}
 			switch {
 			case p.Reusable:

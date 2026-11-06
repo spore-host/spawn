@@ -153,7 +153,8 @@ func TestEgressProxyStatusText(t *testing.T) {
 		"i-new  running  10.0.1.5:3128  public 54.0.0.1",
 		"version   " + version() + " (matches this spawn)",
 		"deadline  " + epNow.Add(-time.Hour).Add(egressproxy.MaxLife).Format(time.RFC3339) + " (5d23h left)",
-		"activity  idle for 3h (last 2026-11-03T09:00:00Z), expires in 2d21h (idle period 3d)",
+		"activity  last at or after 2026-11-03T09:00:00Z (tag 3h old; spored updates it at most every 10m in steady use)",
+		"expires   no earlier than 2026-11-06T09:00:00Z, in 2d21h (idle period 3d)",
 		"reuse     yes",
 		"version   0.157.0 (not this spawn's " + version() + ")",
 		"activity  unknown (proxy predates spawn v" + egressproxy.ActivityTagsSince + ")",
@@ -198,8 +199,8 @@ func TestEgressProxyStatusJSON(t *testing.T) {
 		"vpc":      {vpc, "clients_group,proxies,proxy_group,region,vpc_id"},
 		"group":    {vpc.(map[string]any)["clients_group"], "eni_count,exists,id,instances,name"},
 		"proxy":    {proxies[0], "activity,deadline,instance_id,launch_time,port,private_ip,public_ip,reusable,spawns_proxy,state,time_left_seconds,version,version_matches"},
-		"activity": {proxies[0].(map[string]any)["activity"], "expires_at,idle_expires_at,idle_period_seconds,idle_seconds,known,last_activity"},
-		"unknown":  {proxies[1].(map[string]any)["activity"], "expires_at,idle_expires_at,idle_period_seconds,idle_seconds,known,last_activity,note"},
+		"activity": {proxies[0].(map[string]any)["activity"], "expires_at,expires_at_is_lower_bound,idle_expires_at,idle_period_seconds,idle_seconds,known,last_activity,publish_interval_seconds"},
+		"unknown":  {proxies[1].(map[string]any)["activity"], "expires_at,expires_at_is_lower_bound,idle_expires_at,idle_period_seconds,idle_seconds,known,last_activity,note,publish_interval_seconds"},
 	} {
 		if got := keys(tc.m); got != tc.want {
 			t.Errorf("%s keys %s, want %s", name, got, tc.want)
@@ -209,11 +210,62 @@ func TestEgressProxyStatusJSON(t *testing.T) {
 	if p["reusable"] != true || p["version_matches"] != true || p["port"].(float64) != 3128 {
 		t.Errorf("proxy %v", p)
 	}
-	if a := p["activity"].(map[string]any); a["idle_seconds"].(float64) != 3*3600 || a["idle_period_seconds"].(float64) != 72*3600 {
+	if a := p["activity"].(map[string]any); a["idle_seconds"].(float64) != 3*3600 || a["idle_period_seconds"].(float64) != 72*3600 ||
+		a["expires_at_is_lower_bound"] != true || a["publish_interval_seconds"].(float64) != 600 {
 		t.Errorf("activity %v", a)
 	}
 	if old := proxies[1].(map[string]any); old["reusable"] != false || !strings.Contains(old["not_reused_reason"].(string), "0.157.0") {
 		t.Errorf("old proxy %v", old)
+	}
+}
+
+// #1528: the activity tag can trail the proxy's real activity by up to the
+// publish throttle, so each line states the bound it is. The issue's live case:
+// at 23:42, the tag still said the launch time 23:36:25 though traffic ran at
+// 23:39:58, and status said "expires in 8m"; spored ended the proxy at 23:55.
+func TestEgressProxyActivityLinesStateTheirBounds(t *testing.T) {
+	at := func(hms string) *time.Time {
+		v, err := time.Parse(time.DateTime, "2026-11-04 "+hms)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &v
+	}
+	sec := func(d time.Duration) *int64 { return secondsPtr(d) }
+	now := *at("23:42:25")
+	idle := egressProxyActivity{Known: true, LastActivity: at("23:36:25"), IdleSeconds: sec(6 * time.Minute),
+		IdlePeriodSeconds: sec(15 * time.Minute), IdleExpiresAt: at("23:51:25"), ExpiresAt: at("23:51:25"),
+		ExpiresAtIsLowerBound: true, PublishIntervalSeconds: sec(egressproxy.ActivityPublishEvery)}
+	deadline := idle
+	deadline.ExpiresAt, deadline.ExpiresAtIsLowerBound = at("23:45:25"), false
+	past := idle
+	past.ExpiresAt = at("23:40:25")
+	pastDeadline := deadline
+	pastDeadline.ExpiresAt = at("23:40:25")
+	for name, tc := range map[string]struct {
+		a    egressProxyActivity
+		want []string
+	}{
+		"idle expiry": {idle, []string{
+			"activity  last at or after 2026-11-04T23:36:25Z (tag 6m old; spored updates it at most every 10m in steady use)",
+			"expires   no earlier than 2026-11-04T23:51:25Z, in 9m (idle period 15m)",
+		}},
+		"deadline first": {deadline, []string{
+			"activity  last at or after 2026-11-04T23:36:25Z (tag 6m old; spored updates it at most every 10m in steady use)",
+			"expires   at its deadline, in 3m",
+		}},
+		"idle expiry passed by the tag": {past, []string{
+			"activity  last at or after 2026-11-04T23:36:25Z (tag 6m old; spored updates it at most every 10m in steady use)",
+			"expires   no earlier than 2026-11-04T23:40:25Z (idle period 15m; by the tag it passed 2m ago, but spored ends it on its own clock, from its real last activity)",
+		}},
+		"deadline passed": {pastDeadline, []string{
+			"activity  last at or after 2026-11-04T23:36:25Z (tag 6m old; spored updates it at most every 10m in steady use)",
+			"expires   at its deadline, passed 2m ago",
+		}},
+	} {
+		if got := egressProxyActivityLines(tc.a, now); strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+			t.Errorf("%s:\n got %q\nwant %q", name, got, tc.want)
+		}
 	}
 }
 

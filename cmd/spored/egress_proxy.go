@@ -241,8 +241,9 @@ func (m *egressProxyMode) serve(ctx context.Context, identity *provider.Identity
 
 // persistLoop writes the last-activity time to disk whenever it has moved,
 // and publishes it as the activity tags at the publisher's pace: on the first
-// tick, then at most once per [egressproxy.ActivityPublishEvery] while it
-// moves.
+// tick, at once for the first activity after a quiet period, and otherwise at
+// most once per [egressproxy.ActivityPublishEvery] while it moves (see
+// [egressproxy.ActivityPublisher]).
 func (m *egressProxyMode) persistLoop(ctx context.Context, tags idleSetter) {
 	every := m.persist
 	if every <= 0 {
