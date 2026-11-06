@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `examples/staging/ml-training.yaml` was not a param file (top-level `sweep_name:`, `count:`, `base_command:`). It is now one: one ensemble member per region, each reading that region's copy of the dataset, with a usage line the launch gate checks. The nextflow README says nf-spawn polls each task's instance, which is what `spawn status` is for.
   - **Gate:** a second test finds every `spawn status` and `spawn sweep …` invocation under `examples/` (the same Markdown, shell, YAML, WDL and Python forms as the launch gate, with the same placeholder handling). Each must resolve to a runnable command, parse with its flags, use no deprecated flag and pass its argument count, and a sweep-shaped argument to `spawn status` (`sweep-…`, `$SWEEP_ID`, `<sweep-id>`, the Python `sweep_id`) fails it. Against the examples before this fix it fails 25 invocations.
 
+### Security
+
+- **golang.org/x/net is bumped to v0.62.0 in every module (CVE-2026-78661, HIGH, `x/net/html`)**: the root, `lambda/dns-updater`, `lambda/sweep-orchestrator` and `lambda/ttl-reaper`. It was v0.60.0 everywhere. The advisory was published after v0.160.0, and Trivy caught it on the v0.161.0 release PR.
+
 ## [0.160.0] - 2026-11-05
 
 ### Added
