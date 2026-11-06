@@ -100,7 +100,8 @@ func launchWithBatchQueue(ctx context.Context, plat *platform.Platform, auditLog
 		queueRegion = resolved
 	}
 
-	// Load AWS config for spore-host-dev (where EC2 instances run)
+	// The compute account, where the queue instance runs: the caller's own
+	// unless SPAWN_COMPUTE_PROFILE / compute_profile names another (#1538).
 	devCfg, err := spawnconfig.LoadComputeAWSConfig(ctx, queueRegion)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)

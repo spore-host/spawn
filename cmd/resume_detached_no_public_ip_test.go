@@ -146,7 +146,8 @@ func TestDetachedResumeRechecksEveryPinnedSubnet(t *testing.T) {
 		t.Fatalf("the params pin only %v; the gate needs several subnets to tell every from some", got)
 	}
 
-	// Wired into the detached resume, with the user's credentials, before
+	// Wired into the detached resume, with the compute account's credentials
+	// (the account the members launch in, #1538), before
 	// anything is re-created or the orchestrator re-invoked.
 	calls := funcCalls(t, "resume.go")["resumeSweepDetached"]
 	at := func(name string) int { return slices.Index(calls, name) }
@@ -157,8 +158,9 @@ func TestDetachedResumeRechecksEveryPinnedSubnet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`detachedResumeRecheck\(ctx, cfg, state, resumeAllowMissingEndpoints, aws\.NewClient, `).Match(src) {
-		t.Error("resumeSweepDetached does not check with the user's credentials (aws.NewClient) and resume's --allow-missing-endpoints")
+	if !regexp.MustCompile(`detachedResumeRecheck\(ctx, cfg, state, resumeAllowMissingEndpoints, computeClient, `).Match(src) ||
+		!regexp.MustCompile(`computeClient := func\(ctx context\.Context\) \(\*aws\.Client, error\) \{ return newComputeClient\(ctx, ""\) \}`).Match(src) {
+		t.Error("resumeSweepDetached does not check with the compute account's credentials (newComputeClient) and resume's --allow-missing-endpoints")
 	}
 	// And detachedResumeRecheck checks the params it reads.
 	stubDetachedParams(t, pf, nil)

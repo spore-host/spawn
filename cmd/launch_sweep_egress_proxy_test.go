@@ -353,11 +353,13 @@ func TestDetachedSweepAcceptsTheProxy(t *testing.T) {
 			for k, v := range tc.flags {
 				setLaunchFlag(t, k, v)
 			}
-			// The detached path's first AWS step: the compute account's
-			// config, which the hermetic environment has none of.
+			// The detached path's infra step: the spore-host-infra profile,
+			// which the hermetic environment has none of. (Its compute step
+			// used to stop it first, on the spore-host-dev profile; compute is
+			// the caller's own credentials since #1538.)
 			err := runLaunch(launchCmd, nil)
-			if errors.Is(err, errEgressProxyUnsupported) || err == nil || !strings.Contains(err.Error(), "load compute AWS config") {
-				t.Fatalf("runLaunch = %v, want it to reach the detached path (load compute AWS config)", err)
+			if errors.Is(err, errEgressProxyUnsupported) || err == nil || !strings.Contains(err.Error(), "load infra AWS config") {
+				t.Fatalf("runLaunch = %v, want it to reach the detached path (load infra AWS config)", err)
 			}
 			if bootstrapEgress != aws.BootstrapEgressProxy {
 				t.Errorf("bootstrap egress %q, want proxy", bootstrapEgress)

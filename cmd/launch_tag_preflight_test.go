@@ -24,6 +24,28 @@ import (
 type tagLimitAWS struct {
 	mu      sync.Mutex
 	actions []string
+	keys    []string // the access key that signed each request, by index
+}
+
+// signingKey is the access key ID in a SigV4 Authorization header.
+func signingKey(r *http.Request) string {
+	_, after, ok := strings.Cut(r.Header.Get("Authorization"), "Credential=")
+	if !ok {
+		return ""
+	}
+	key, _, _ := strings.Cut(after, "/")
+	return key
+}
+
+// signingKeys is the distinct access keys that signed the recorded requests.
+func (f *tagLimitAWS) signingKeys() map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]int{}
+	for _, k := range f.keys {
+		out[k]++
+	}
+	return out
 }
 
 func (f *tagLimitAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +60,7 @@ func (f *tagLimitAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.actions = append(f.actions, action)
+	f.keys = append(f.keys, signingKey(r))
 	f.mu.Unlock()
 	if action == "GetCallerIdentity" {
 		w.Header().Set("Content-Type", "text/xml")

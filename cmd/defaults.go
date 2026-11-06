@@ -22,11 +22,17 @@ Valid keys:
   idle-timeout       Default idle timeout duration (e.g. 30m, 1h)
   hibernate-on-idle  Hibernate instead of stopping on idle (true/false)
   bootstrap-egress   --bootstrap-egress for --no-public-ip launches (none/proxy)
+  compute-profile    AWS profile for the compute account, where instances and
+                     detached sweep members launch, when SPAWN_COMPUTE_PROFILE
+                     is unset. Unset, spawn uses your own profile (--profile /
+                     AWS_PROFILE) or the ambient credentials. For split setups
+                     that launch in a dedicated account (e.g. spore-host-dev).
 
 Examples:
   spawn defaults set slack-workspace T03NE3GTY
   spawn defaults set active-processes rsession
   spawn defaults set idle-timeout 1h
+  spawn defaults set compute-profile spore-host-dev
   spawn defaults list
   spawn defaults unset active-processes`,
 }
