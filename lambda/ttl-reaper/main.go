@@ -1277,8 +1277,13 @@ func (r *reaper) evaluate(inst ec2types.Instance, region string, now time.Time) 
 			// REAPER_MAX_AGE is now capped by it. `spawn launch` warns when --ttl
 			// exceeds the default ceiling so this is not a surprise, and an
 			// operator who wants longer-lived instances raises MaxAge explicitly.
+		} else {
+			// Only a value that failed to parse reaches here. This line used to
+			// sit after the if, so a valid deadline still in the future — which
+			// falls through to the ceiling above — logged it too, on every cycle
+			// for nearly every live instance (#1524).
+			log.Printf("instance %s: unparseable ttl-deadline %q, falling back to spawn:ttl, then max-age", id, dl)
 		}
-		log.Printf("instance %s: unparseable ttl-deadline %q, falling back to spawn:ttl, then max-age", id, dl)
 	}
 
 	// 1b. No usable deadline, but a spawn:ttl: the deadline spored itself
