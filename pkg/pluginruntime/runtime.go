@@ -161,6 +161,15 @@ func (rt *Runtime) InstallWithProvenance(ctx context.Context, spec *plugin.Plugi
 		return fmt.Errorf("save initial state: %w", err)
 	}
 
+	// Every artifact the spec downloads must be pinned by sha256 (#838). Check
+	// the whole spec before a single step runs, so a spec that would fetch an
+	// unverifiable artifact halfway through install never starts, whichever
+	// path it arrived by (the push API validates; launch-time declarations do
+	// not).
+	if err := plugin.CheckArtifactPins(spec); err != nil {
+		return rt.failPlugin(state, err)
+	}
+
 	tmplCtx := rt.buildTemplateContext(state)
 
 	// Pre-flight: conditions.remote, before any install step runs (#1040). The

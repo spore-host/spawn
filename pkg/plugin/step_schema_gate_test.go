@@ -87,7 +87,7 @@ func TestValidatorAcceptsExactlyWhatTheExecutorsRun(t *testing.T) {
 
 	for path, r := range reads {
 		for typ := range allTypes {
-			err := validateOneStep(t, sections[path], plugin.Step{Type: typ})
+			err := validateOneStep(t, sections[path], minimalStep(typ))
 			switch {
 			case r.types[typ] && err != nil:
 				t.Errorf("%s: %s runs a bare %q step, but Validate rejects it: %v", path, sectionExecutors[path], typ, err)
@@ -99,7 +99,7 @@ func TestValidatorAcceptsExactlyWhatTheExecutorsRun(t *testing.T) {
 			read := r.fieldsFor(typ)
 			for _, k := range yamlKey {
 				goName, key := k.goName, k.yaml
-				st := plugin.Step{Type: typ}
+				st := minimalStep(typ)
 				setStepField(&st, k.index)
 				err := validateOneStep(t, sections[path], st)
 				switch {
@@ -142,6 +142,17 @@ func discoverStepSections(typ reflect.Type, prefix string) map[string][]int {
 	return out
 }
 
+// minimalStep is the least a step of type typ must carry to be valid. A fetch
+// must pin its download by sha256 (#838): Validate refuses, and the executor
+// will not run, a bare one. Every other type is valid bare.
+func minimalStep(typ string) plugin.Step {
+	st := plugin.Step{Type: typ}
+	if typ == "fetch" {
+		st.SHA256 = strings.Repeat("a", 64)
+	}
+	return st
+}
+
 // validateOneStep validates an otherwise-valid spec holding only st, in the
 // section at index path idx.
 func validateOneStep(t *testing.T, idx []int, st plugin.Step) error {
@@ -171,13 +182,20 @@ func stepYAMLKeys() []stepFieldKey {
 }
 
 // setStepField gives a Step field a value that is well-formed for every check
-// Validate makes on it (64 lowercase hex chars passes sha256's format check),
+// Validate makes on it (64 lowercase hex chars passes sha256's format check,
+// x86_64 passes arch's, 1 passes size's),
 // so a rejection can only be about the field being there.
 func setStepField(st *plugin.Step, index int) {
 	f := reflect.ValueOf(st).Elem().Field(index)
+	if reflect.TypeOf(*st).Field(index).Name == "Arch" {
+		f.SetString("x86_64") // the one string field with an enumerated value
+		return
+	}
 	switch f.Kind() {
 	case reflect.String:
 		f.SetString(strings.Repeat("a", 64))
+	case reflect.Int64:
+		f.SetInt(1)
 	case reflect.Bool:
 		f.SetBool(true)
 	case reflect.Map:
