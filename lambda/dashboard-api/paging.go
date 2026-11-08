@@ -69,18 +69,3 @@ func scanAll(ctx context.Context, api dynamodb.ScanAPIClient, input *dynamodb.Sc
 	return items, nil
 }
 
-// scanFirst returns the first item a filtered Scan matches, following pages
-// until one matches or the table is exhausted (nil, nil: no match).
-func scanFirst(ctx context.Context, api dynamodb.ScanAPIClient, input *dynamodb.ScanInput) (map[string]types.AttributeValue, error) {
-	p := dynamodb.NewScanPaginator(api, input)
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(page.Items) > 0 {
-			return page.Items[0], nil
-		}
-	}
-	return nil, nil
-}

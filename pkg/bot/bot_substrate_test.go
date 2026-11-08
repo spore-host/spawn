@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/spore-host/spawn/pkg/botsecret"
 	"github.com/spore-host/spawn/pkg/testutil"
 )
 
@@ -153,7 +154,7 @@ func TestBotStore_BatchDeleteRegistrations(t *testing.T) {
 }
 
 func TestBotStore_WorkspaceAndConnectCode(t *testing.T) {
-	c := newTestClient(t)
+	c, _ := newKMSTestClient(t)
 	ctx := context.Background()
 
 	ws := &Workspace{
@@ -164,8 +165,11 @@ func TestBotStore_WorkspaceAndConnectCode(t *testing.T) {
 		t.Fatalf("PutWorkspace: %v", err)
 	}
 	got, err := c.GetWorkspace(ctx, "slack", "T3")
-	if err != nil || got == nil || got.BotToken != "xoxb-1" {
+	if err != nil || got == nil || got.WorkspaceName != "acme" {
 		t.Fatalf("GetWorkspace: %+v %v", got, err)
+	}
+	if tok, err := c.Credential(ctx, got, botsecret.BotToken); err != nil || tok != "xoxb-1" {
+		t.Fatalf("Credential(bot token) = %q, %v", tok, err)
 	}
 	if missing, _ := c.GetWorkspace(ctx, "slack", "nope"); missing != nil {
 		t.Errorf("expected nil for missing workspace, got %+v", missing)
@@ -174,8 +178,10 @@ func TestBotStore_WorkspaceAndConnectCode(t *testing.T) {
 	if err := c.UpdateWorkspaceTokens(ctx, "slack", "T3", "xoxb-2", "refresh", 999); err != nil {
 		t.Fatalf("UpdateWorkspaceTokens: %v", err)
 	}
-	if got, _ := c.GetWorkspace(ctx, "slack", "T3"); got.BotToken != "xoxb-2" || got.TokenExpiresAt != 999 {
+	if got, _ := c.GetWorkspace(ctx, "slack", "T3"); got.TokenExpiresAt != 999 {
 		t.Errorf("token update not persisted: %+v", got)
+	} else if tok, err := c.Credential(ctx, got, botsecret.BotToken); err != nil || tok != "xoxb-2" {
+		t.Errorf("token update not persisted: bot token %q, %v", tok, err)
 	}
 
 	list, err := c.ListWorkspaces(ctx, "slack")

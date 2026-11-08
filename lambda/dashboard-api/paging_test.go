@@ -21,7 +21,6 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 )
 
 // pagedDynamo serves DynamoDB Query and Scan in pages, the way DynamoDB does
@@ -453,28 +452,11 @@ func TestDeleteTeamRemovesEveryMembershipPage(t *testing.T) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-// scanFirst backs the Slack token rotation's workspace lookup, a filtered
-// Scan: the match can be on a page after empty ones.
-func TestScanFirstFollowsEmptyPages(t *testing.T) {
-	const table = "spore-slack-workspaces"
-	d := &pagedDynamo{pages: map[string][][]string{table: {nil, nil, {`{"workspace_key":{"S":"T1"}}`}}}}
-	client := dynamodb.NewFromConfig(d.cfg())
-	item, err := scanFirst(context.Background(), client, &dynamodb.ScanInput{TableName: aws.String(table)})
-	if err != nil || item == nil {
-		t.Fatalf("scanFirst = %v, %v; want the match on the third page", item, err)
-	}
-
-	d.failAt = map[string]int{table: 1}
-	item, err = scanFirst(context.Background(), client, &dynamodb.ScanInput{TableName: aws.String(table)})
-	if err == nil || item != nil {
-		t.Fatalf("a failed second page gave %v, %v; want an error, not \"not found\"", item, err)
-	}
-}
-
-// The Slack token rotation finds its workspace with a filtered Scan. It reads
-// every page before saying "not found", and a failed page is a scan error, not
-// a "not found" that hides the outage. (A match goes on to Slack's API, which a
-// hermetic test cannot call; scanFirst's own test covers the late match.)
+// The Slack token rotation finds its workspace by scanning the table (the
+// stored token is sealed, so no filter can match it, #868). It reads every page
+// before saying "not found", and a failed page is a scan error, not a "not
+// found" that hides the outage. (A late match is covered by
+// slack_credentials_test.go.)
 func TestSlackRotateLookupReadsEveryPage(t *testing.T) {
 	const table = "spore-slack-workspaces"
 	d := &pagedDynamo{pages: map[string][][]string{table: {nil, nil, nil}}}
@@ -547,7 +529,7 @@ func TestDashboardDynamoCallsArePaginated(t *testing.T) {
 	}
 	sort.Strings(bad)
 	for _, b := range bad {
-		t.Errorf("%s: a direct Query/Scan reads one page; use queryAll/queryUpTo/scanAll/scanFirst, or justify with a `// single-page:` comment above it (#1421)", b)
+		t.Errorf("%s: a direct Query/Scan reads one page; use queryAll/queryUpTo/scanAll or a paginator, or justify with a `// single-page:` comment above it (#1421)", b)
 	}
 }
 

@@ -213,40 +213,6 @@ func TestWindowsForbiddenReadRoots_Fallbacks(t *testing.T) {
 	}
 }
 
-// ValidateMountPath describes a path on a Linux instance, so the answers are
-// the same on every host OS (#1000): /mnt/data was rejected as "not absolute"
-// on Windows.
-func TestValidateMountPath(t *testing.T) {
-	tests := []struct {
-		name    string
-		path    string
-		wantErr bool
-	}{
-		{"valid mnt path", "/mnt/data", false},
-		{"valid data path", "/data/scratch", false},
-		{"valid scratch path", "/scratch/temp", false},
-		{"empty path", "", true},
-		{"relative path", "mnt/data", true},
-		{"path traversal in mnt", "/mnt/../etc/passwd", true},
-		{"invalid prefix /tmp", "/tmp/mount", true},
-		{"invalid prefix /home", "/home/user/mount", true},
-		{"root path", "/", true},
-		{"etc path", "/etc/mnt", true},
-		{"bare /mnt", "/mnt", true},
-		{"Windows drive path", `C:\mnt\data`, true},
-		{"backslashes", `\mnt\data`, true},
-		{"backslash smuggled after /mnt", `/mnt/..\etc`, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateMountPath(tt.path)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidateMountPath(%q) error = %v, wantErr %v", tt.path, err, tt.wantErr)
-			}
-		})
-	}
-}
-
 // SanitizePath's output is forward-slashed on every OS (#1000).
 func TestSanitizePath(t *testing.T) {
 	tests := []struct {

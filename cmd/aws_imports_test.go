@@ -28,7 +28,7 @@ func TestNoNewAWSSDKImportsInCmd(t *testing.T) {
 	// file -> allowed aws-sdk-go-v2/service/* packages (the 2026-07 baseline).
 	allow := map[string][]string{
 		"availability.go": {"dynamodb"},
-		"bot.go":          {"dynamodb", "iam"},
+		"bot.go":          {"iam"},
 		"collect.go":      {"dynamodb", "s3"},
 		"completion.go":   {"ec2"},
 		"fsx.go":          {"fsx"},

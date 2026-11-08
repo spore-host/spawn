@@ -179,6 +179,50 @@ Resources:
         - Key: Application
           Value: spore-bot
 
+  # ── KMS key: workspace credentials ───────────────────────────────────────────
+  # The credential attributes of spore-bot-workspaces (signing_secret,
+  # bot_token, refresh_token, incoming_webhook_url) are encrypted with this key
+  # by every writer (spawn's pkg/botsecret: `spawn notify workspace add`, the
+  # dashboard's Slack OAuth install; spore-bot's OAuth install and admin API)
+  # and decrypted by the readers that use them (#868). Ciphertexts carry the
+  # encryption context {purpose: spore-bot-<field>, workspace_key: <item key>};
+  # the grants below condition on purpose so each covers only the fields that
+  # principal uses. Deleted with the
+  # stack (CloudFormation schedules key deletion after PendingWindowInDays).
+  # The table's own SSE (aws/dynamodb) is a separate, AWS-managed key.
+
+  BotSecretsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: spore-bot workspace credentials (spore-bot-workspaces signing_secret, bot_token, refresh_token, incoming_webhook_url)
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Standard default: delegate to IAM in this account, so the role
+          # policies below (and an operator's admin policy, for `spawn notify
+          # workspace add`) are what grant use of the key.
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spore-bot
+
+  BotSecretsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/spore-bot-secrets  # pkg/botsecret.DefaultKeyAlias
+      TargetKeyId: !Ref BotSecretsKey
+
   # ── Audit Log Table ───────────────────────────────────────────────────────────
 
   BotAuditTable:
@@ -291,6 +335,32 @@ Resources:
               Action:
                 - dynamodb:PutItem
               Resource: !GetAtt SmsPendingTable.Arn
+            # Encrypt every credential field: the OAuth install and the admin
+            # API write workspaces. Scoped to the key and to those purposes.
+            - Effect: Allow
+              Action:
+                - kms:Encrypt
+              Resource: !GetAtt BotSecretsKey.Arn
+              Condition:
+                StringEquals:
+                  'kms:EncryptionContext:purpose':
+                    - spore-bot-signing-secret
+                    - spore-bot-bot-token
+                    - spore-bot-refresh-token
+                    - spore-bot-incoming-webhook-url
+            # Decrypt only what the bot reads: the signing secret to verify
+            # requests, the bot token to call Slack, the webhook URL to post.
+            # It never refreshes tokens, so it cannot open a refresh token.
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource: !GetAtt BotSecretsKey.Arn
+              Condition:
+                StringEquals:
+                  'kms:EncryptionContext:purpose':
+                    - spore-bot-signing-secret
+                    - spore-bot-bot-token
+                    - spore-bot-incoming-webhook-url
             - Effect: Allow
               Action:
                 - sts:AssumeRole
@@ -401,6 +471,12 @@ Outputs:
     Value: !Ref SmsPendingTable
     Export:
       Name: !Sub '${AWS::StackName}-sms-pending-table'
+
+  BotSecretsKeyArn:
+    Value: !GetAtt BotSecretsKey.Arn
+    Description: 'KMS key for workspace credentials (alias/spore-bot-secrets). Grant kms:Encrypt on it to principals that write workspaces (e.g. the dashboard role).'
+    Export:
+      Name: !Sub '${AWS::StackName}-secrets-key-arn'
 
   LambdaFunctionUrl:
     Condition: DeployLambda
