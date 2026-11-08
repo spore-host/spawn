@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/costmodel"
 	"github.com/spore-host/spawn/pkg/observability"
 )
 
@@ -101,11 +102,21 @@ type Config struct {
 	PricePerHour    float64 // On-demand price per hour (recorded at launch; used for cost-limit enforcement)
 	// SpotPricePerHour is the spot market price spawn observed for this
 	// instance's AZ and type at launch (spawn:spot-price-per-hour, #896). 0 when
-	// the instance is on-demand or the lookup failed. Display only: the cost
-	// limit stays enforced against the on-demand PricePerHour, which can only
-	// overstate a spot instance's spend, never understate it.
+	// the instance is on-demand or the lookup failed. --cost-limit charges a
+	// Spot instance's compute at it until spored's first own read of the Spot
+	// price (#1497, pkg/agent spotaccrual.go).
 	SpotPricePerHour float64
-	IdleCPUPercent   float64
+	// SpotAccrual is the Spot compute cost spored recorded in
+	// spawn:spot-accrual (#1497): what --cost-limit has charged this Spot
+	// instance's compute so far, from the Spot prices spored sampled. nil when
+	// the tag is absent (an on-demand instance, or one whose spored has not yet
+	// written it or predates it).
+	SpotAccrual *costmodel.ComputeAccrual
+	// PriceSource is spawn:price-source: where the launch got PricePerHour,
+	// "live" (the Price List API) or "static" (truffle's table). Labels the
+	// on-demand fallback (#1497). Empty when the launch predates the tag.
+	PriceSource    string
+	IdleCPUPercent float64
 
 	// Pre-stop hook
 	PreStop        string        // Shell command to run before any lifecycle-triggered stop
@@ -258,6 +269,14 @@ type Provider interface {
 	// Used for the last-instance "region vacated" check (#260). Returns -1 if the
 	// count can't be determined (treat as "unknown", not zero).
 	CountOtherManagedInstances(ctx context.Context) int
+}
+
+// SpotPriceReader is the optional provider capability of reading the Spot
+// price now in effect for this instance (#1497). spored type-asserts for it, so
+// a provider without one (local) keeps charging --cost-limit at the on-demand
+// rate. sampledAt is the price's own timestamp in the Spot price history.
+type SpotPriceReader interface {
+	CurrentSpotPrice(ctx context.Context) (perHour float64, sampledAt time.Time, err error)
 }
 
 // NewProvider creates a provider based on the environment

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `--cost-limit` on a Spot instance now counts compute at the Spot price, not
+  the on-demand rate. A Spot instance was terminated after spending about a
+  third of its limit: a `--spot --cost-limit 7` c9gd.16xlarge was terminated
+  after 2.05 h, when on-demand x compute reached $7.01, while its Spot spend
+  was about $2.23 (#1497). spored now reads the Spot price for the instance's
+  type, zone and platform every 15 minutes and adds it up over compute time.
+  If it cannot read the price for an hour, it counts the on-demand rate and
+  says so, with why, in its log, `spored status`, `spawn status`, `spawn cost`
+  and the task's terminal `completion.json` (new `cost_basis` field). spored
+  records the running total in a new `spawn:spot-accrual` tag, which `spawn
+  status`, `spawn cost` and `spawn extend` read, so they show the figure that
+  terminates the instance. An instance whose spored predates this keeps the
+  on-demand rate until its spored is upgraded.
+
+### Security
+
+- The spored instance role gains `ec2:DescribeSpotPriceHistory` (read-only
+  public market data, `Resource: "*"`: the API has no resource-level scoping),
+  in both the per-launch baseline policy and `spored-instance-role`, so spored
+  can read its own Spot price (#1497). spawn adds it to an existing role on the
+  next launch that uses it.
+
 ## [0.161.0] - 2026-11-06
 
 ### Added

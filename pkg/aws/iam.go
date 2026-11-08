@@ -974,12 +974,20 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	// EBS cost lookup 403s on every instance whose role carries this policy —
 	// which #502 made every spawn-launched instance — and silently falls back
 	// to an unmeasured constant (spawn#517).
+	//
+	// ec2:DescribeSpotPriceHistory (#1497): spored reads its own Spot price
+	// every 15 minutes, so --cost-limit charges a Spot instance's compute at
+	// what it pays rather than the on-demand rate (about 3x more, so the cap
+	// fired at a third of the budget). Read-only, public market data, and the
+	// API supports no resource-level scoping, so Resource is "*". Without it
+	// spored falls back to the on-demand rate and says so.
 	sporedReadPermissions := map[string]interface{}{
 		"Effect": "Allow",
 		"Action": []interface{}{
 			"ec2:DescribeTags",
 			"ec2:DescribeInstances",
 			"ec2:DescribeVolumes",
+			"ec2:DescribeSpotPriceHistory",
 		},
 		"Resource": "*",
 	}
@@ -1816,7 +1824,8 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
       "Action": [
         "ec2:DescribeTags",
         "ec2:DescribeInstances",
-        "ec2:DescribeVolumes"
+        "ec2:DescribeVolumes",
+        "ec2:DescribeSpotPriceHistory"
       ],
       "Resource": "*"
     },

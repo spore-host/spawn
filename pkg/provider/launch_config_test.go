@@ -96,6 +96,10 @@ func splitGolden(t *testing.T, golden map[string]string) (tags map[string]string
 func withoutObjectBookkeeping(c Config) Config {
 	c.LaunchConfigSHA, c.LaunchConfigSource, c.LaunchConfigError, c.TagOnlySettings = "", "", "", nil
 	c.Plugins = nil
+	// Tags spored reads since v0.149.0 that are not launch-fixed settings, so
+	// the v0.149.0 oracle has no reader for them (#1497): the price source
+	// that labels the on-demand fallback, and spored's own Spot accrual.
+	c.PriceSource, c.SpotAccrual = "", nil
 	return c
 }
 

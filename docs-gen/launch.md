@@ -46,7 +46,7 @@ spawn launch <name> [flags]
 | `--completion-webhook-url` |  | string |  | On workload completion (--completion-file detected), spored POSTs a fire-once, best-effort notice to this URL (spawn#497) — lets a caller wait on its own webhook/queue instead of polling an artifact against a pre-guessed deadline; empty = disabled |
 | `--compliance-strict` |  | bool |  | Strict mode: fail on warnings (default: show warnings only) |
 | `--config` |  | string |  | Launch config YAML file (supports plugins: list) |
-| `--cost-limit` |  | float64 |  | Total spend ceiling in USD, covering compute AND storage (0 = disabled). spored terminates the instance when compute + EBS + public IPv4 reaches it; a launch whose storage alone exceeds it is refused up front, because storage outlives the instance and spored cannot reclaim it against the cap. |
+| `--cost-limit` |  | float64 |  | Total spend ceiling in USD, covering compute AND storage (0 = disabled). spored terminates the instance when compute + EBS + public IPv4 reaches it, counting a Spot instance's compute at the Spot price it samples (or, if it cannot read that price, at the on-demand rate, and says so); a launch whose storage alone exceeds it is refused up front, because storage outlives the instance and spored cannot reclaim it against the cap. |
 | `--count` |  | int | `1` | Number of instances to launch (job array) |
 | `--detach` |  | bool |  | Run sweep orchestration in Lambda (the default for parameter sweeps; without --max-concurrent, min(rows, 10) at a time) |
 | `--dns-api-endpoint` |  | string |  | Lambda Function URL of a custom DNS updater (https://&lt;id&gt;.lambda-url.&lt;region&gt;.on.aws/). Also SPAWN_DNS_API_ENDPOINT, dns.api_endpoint in ~/.spawn/config.yaml, or SSM /spawn/dns/api_endpoint |

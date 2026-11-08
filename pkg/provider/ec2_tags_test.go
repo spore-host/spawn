@@ -67,3 +67,22 @@ func TestConfigFromTags_TerminateOnIdle(t *testing.T) {
 		t.Error("TerminateOnIdle set with no spawn:terminate-on-idle tag: every idle instance would be terminated")
 	}
 }
+
+// spored reads its own Spot accrual and the launch's price source back from
+// tags (#1497); a malformed accrual is ignored, so compute is charged at
+// on-demand as before.
+func TestConfigFromTags_SpotAccrualAndPriceSource(t *testing.T) {
+	cfg, _ := configFromTags(tagDescs(
+		"spawn:spot-accrual", "v1:1.500000/3600/1.250000/spot/1794139200",
+		"spawn:price-source", "static",
+	))
+	if cfg.SpotAccrual == nil || cfg.SpotAccrual.Dollars != 1.5 || cfg.SpotAccrual.AtSeconds != 3600 || cfg.SpotAccrual.PerHour != 1.25 {
+		t.Errorf("SpotAccrual = %+v", cfg.SpotAccrual)
+	}
+	if cfg.PriceSource != "static" {
+		t.Errorf("PriceSource = %q, want static", cfg.PriceSource)
+	}
+	if bad, _ := configFromTags(tagDescs("spawn:spot-accrual", "1.25")); bad.SpotAccrual != nil {
+		t.Errorf("a malformed accrual was read: %+v", bad.SpotAccrual)
+	}
+}

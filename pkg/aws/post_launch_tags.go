@@ -111,6 +111,7 @@ var postLaunchInstanceTags = slices.Concat([]postLaunchTag{
 	{key: "spawn:fsx-dra-error", by: writtenBySpored, writer: "pkg/agent tagFSxDRAStatus", applies: mountsPendingFSx},
 	{key: "spawn:egress-proxy-last-activity", by: writtenBySpored, writer: "cmd/spored egressProxyMode.publishActivity, at most every 10 minutes", applies: isEgressProxy},
 	{key: "spawn:egress-proxy-idle", by: writtenBySpored, writer: "cmd/spored egressProxyMode.publishActivity", applies: isEgressProxy},
+	{key: "spawn:" + costmodel.TagComputeAccrual, by: writtenBySpored, writer: "pkg/agent writeSpotAccrualTag; a Spot instance's compute as the cost limit counts it", applies: isSpot},
 
 	// spawn's launch code, right after RunInstances. A persistent request's
 	// spawn:original-instance-id (tagOriginalInstance) is on the Spot request,

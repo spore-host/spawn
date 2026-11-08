@@ -215,12 +215,32 @@ func (a *Agent) flushTaskRecord(why taskproto.ExitReason, deadline time.Time) {
 	// call; anything further up is silently ignored.
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.CommandContext(ctx, hook, args...)
+	cmd.Env = flushHookEnv(os.Environ(), why, a.costBasisJSON)
 	// WaitDelay (#1186): the context kills the hook, but not an `aws` child it
 	// started, and that child holds the output pipe open, so without this Wait
 	// blocks until the child exits and the 45 s cap does not bound anything.
 	cmd.WaitDelay = a.flushWaitDelay()
 	out, err := cmd.CombinedOutput()
 	a.reportFlushOutcome(why, classifyFlush(ctx, cmd, out, err))
+}
+
+// flushHookEnv is the hook's environment: spored's own, with
+// taskproto.CostBasisEnv set to how --cost-limit priced the instance when that
+// is what ended the task (spawn#1497), and removed otherwise, so a value
+// inherited from spored's environment is never recorded.
+func flushHookEnv(environ []string, why taskproto.ExitReason, costBasis func() string) []string {
+	out := make([]string, 0, len(environ)+1)
+	for _, kv := range environ {
+		if !strings.HasPrefix(kv, taskproto.CostBasisEnv+"=") {
+			out = append(out, kv)
+		}
+	}
+	if why == taskproto.ExitCostLimitExceeded {
+		if v := costBasis(); v != "" {
+			out = append(out, taskproto.CostBasisEnv+"="+v)
+		}
+	}
+	return out
 }
 
 // taskFlushWaitDelay is how long the hook's output pipes may stay open after it
