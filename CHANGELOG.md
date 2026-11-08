@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can read its own Spot price (#1497). spawn adds it to an existing role on the
   next launch that uses it.
 
+- **A plugin can no longer download an artifact it does not pin by sha256, so a signed plugin cannot pull an unverified binary** (#838). The release signature covers `plugin.yaml`, and nothing extended it to the files a spec's `fetch` steps download and spored runs as root: `sha256:` on a `fetch` step was optional, so a signed, verified spec could fetch whatever its URL served. Every remote `fetch` step must now carry `sha256:`, a 64-char lowercase hex digest. Because the digest is in `plugin.yaml`, the release manifest and its signature cover it with no change to `manifest.json`.
+  - **Compatibility: refused, with no warning period.** `spawn plugin validate`, `spawn plugin install` (before any local step runs) and spored (before any remote step of any install runs, including plugins declared at launch, which skip validation) all refuse a spec with an unpinned `fetch`, for every source: official, `github:` and local files. `--insecure` does not bypass it. A warning release would leave the gap open for one more release for no one's benefit: measured on 2026-11-08, no tagged release of any plugin in `spore-host/spore-plugins` has a `fetch` step, so nothing official breaks. A third-party or local spec with an unpinned `fetch` does break; `spawn plugin validate` names each step, and the fix is `sha256sum <file>` and `sha256: <digest>` on the step. `spawn plugin inspect` shows such a step as `REFUSED — no sha256`.
+  - **A tampered artifact is refused before anything uses it.** spored hashes the download as it writes it; on a mismatch it deletes the file and fails the install, so no later step runs.
+  - **New `size:` on `fetch` steps (optional):** the exact byte length. spored reads at most one byte past it and refuses any other length.
+  - **New `arch:` on `fetch` steps (optional):** `x86_64` (alias `amd64`) or `arm64` (alias `aarch64`). The step runs only on that architecture, so a spec can pin a different artifact, with its own sha256, per architecture; until now that forced plugins to download with `curl` in a `run` step, which spawn cannot verify. An earlier spawn ignores `arch:` and `size:` and fetches every listed artifact, each still checked against its own sha256 (spored has verified a declared `sha256:` since v0.86.0).
+  - **Not covered:** a download inside a `run` step's shell script (`curl … | sh`, `pip install`) is opaque to spawn and is not verified by it. The registry's own CI is what keeps those out of official plugins (spore-plugins#31).
+  - **Release order:** spore-plugins first, then this. The spore-plugins change that moves `mountpoint-s3` to pinned `fetch` steps works on the current spawn, so it merges and is tagged first; this enforcement then breaks no official install.
+
 ## [0.161.0] - 2026-11-06
 
 ### Added

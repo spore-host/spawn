@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -39,6 +40,10 @@ var fetchClient = &http.Client{Timeout: 5 * time.Minute}
 // maxFetchBytes caps the response body for fetch steps (2 GiB) to prevent
 // a malicious or runaway download from filling the disk.
 const maxFetchBytes = 2 << 30
+
+// hostGOARCH is the architecture spored runs on, which selects the fetch steps
+// whose arch: names it. A variable so tests can exercise either architecture.
+var hostGOARCH = runtime.GOARCH
 
 // envKeyRe matches valid POSIX environment variable names.
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -163,11 +168,26 @@ func validateFetchURL(rawURL string) error {
 }
 
 func (e *RemoteExecutor) fetch(ctx context.Context, step plugin.Step) error {
+	// A fetch pinned to another architecture is that architecture's artifact,
+	// with its own sha256: skip it rather than download it.
+	if !plugin.StepRunsOnArch(step, hostGOARCH) {
+		log.Printf("Plugin fetch %s: skipped (arch %s; this instance is %s)", step.URL, step.Arch, hostGOARCH)
+		return nil
+	}
 	if step.URL == "" || step.Dest == "" {
 		return fmt.Errorf("fetch step requires url and dest")
 	}
 	if err := validateFetchURL(step.URL); err != nil {
 		return fmt.Errorf("fetch step: %w", err)
+	}
+	// Fail closed before any byte is downloaded: an artifact with no pinned
+	// sha256 is not verifiable, so it is not fetched (#838). Validate and
+	// CheckArtifactPins refuse such a spec first; this is the last line.
+	if step.SHA256 == "" {
+		return fmt.Errorf("fetch %s: %w: the step has no sha256", step.URL, plugin.ErrUnpinnedArtifact)
+	}
+	if step.Size < 0 {
+		return fmt.Errorf("fetch %s: invalid size %d", step.URL, step.Size)
 	}
 
 	// Ensure parent directory exists.
@@ -199,22 +219,41 @@ func (e *RemoteExecutor) fetch(ctx context.Context, step plugin.Step) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Hash the bytes as they're written so an optional sha256: can be verified
-	// without a second read. When no checksum is declared, the hash is computed
-	// but ignored.
+	// Hash the bytes as they're written so the pinned sha256 is verified
+	// without a second read. With a pinned size, read at most one byte past it:
+	// enough to tell "too long" from "exact" without reading a wrong artifact
+	// in full.
+	limit := int64(maxFetchBytes)
+	if step.Size > 0 && step.Size < limit {
+		limit = step.Size + 1
+	}
 	hasher := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, hasher), io.LimitReader(resp.Body, maxFetchBytes)); err != nil {
+	n, err := io.Copy(io.MultiWriter(f, hasher), io.LimitReader(resp.Body, limit))
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(step.Dest)
 		return fmt.Errorf("write %s: %w", step.Dest, err)
 	}
 
-	if step.SHA256 != "" {
-		got := hex.EncodeToString(hasher.Sum(nil))
-		if got != step.SHA256 {
-			// Don't leave an unverified download in place for a later step to use.
-			_ = f.Close()
-			_ = os.Remove(step.Dest)
-			return fmt.Errorf("fetch %s: sha256 mismatch (want %s, got %s)", step.URL, step.SHA256, got)
-		}
+	// Don't leave an unverified download in place for a later step to use.
+	reject := func(format string, args ...interface{}) error {
+		_ = f.Close()
+		_ = os.Remove(step.Dest)
+		return fmt.Errorf(format, args...)
+	}
+	if step.Size > 0 && n > step.Size {
+		return reject("fetch %s: size mismatch (want %d bytes, got more)", step.URL, step.Size)
+	}
+	if step.Size > 0 && n < step.Size {
+		return reject("fetch %s: size mismatch (want %d bytes, got %d)", step.URL, step.Size, n)
+	}
+	got := hex.EncodeToString(hasher.Sum(nil))
+	if got != step.SHA256 {
+		return reject("fetch %s: sha256 mismatch (want %s, got %s)", step.URL, step.SHA256, got)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(step.Dest)
+		return fmt.Errorf("close %s: %w", step.Dest, err)
 	}
 	return nil
 }

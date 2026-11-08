@@ -42,7 +42,7 @@ var (
 	// capture: is local-only.
 	remoteSchema = stepSchema{
 		"run":     {"run", "env", "background", "as_user"},
-		"fetch":   {"url", "dest", "sha256"},
+		"fetch":   {"url", "dest", "sha256", "size", "arch"},
 		"extract": {"src", "dest"},
 	}
 )
@@ -254,12 +254,13 @@ func (s *PluginSpec) Validate(dirName string) error {
 					add("%s[%d]: %s has no effect on a %s step in %s, which takes only: %s", sec.label, i, f, st.Type, sec.label, strings.Join(fields, ", "))
 				}
 			}
-			// sha256, when set, must be a bare 64-char lowercase hex digest.
-			if st.SHA256 != "" && allowed["sha256"] && !sha256HexRe.MatchString(st.SHA256) {
-				add("%s[%d]: invalid sha256 %q (want 64 lowercase hex chars)", sec.label, i, st.SHA256)
-			}
 		}
 	}
+
+	// Every fetch must pin what it downloads: a sha256 (required), and a size
+	// and arch that make sense when set (#838). spored refuses the same specs
+	// (CheckArtifactPins), so this only reports it before anything runs.
+	probs = append(probs, s.artifactPinProblems()...)
 
 	// Every template action must be a canonical {{ namespace.key }} reference
 	// (namespace ∈ instance/config/outputs/pushed) or a control keyword. This

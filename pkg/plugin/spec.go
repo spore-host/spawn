@@ -133,14 +133,26 @@ type Step struct {
 	// only: Validate rejects it on a local step (those run as the controller
 	// user) and on other step types.
 	AsUser bool `yaml:"as_user"`
-	// SHA256 is an optional expected checksum for a "fetch" step's downloaded
-	// content, as a lowercase 64-char hex digest. When set, spored hashes the
-	// downloaded bytes and fails the install if they don't match — closing the
-	// "unverified transitive download" gap for a fetch URL that (unlike the
-	// pinned plugin.yaml) is not itself checksummed by the registry manifest.
-	// Optional: nothing requires it, the registry's CI included. Validate
-	// rejects it on any step other than a remote fetch.
+	// SHA256 is the expected checksum of a "fetch" step's downloaded content,
+	// as a lowercase 64-char hex digest. It is REQUIRED on every fetch step
+	// (#838): the release signature covers plugin.yaml, and this field is what
+	// extends that coverage to the bytes the spec downloads, so a signed spec can
+	// no longer pull an unverified artifact. spored hashes the bytes as it writes
+	// them and fails the install, removing the file, when they do not match.
+	// Validate rejects a fetch step without it and rejects it on any other step.
 	SHA256 string `yaml:"sha256,omitempty"`
+	// Size, when set, is the exact byte length a fetch step's download must
+	// have. spored stops reading one byte past it and fails the install on any
+	// other length, so a wrong artifact is refused before it is fully read.
+	// Optional; fetch steps only.
+	Size int64 `yaml:"size,omitempty"`
+	// Arch, when set, restricts a fetch step to instances of that architecture:
+	// "x86_64" (alias "amd64") or "arm64" (alias "aarch64"). A step for another
+	// architecture is skipped. It lets a spec pin a different artifact, with a
+	// different sha256, per architecture, which a single fetch step could not.
+	// Fetch steps only. spawn releases before this field ignore it and fetch
+	// every listed artifact, each still checked against its own sha256.
+	Arch string `yaml:"arch,omitempty"`
 }
 
 // HealthBlock configures the remote health check loop.

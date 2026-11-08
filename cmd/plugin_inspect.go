@@ -248,10 +248,20 @@ func renderPermissions(out io.Writer, spec *plugin.PluginSpec) {
 func describeStep(st plugin.Step) string {
 	switch st.Type {
 	case "fetch":
-		if st.SHA256 != "" {
-			return fmt.Sprintf("download %s → %s (sha256 %s…)", st.URL, st.Dest, st.SHA256[:12])
+		var pin []string
+		if st.Arch != "" {
+			pin = append(pin, st.Arch+" only")
 		}
-		return fmt.Sprintf("download %s → %s (unverified — no sha256)", st.URL, st.Dest)
+		if len(st.SHA256) >= 12 {
+			pin = append(pin, "sha256 "+st.SHA256[:12]+"…")
+		} else {
+			// spored refuses an unpinned fetch (#838); Validate says so above.
+			pin = append(pin, "REFUSED — no sha256")
+		}
+		if st.Size > 0 {
+			pin = append(pin, fmt.Sprintf("%d bytes", st.Size))
+		}
+		return fmt.Sprintf("download %s → %s (%s)", st.URL, st.Dest, strings.Join(pin, ", "))
 	case "extract":
 		return fmt.Sprintf("extract %s → %s", st.Src, st.Dest)
 	case "push":

@@ -34,8 +34,11 @@ permissions:
 remote:
   install:
     - type: fetch
+      arch: x86_64
       url: https://example.com/app.tgz
       dest: /opt/app.tgz
+      sha256: 4f9328f2bd646a7afa03d07ec20ec56641ce970839dee5af8803a276e4e8e524
+      size: 1024
   start:
     - type: run
       as_user: true
@@ -68,7 +71,7 @@ func TestRenderInspect_Sections(t *testing.T) {
 		"Resolved:    local file · sha256 abc123def456",
 		"Installing runs this plugin's code",
 		"reads env: TS_API_CLIENT_SECRET",
-		"download https://example.com/app.tgz → /opt/app.tgz",
+		"download https://example.com/app.tgz → /opt/app.tgz (x86_64 only, sha256 4f9328f2bd64…, 1024 bytes)",
 		"run as login user (background): /opt/app/serve --port 8080",
 		"Health check (every 10s)",
 		"Outputs (printed by 'spawn plugin install' and shown by 'spawn plugin status')",
@@ -76,6 +79,27 @@ func TestRenderInspect_Sections(t *testing.T) {
 		"commands=[jq]",
 	}
 	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("inspect output missing %q\n--- output ---\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "Validation problems") {
+		t.Errorf("the fixture is meant to be valid, but inspect reports problems:\n%s", got)
+	}
+}
+
+// An unpinned fetch is shown as refused, and the validation problem says why
+// (#838): spored will not run it.
+func TestRenderInspect_UnpinnedFetchShownRefused(t *testing.T) {
+	spec, err := plugin.ParseSpec([]byte(strings.Replace(inspectFixture,
+		"      sha256: 4f9328f2bd646a7afa03d07ec20ec56641ce970839dee5af8803a276e4e8e524\n", "", 1)))
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	var buf bytes.Buffer
+	renderInspect(&buf, plugin.PluginRef{Host: "local", Name: "./demo.yaml"}, spec, &plugin.Provenance{Host: "local"}, false)
+	got := buf.String()
+	for _, w := range []string{"REFUSED — no sha256", "has no sha256"} {
 		if !strings.Contains(got, w) {
 			t.Errorf("inspect output missing %q\n--- output ---\n%s", w, got)
 		}
