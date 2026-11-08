@@ -375,29 +375,16 @@ func TestBuildInlinePolicy(t *testing.T) {
 		t.Fatalf("Statement is not a slice: %T", policy["Statement"])
 	}
 	// The two properties here are "a known template adds statements" and "an
-	// unknown one adds none". Both used to be written as literal counts — 6 and 7
-	// — which is the hand-maintained-list anti-pattern CLAUDE.md rule 4 warns
-	// about: every statement legitimately added to the spored baseline (#174 split
-	// tag-write out, #173 added the DNS invoke, #221 the FSx mount, #622 the
-	// service-linked role, GHSA-8q3p-qcv8-2pr4 the control-tag deny) failed this
-	// test for no reason and taught whoever hit it to bump a number. Measure the
-	// baseline instead, so it can grow without touching this test and the test
-	// still fails if a template silently contributes nothing.
-	baseline, ok := c.buildInlinePolicy(nil)["Statement"].([]interface{})
-	if !ok || len(baseline) == 0 {
-		t.Fatal("the spored baseline policy is empty — measurement has broken, not the policy")
-	}
-	if len(stmts) <= len(baseline) {
-		t.Errorf("a known template (s3:ReadOnly) added no statements: %d with the template vs %d for "+
-			"the bare baseline", len(stmts), len(baseline))
+	// unknown one adds none". The spored baseline is no longer part of this
+	// document (#1558), so the counts are the templates' own.
+	if len(stmts) == 0 {
+		t.Error("a known template (s3:ReadOnly) added no statements")
 	}
 
-	// Unknown template names are skipped (no panic, just the spored base).
+	// Unknown template names are skipped (no panic, and nothing to write).
 	base := c.buildInlinePolicy([]string{"doesNotExist"})
-	baseStmts := base["Statement"].([]interface{})
-	if len(baseStmts) != len(baseline) {
-		t.Errorf("an unknown template changed the policy: %d statements vs %d for the bare baseline",
-			len(baseStmts), len(baseline))
+	if hasStatements(base) {
+		t.Errorf("an unknown template added statements: %v", base["Statement"])
 	}
 }
 

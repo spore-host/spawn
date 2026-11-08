@@ -532,7 +532,7 @@ func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 	// Guarantee the spored self-management baseline on every role this
 	// function returns, unconditionally — new or pre-existing, and regardless
 	// of which policy source (Policies/PolicyFile/InlinePolicyJSON/managed-only)
-	// the caller used. PutRolePolicy overwrites, so this is idempotent and safe
+	// the caller used. The write is idempotent (and versioned, #1558), so it is safe
 	// to call every time; it also heals a role cached from before this fix
 	// existed. Without it spored can't read its own tags at all, so TTL,
 	// --on-complete and --pre-stop silently never fire (spawn#502 — the
@@ -736,8 +736,7 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 	}
 
 	// Attach inline policies
-	if len(config.Policies) > 0 {
-		policy := c.buildInlinePolicy(config.Policies)
+	if policy := c.buildInlinePolicy(config.Policies); len(config.Policies) > 0 && hasStatements(policy) {
 		policyJSON, err := json.Marshal(policy)
 		if err != nil {
 			return fmt.Errorf("failed to marshal inline policy: %w", err)
@@ -808,8 +807,7 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 // file (when PolicyFile is set), and the caller-supplied scoped policy string
 // (when InlinePolicyJSON is set), so a cached role picks up any of them.
 func (c *Client) updateInlinePolicy(ctx context.Context, iamClient *iam.Client, roleName string, config IAMRoleConfig) error {
-	if len(config.Policies) > 0 {
-		policy := c.buildInlinePolicy(config.Policies)
+	if policy := c.buildInlinePolicy(config.Policies); len(config.Policies) > 0 && hasStatements(policy) {
 		policyJSON, err := json.Marshal(policy)
 		if err != nil {
 			return fmt.Errorf("failed to marshal inline policy: %w", err)
@@ -901,9 +899,16 @@ func (c *Client) buildTrustPolicyWithAccount(services []string, accountID string
 	}
 }
 
-// buildInlinePolicy combines multiple policy templates into one
+// buildInlinePolicy combines the named policy templates into one document,
+// spawn-inline-policy. It no longer carries the spored self-management grants:
+// those are the versioned spored baseline that createOrGetInstanceProfile
+// writes on every role (#1558). A second, unversioned copy here was rewritten by
+// every launch with that CLI's grants, so it brought back on a shared role what
+// a newer CLI had retired, and it cost a third of the role's inline-policy
+// size budget. The Statement list is empty when no name is a known template;
+// callers write nothing then.
 func (c *Client) buildInlinePolicy(policies []string) map[string]interface{} {
-	statements := c.sporedSelfManagementStatements()
+	statements := []interface{}{}
 
 	// Add user-specified policy templates
 	for _, policyStr := range policies {
@@ -938,15 +943,25 @@ func (c *Client) buildInlinePolicy(policies []string) map[string]interface{} {
 // (spawn#406, spawn#502). Returns "" only on a marshal error (never expected
 // for this static content).
 func (c *Client) sporedBaselinePolicyDoc() string {
-	doc := map[string]interface{}{
-		"Version":   "2012-10-17",
-		"Statement": c.sporedSelfManagementStatements(),
-	}
-	b, err := json.Marshal(doc)
+	b, err := json.Marshal(c.sporedBaselinePolicy())
 	if err != nil {
 		return ""
 	}
 	return string(b)
+}
+
+// sporedBaselinePolicy is the spored baseline as a policy document.
+func (c *Client) sporedBaselinePolicy() map[string]interface{} {
+	return map[string]interface{}{
+		"Version":   "2012-10-17",
+		"Statement": c.sporedSelfManagementStatements(),
+	}
+}
+
+// hasStatements reports whether policy has at least one statement.
+func hasStatements(policy map[string]interface{}) bool {
+	st, _ := policy["Statement"].([]interface{})
+	return len(st) > 0
 }
 
 // sporedSelfManagementStatements returns the policy statements every
@@ -954,8 +969,8 @@ func (c *Client) sporedBaselinePolicyDoc() string {
 // user/scoped policy: read its own tags (TTL/idle/on-complete/completion-file),
 // keep lifecycle tags current, terminate/stop itself, invoke the DNS updater,
 // and mount an async FSx. Destructive + tag-write actions are scoped to
-// spawn:managed=true. Shared by buildInlinePolicy and sporedBaselinePolicyDoc so
-// the two paths can never drift.
+// spawn:managed=true. The spored baseline (sporedBaselinePolicyDoc) and the
+// nested-spawn baseline are built from it.
 func (c *Client) sporedSelfManagementStatements() []interface{} {
 	statements := []interface{}{}
 
@@ -1531,31 +1546,23 @@ func (c *Client) ensureSSMManagedPolicy(ctx context.Context, iamClient *iam.Clie
 }
 
 // ensureSporedBaselinePolicy attaches the spored self-management inline policy
-// to roleName. Idempotent: PutRolePolicy overwrites an existing inline policy
-// of the same name, so this is safe to call on every role on every call —
-// new, pre-existing, and any policy source (Policies/PolicyFile/InlinePolicyJSON/
+// to roleName, as the versioned SporedBaselinePolicyName (#1558,
+// putVersionedRolePolicy). Safe to call on every role on every call — new,
+// pre-existing, and any policy source (Policies/PolicyFile/InlinePolicyJSON/
 // managed-policies-only). Without these grants spored cannot read its own
 // instance tags, so TTL, --on-complete and --pre-stop silently never fire
 // (spawn#502 — the PolicyFile path never received the spawn#406 fix that the
 // other two policy sources did, because it was attached per-branch instead of
 // unconditionally here).
+//
+// The role is shared by every launch with the same IAM configuration, from any
+// spawn version, which is why the write is versioned rather than an overwrite.
 func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.Client, roleName, baselineDoc string) error {
 	doc, err := c.sporedPolicyDoc(ctx, baselineDoc)
 	if err != nil {
 		return err
 	}
-	err = retryIAM(func() error {
-		_, e := iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
-			RoleName:       aws.String(roleName),
-			PolicyName:     aws.String("spored-baseline-policy"),
-			PolicyDocument: aws.String(doc),
-		})
-		return e
-	})
-	if err != nil {
-		return fmt.Errorf("attach spored-baseline-policy to %s: %w", roleName, err)
-	}
-	return nil
+	return putVersionedRolePolicy(ctx, iamClient, roleName, sporedBaselinePolicyBase, doc, SporedPolicySchema, warnSporedPolicy)
 }
 
 // SetupSporedIAMRole is the OTHER instance-profile resolution path (see the
@@ -1573,7 +1580,6 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 
 	roleName := SporedRoleName
 	instanceProfileName := SporedInstanceProfileName
-	policyName := "spored-policy"
 
 	roleCreated := false
 	profileCreated := false
@@ -1609,17 +1615,14 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	}
 
 	// 2. Attach inline policy to role (sporedDCVRolePolicy, defined below),
-	// bound to this account (#1069).
+	// bound to this account (#1069). Every launch in the account that names no
+	// IAM shares this role, whatever spawn version it runs, so the policy is
+	// written versioned and never overwrites a newer spawn's grants (#1558).
 	dcvDoc, err := c.sporedPolicyDoc(ctx, sporedDCVRolePolicy)
 	if err != nil {
 		return "", err
 	}
-	_, err = iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
-		RoleName:       aws.String(roleName),
-		PolicyName:     aws.String(policyName),
-		PolicyDocument: aws.String(dcvDoc),
-	})
-	if err != nil {
+	if err := putVersionedRolePolicy(ctx, iamClient, roleName, sporedRolePolicyBase, dcvDoc, SporedPolicySchema, warnSporedPolicy); err != nil {
 		return "", fmt.Errorf("failed to attach policy to role: %w", err)
 	}
 
@@ -1694,8 +1697,8 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 // principal. A test asserts both this policy and the dynamic baseline carry it, so
 // the two cannot diverge on it again.
 //
-// Kept in sync with buildInlinePolicy (the standard spored
-// role in iam.go): the same self-management grants PLUS the DCV-only S3 reads
+// Kept in sync with sporedSelfManagementStatements (the standard spored
+// baseline): the same self-management grants PLUS the DCV-only S3 reads
 // (dcv-license, spawn-certs). spawn#282 reconciled the two — this role previously
 // granted ec2:CreateTags on "*" UNCONDITIONED (the #174 tag-then-terminate class)
 // and lacked the FSx-mount (#221) and lambda:InvokeFunctionUrl (#173 DNS-sign)
@@ -1760,7 +1763,7 @@ var reaperControlTagKeys = []string{
 	elasticip.InstanceARNTagKey,
 }
 
-// reaperControlTagDeny is the statement form for buildInlinePolicy.
+// reaperControlTagDeny is the statement form for sporedSelfManagementStatements.
 //
 // ForAnyValue:StringEquals is the correct operator: aws:TagKeys is multi-valued,
 // and the deny must fire when the request carries *any* control key, even
@@ -1814,7 +1817,7 @@ const sporedTrustPolicy = `{
 }`
 
 // A var rather than a const so the reaper control-tag deny below is rendered from
-// reaperControlTagKeys, the same slice buildInlinePolicy uses. Hardcoding the list
+// reaperControlTagKeys, the same slice sporedSelfManagementStatements uses. Hardcoding the list
 // twice is the drift this file has already shipped once.
 var sporedDCVRolePolicy = fmt.Sprintf(`{
   "Version": "2012-10-17",

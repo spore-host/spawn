@@ -38,15 +38,15 @@ func policyDocuments(t *testing.T) map[string]map[string]interface{} {
 	out["static DCV/no-flags role (SetupSporedIAMRole)"] = dcv
 
 	c := &Client{}
-	raw, err := json.Marshal(c.buildInlinePolicy(nil))
+	raw, err := json.Marshal(c.sporedBaselinePolicy())
 	if err != nil {
-		t.Fatalf("marshal buildInlinePolicy: %v", err)
+		t.Fatalf("marshal sporedBaselinePolicy: %v", err)
 	}
 	var dyn map[string]interface{}
 	if err := json.Unmarshal(raw, &dyn); err != nil {
-		t.Fatalf("buildInlinePolicy is not valid JSON: %v", err)
+		t.Fatalf("sporedBaselinePolicy is not valid JSON: %v", err)
 	}
-	out["dynamic baseline (buildInlinePolicy)"] = dyn
+	out["dynamic baseline (sporedBaselinePolicy)"] = dyn
 
 	if len(out) != 2 {
 		t.Fatal("expected two policy documents; the gate is checking fewer than it claims")
