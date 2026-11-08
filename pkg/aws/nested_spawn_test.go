@@ -214,7 +214,7 @@ func TestNestedSpawnLeavesTheDefaultRoleUnchanged(t *testing.T) {
 	if !jsonEqual(t, grant, want) {
 		t.Errorf("stored nested grant is not the nested policy:\n%s", grant)
 	}
-	baseline := storedPolicy(t, ic, profile, SporedBaselinePolicyName())
+	baseline := storedPolicy(t, ic, profile, sporedBaselinePolicyName())
 	wantBase, _ := bindPolicyAccount(c.nestedSpawnBaselinePolicyDoc(), acct)
 	if !jsonEqual(t, baseline, wantBase) {
 		t.Errorf("nested role's baseline is not the tag-on-create variant:\n got  %s\n want %s", baseline, wantBase)

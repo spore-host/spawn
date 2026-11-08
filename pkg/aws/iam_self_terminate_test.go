@@ -62,9 +62,9 @@ func TestTheSelfTerminateGrantReachesIAM(t *testing.T) {
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatalf("SetupSporedIAMRole: %v", err)
 	}
-	selfTerminateIn(t, "stored "+SporedRolePolicyName(), storedPolicy(t, ic, SporedRoleName, SporedRolePolicyName()))
+	selfTerminateIn(t, "stored "+sporedRolePolicyName(), storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()))
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-1080", Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatalf("CreateOrGetInstanceProfile: %v", err)
 	}
-	selfTerminateIn(t, "stored "+SporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-1080", SporedBaselinePolicyName()))
+	selfTerminateIn(t, "stored "+sporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-1080", sporedBaselinePolicyName()))
 }

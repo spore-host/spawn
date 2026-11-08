@@ -35,7 +35,7 @@ import (
 //     rewrites its own name afterwards it can only add to what this CLI wrote,
 //     never take away. That is the only protection there can be against CLIs
 //     already released, since they cannot be changed.
-//  2. A schema version, carried in that name. SporedPolicySchema is bumped
+//  2. A schema version, carried in that name. sporedPolicySchema is bumped
 //     whenever any spored grant document changes (a test pins the documents to
 //     the schema, so the two cannot drift). A CLI that finds a NEWER schema on
 //     the role writes nothing and warns: the newer CLI's document already
@@ -48,7 +48,7 @@ import (
 //     safe because the version written covers them (see "Removing a grant").
 //
 // Removing a grant. Monotonic as this is, a removal still ships: drop the
-// statement and bump SporedPolicySchema. The first CLI at the new schema
+// statement and bump sporedPolicySchema. The first CLI at the new schema
 // writes its version and deletes the older ones, and from then on an older
 // versioned CLI defers to it instead of writing the grant back. Two limits:
 //
@@ -71,13 +71,13 @@ import (
 // (the old CLI's and this one); TestSporedRolesFitTheInlineLimitWhenMixed
 // holds every role kind to the limit in that state.
 
-// SporedPolicySchema is the version of the spored grant documents this CLI
+// sporedPolicySchema is the version of the spored grant documents this CLI
 // writes. Bump it whenever sporedDCVRolePolicy, the spored baseline, or the
 // nested-spawn baseline changes, then update the pins in
 // TestSporedPolicySchemaPinsTheDocuments. Same schema must mean the same
 // document: otherwise an older CLI at the same schema would overwrite a newer
 // one's grants, which is #1558 again.
-const SporedPolicySchema = 1
+const sporedPolicySchema = 1
 
 // The unversioned policy names, which every CLI up to v0.161.0 overwrites on
 // every launch. This CLI writes them only as the base of its versioned names
@@ -115,16 +115,16 @@ func parseVersionedPolicyName(base, name string) (int, bool) {
 	return v, true
 }
 
-// SporedRolePolicyName is the inline policy this CLI writes to
+// sporedRolePolicyName is the inline policy this CLI writes to
 // spored-instance-role.
-func SporedRolePolicyName() string {
-	return versionedPolicyName(sporedRolePolicyBase, SporedPolicySchema)
+func sporedRolePolicyName() string {
+	return versionedPolicyName(sporedRolePolicyBase, sporedPolicySchema)
 }
 
-// SporedBaselinePolicyName is the inline policy this CLI writes to every
+// sporedBaselinePolicyName is the inline policy this CLI writes to every
 // spawn-instance-* and nested-spawn role.
-func SporedBaselinePolicyName() string {
-	return versionedPolicyName(sporedBaselinePolicyBase, SporedPolicySchema)
+func sporedBaselinePolicyName() string {
+	return versionedPolicyName(sporedBaselinePolicyBase, sporedPolicySchema)
 }
 
 // rolePolicyAPI is the part of the IAM client putVersionedRolePolicy uses.

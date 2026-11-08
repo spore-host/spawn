@@ -66,14 +66,14 @@ func TestEverySporedPolicyIsWrittenBoundToTheAccount(t *testing.T) {
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatalf("SetupSporedIAMRole: %v", err)
 	}
-	assertBound(t, SporedRolePolicyName()+" (SetupSporedIAMRole)", storedPolicy(t, ic, SporedRoleName, SporedRolePolicyName()), acct)
+	assertBound(t, sporedRolePolicyName()+" (SetupSporedIAMRole)", storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()), acct)
 
 	// --iam-policy: the inline policy AND the baseline on the generated role.
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-1069", Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatalf("CreateOrGetInstanceProfile: %v", err)
 	}
 	assertNoPlaceholder(t, "spawn-inline-policy (createIAMRole)", storedPolicy(t, ic, "spawn-test-1069", "spawn-inline-policy"))
-	assertBound(t, SporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-1069", SporedBaselinePolicyName()), acct)
+	assertBound(t, sporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-1069", sporedBaselinePolicyName()), acct)
 
 	// The same role again, with a different policy: the update path.
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-1069", Policies: []string{"s3:ReadWrite"}}); err != nil {
@@ -120,7 +120,7 @@ func TestEnsureDNSInvokeGrantIsWrittenBesideTheBaseline(t *testing.T) {
 	if doc := storedPolicy(t, ic, SporedRoleName, DNSInvokePolicyName(fn)); !strings.Contains(doc, `"Resource":"`+fn+`"`) {
 		t.Errorf("custom grant = %s, want Resource %s", doc, fn)
 	}
-	if doc := storedPolicy(t, ic, SporedRoleName, SporedRolePolicyName()); strings.Contains(doc, fn) {
+	if doc := storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()); strings.Contains(doc, fn) {
 		t.Errorf("the custom function reached the shared baseline, where the next launch would overwrite it:\n%s", doc)
 	}
 	if DNSInvokePolicyName(fn) == DNSInvokePolicyName("arn:aws:lambda:eu-west-1:444455556666:function:spawn-dns-updater") {

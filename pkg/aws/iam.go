@@ -1546,7 +1546,7 @@ func (c *Client) ensureSSMManagedPolicy(ctx context.Context, iamClient *iam.Clie
 }
 
 // ensureSporedBaselinePolicy attaches the spored self-management inline policy
-// to roleName, as the versioned SporedBaselinePolicyName (#1558,
+// to roleName, as the versioned sporedBaselinePolicyName (#1558,
 // putVersionedRolePolicy). Safe to call on every role on every call — new,
 // pre-existing, and any policy source (Policies/PolicyFile/InlinePolicyJSON/
 // managed-policies-only). Without these grants spored cannot read its own
@@ -1562,7 +1562,7 @@ func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.
 	if err != nil {
 		return err
 	}
-	return putVersionedRolePolicy(ctx, iamClient, roleName, sporedBaselinePolicyBase, doc, SporedPolicySchema, warnSporedPolicy)
+	return putVersionedRolePolicy(ctx, iamClient, roleName, sporedBaselinePolicyBase, doc, sporedPolicySchema, warnSporedPolicy)
 }
 
 // SetupSporedIAMRole is the OTHER instance-profile resolution path (see the
@@ -1622,7 +1622,7 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := putVersionedRolePolicy(ctx, iamClient, roleName, sporedRolePolicyBase, dcvDoc, SporedPolicySchema, warnSporedPolicy); err != nil {
+	if err := putVersionedRolePolicy(ctx, iamClient, roleName, sporedRolePolicyBase, dcvDoc, sporedPolicySchema, warnSporedPolicy); err != nil {
 		return "", fmt.Errorf("failed to attach policy to role: %w", err)
 	}
 
