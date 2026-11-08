@@ -200,7 +200,7 @@ func (f Field) Stored(item map[string]types.AttributeValue) string {
 func (f Field) Open(ctx context.Context, kmsClient security.KMSAPI, workspaceKey, stored string) (string, error) {
 	if !security.IsEncrypted(stored) {
 		if stored != "" {
-			noticeOnce("legacy:"+f.attribute, "botsecret: read a %s stored unencrypted (written before #868, first seen on %s); it is sealed on its next write", f, workspaceKey)
+			noticeOnce("legacy:"+f.attribute, "botsecret: the %s of %s is stored unencrypted, as written before #868 (logged once per field); it is sealed by its next write or spore-bot's sweep", f, workspaceKey)
 		}
 		return stored, nil
 	}
