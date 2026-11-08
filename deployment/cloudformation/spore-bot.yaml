@@ -15,6 +15,17 @@ Description: 'spore-bot — Slack/Teams/Discord/SMS chat interface for instance 
 # gate here keeps the two in step — re-audit when the bot gains an env var or an
 # AWS call.
 #
+# Workspace credentials (#868). The stack creates the KMS key
+# alias/spore-bot-secrets; once it exists, every writer (the spawn CLI, the
+# bot) stores credentials encrypted, and before it exists they store them in
+# the old plaintext format. So on an existing stack, update the bot's code to a
+# build that can decrypt (spore-host/spore-host#611) BEFORE, or in the same
+# update as, the change that creates the key: upload the new zip under a NEW
+# LambdaCodeKey, so CloudFormation sees the code change. Upgrade the spawn CLI
+# too: an older CLI cannot use an encrypted bot token (`notify register
+# --user <email>`). The hourly SealLegacyCredentials schedule then re-encrypts
+# the existing plaintext values in place; there is no manual migration step.
+#
 # Secrets are NoEcho parameters. On a stack UPDATE pass each one with
 # UsePreviousValue=true (or re-supply it): a parameter omitted from an update
 # resets to its default, which here is empty, and the bot fails closed without
@@ -304,6 +315,19 @@ Resources:
       CodeUri:
         Bucket: !Ref LambdaCodeBucket
         Key: !Ref LambdaCodeKey
+      Events:
+        # Re-seals credentials still stored in plaintext: items written before
+        # #868, and items an older spawn CLI writes. Each value is replaced
+        # with a conditional update that fails if it changed meanwhile, so it
+        # cannot clobber a token refresh. A no-op once nothing is plaintext.
+        # The Input is the task spore-bot's handler routes on
+        # (spore-host lambda/spore-bot); keep the two in step.
+        SealLegacyCredentials:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+            Description: spore-bot - re-seal workspace credentials still stored in plaintext (spawn#868)
+            Input: '{"spore_bot_task":"seal-legacy-credentials"}'
       Environment:
         Variables:
           BOT_REGISTRY_TABLE: !Ref BotRegistryTable
@@ -474,7 +498,7 @@ Outputs:
 
   BotSecretsKeyArn:
     Value: !GetAtt BotSecretsKey.Arn
-    Description: 'KMS key for workspace credentials (alias/spore-bot-secrets). Grant kms:Encrypt on it to principals that write workspaces (e.g. the dashboard role).'
+    Description: 'KMS key for workspace credentials (alias/spore-bot-secrets). The key policy delegates to IAM in this account; the bot function is granted its use above.'
     Export:
       Name: !Sub '${AWS::StackName}-secrets-key-arn'
 

@@ -20,20 +20,46 @@
 // Transition. Items written before #868 hold the plaintext. Open returns such a
 // value unchanged (security.IsEncrypted reports it as not encrypted: Slack
 // tokens contain '-', which is not base64, and URLs contain "://"), so they keep
-// working; the next write of the item seals it. Reads deliberately do not
-// re-write: see Field.Open.
+// working, and logs that once per field. Reads deliberately do not re-write:
+// see Field.Open. spore-bot's migration sweep (spore-host/spore-host#611)
+// re-seals legacy values in place once the key exists.
+//
+// Rollout. The key behind DefaultKeyAlias is the switch between the two
+// formats. Until it exists, Seal stores the plaintext (the legacy format every
+// reader, old or new, handles) and logs that once; once it exists, every
+// writer seals. So a writer that ships before the readers that can decrypt
+// writes nothing they cannot read, and the key is created only after those
+// readers are deployed. Only KMS's NotFoundException for the default alias
+// means "not provisioned"; any other failure, or a missing key that was named
+// explicitly with SPORE_BOT_SECRETS_KMS_KEY, fails the write.
 package botsecret
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/spore-host/spawn/pkg/security"
 )
+
+// logf reports the once-only notices below. A variable so tests can see them.
+var logf = log.Printf
+
+// notices remembers which once-only notices have been logged in this process.
+var notices sync.Map
+
+// noticeOnce logs msg the first time key is seen in this process.
+func noticeOnce(key, format string, args ...any) {
+	if _, seen := notices.LoadOrStore(key, true); !seen {
+		logf(format, args...)
+	}
+}
 
 // Field is one credential attribute of a workspace item, with the purpose its
 // values are sealed for.
@@ -92,10 +118,14 @@ func (f Field) EncryptionContext(workspaceKey string) map[string]string {
 
 // Seal encrypts plaintext for the item keyed workspaceKey. An empty plaintext
 // stays empty (the item has no such credential; for the signing secret,
-// spore-bot then falls back to its app-level one). Seal never returns
-// plaintext: with no KMS client it fails, and it refuses a result
-// security.IsEncrypted would not recognise, because Open would then hand that
-// value back as if it were the credential.
+// spore-bot then falls back to its app-level one). With no KMS client it
+// fails, and it refuses a result security.IsEncrypted would not recognise,
+// because Open would then hand that value back as if it were the credential.
+//
+// The one case in which Seal returns the plaintext is the rollout window (see
+// the package doc): the key is the default alias and KMS reports that it does
+// not exist. That is the format written before #868, and the format every
+// deployed reader still handles; Seal logs it once per process.
 func (f Field) Seal(ctx context.Context, kmsClient security.KMSAPI, keyID, workspaceKey, plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
@@ -110,13 +140,25 @@ func (f Field) Seal(ctx context.Context, kmsClient security.KMSAPI, keyID, works
 		keyID = KeyID()
 	}
 	sealed, err := security.EncryptSecret(ctx, kmsClient, keyID, plaintext, f.EncryptionContext(workspaceKey))
+	if err != nil && notProvisioned(keyID, err) {
+		noticeOnce("unsealed", "botsecret: KMS key %s does not exist yet, so workspace credentials are stored unencrypted, as before #868; they are sealed once the key is created", keyID)
+		return plaintext, nil
+	}
 	if err != nil {
-		return "", fmt.Errorf("%s not stored: encrypt with KMS key %s: %w (create the key with deployment/cloudformation/spore-bot.yaml, or set %s)", f, keyID, err, EnvKeyID)
+		return "", fmt.Errorf("%s not stored: encrypt with KMS key %s: %w (self-hosted: create it with deployment/cloudformation/spore-bot.yaml; hosted: spore-host/spore-host#611; or set %s)", f, keyID, err, EnvKeyID)
 	}
 	if !security.IsEncrypted(sealed) {
 		return "", fmt.Errorf("%s not stored: KMS returned a value that does not read as ciphertext", f)
 	}
 	return sealed, nil
+}
+
+// notProvisioned reports whether err from sealing under keyID means the
+// default key has not been created yet. A key named with EnvKeyID is a
+// deliberate choice, so its absence is a misconfiguration, not a rollout.
+func notProvisioned(keyID string, err error) bool {
+	var nf *kmstypes.NotFoundException
+	return keyID == DefaultKeyAlias && errors.As(err, &nf)
 }
 
 // Put seals plaintext and sets it as item's f attribute, replacing whatever the
@@ -152,10 +194,14 @@ func (f Field) Stored(item map[string]types.AttributeValue) string {
 // a request, the CLI listing workspaces) would each need kms:Encrypt and a
 // DynamoDB write they otherwise lack, and a read-triggered full-item write
 // races the writers that rotate tokens. Legacy values instead get sealed on the
-// item's next write (for a rotating Slack app, its next token refresh), and the
-// remaining live ones are re-keyed by the maintainer.
+// item's next write (for a rotating Slack app, its next token refresh) or by
+// spore-bot's migration sweep, which re-seals each value in place with a
+// conditional update. A legacy read is logged once per field per process.
 func (f Field) Open(ctx context.Context, kmsClient security.KMSAPI, workspaceKey, stored string) (string, error) {
 	if !security.IsEncrypted(stored) {
+		if stored != "" {
+			noticeOnce("legacy:"+f.attribute, "botsecret: read a %s stored unencrypted (written before #868, first seen on %s); it is sealed on its next write", f, workspaceKey)
+		}
 		return stored, nil
 	}
 	if kmsClient == nil {

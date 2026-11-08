@@ -68,4 +68,3 @@ func scanAll(ctx context.Context, api dynamodb.ScanAPIClient, input *dynamodb.Sc
 	}
 	return items, nil
 }
-

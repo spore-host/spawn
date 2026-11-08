@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"maps"
 	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"github.com/aws/smithy-go"
 	"github.com/spore-host/spawn/pkg/security"
 )
 
@@ -20,7 +23,8 @@ import (
 type fakeKMS struct {
 	encrypts, decrypts int
 	sealed             map[string]sealedEntry
-	shortBlob          bool // return a blob too short to read as ciphertext
+	shortBlob          bool  // return a blob too short to read as ciphertext
+	encryptErr         error // returned by Encrypt when set
 }
 
 type sealedEntry struct {
@@ -30,6 +34,9 @@ type sealedEntry struct {
 
 func (f *fakeKMS) Encrypt(_ context.Context, in *kms.EncryptInput, _ ...func(*kms.Options)) (*kms.EncryptOutput, error) {
 	f.encrypts++
+	if f.encryptErr != nil {
+		return nil, f.encryptErr
+	}
 	if f.sealed == nil {
 		f.sealed = map[string]sealedEntry{}
 	}
@@ -250,5 +257,105 @@ func TestKeyID(t *testing.T) {
 func TestFakeBlobReadsAsCiphertext(t *testing.T) {
 	if !security.IsEncrypted(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xA0}, 180))) {
 		t.Fatal("fake ciphertext is not recognised by IsEncrypted")
+	}
+}
+
+// captureNotices resets the once-only notices and records what is logged.
+func captureNotices(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	orig := logf
+	notices.Range(func(k, _ any) bool { notices.Delete(k); return true })
+	logf = func(format string, args ...any) {
+		got = append(got, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() {
+		logf = orig
+		notices.Range(func(k, _ any) bool { notices.Delete(k); return true })
+	})
+	return &got
+}
+
+// notFound is KMS's answer for an alias that does not exist, wrapped the way
+// the SDK returns it.
+func notFound() error {
+	return &smithy.OperationError{ServiceID: "KMS", OperationName: "Encrypt",
+		Err: &kmstypes.NotFoundException{Message: aws("Alias arn:aws:kms:us-east-1:111122223333:alias/spore-bot-secrets is not found.")}}
+}
+
+func aws(s string) *string { return &s }
+
+// Before the key exists (the rollout window), a write stores the legacy
+// plaintext format that every deployed reader handles, and says so once. This
+// is what lets the writers ship before the readers that can decrypt.
+func TestSeal_DefaultKeyNotProvisionedWritesLegacyFormatAndLogsOnce(t *testing.T) {
+	t.Setenv(EnvKeyID, "")
+	logged := captureNotices(t)
+	f := &fakeKMS{encryptErr: notFound()}
+	for _, fld := range Fields() {
+		item := map[string]types.AttributeValue{}
+		if err := fld.Put(context.Background(), f, "", item, "slack#T1", legacyPlaintexts[fld]); err != nil {
+			t.Fatalf("%s: Put with no key yet = %v, want the legacy write", fld, err)
+		}
+		if got := fld.Stored(item); got != legacyPlaintexts[fld] {
+			t.Fatalf("%s: stored %q, want the plaintext (legacy format)", fld, got)
+		}
+	}
+	if len(*logged) != 1 || !strings.Contains((*logged)[0], DefaultKeyAlias) {
+		t.Fatalf("logged %q; want one notice naming %s", *logged, DefaultKeyAlias)
+	}
+}
+
+// Every other failure still refuses the write: a key named explicitly that
+// does not exist is a misconfiguration, and AccessDenied, a disabled key or a
+// throttle are not "not provisioned".
+func TestSeal_OnlyTheDefaultKeysAbsenceFallsBack(t *testing.T) {
+	logged := captureNotices(t)
+	cases := map[string]struct {
+		env string
+		err error
+	}{
+		"explicit key not found": {env: "alias/someone-elses", err: notFound()},
+		"access denied":          {err: &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized"}},
+		"disabled key":           {err: &kmstypes.DisabledException{}},
+		"pending deletion":       {err: &kmstypes.KMSInvalidStateException{}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(EnvKeyID, tc.env)
+			item := map[string]types.AttributeValue{}
+			if err := SigningSecret.Put(context.Background(), &fakeKMS{encryptErr: tc.err}, "", item, "slack#T1", legacyPlaintexts[SigningSecret]); err == nil {
+				t.Fatal("Put succeeded; want an error")
+			}
+			if _, set := item[SigningSecret.attribute]; set {
+				t.Fatalf("Put stored %q after failing", SigningSecret.Stored(item))
+			}
+		})
+	}
+	if len(*logged) != 0 {
+		t.Fatalf("logged %q for failures that are not the rollout window", *logged)
+	}
+}
+
+// A reader that meets a legacy plaintext value handles it and logs once per
+// field, not once per read.
+func TestOpen_LegacyPlaintextLoggedOncePerField(t *testing.T) {
+	logged := captureNotices(t)
+	for i := 0; i < 3; i++ {
+		for _, fld := range Fields() {
+			if _, err := fld.Open(context.Background(), nil, "slack#T1", legacyPlaintexts[fld]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if len(*logged) != len(Fields()) {
+		t.Fatalf("logged %d notices over 3 reads of %d fields, want %d: %q", len(*logged), len(Fields()), len(Fields()), *logged)
+	}
+	for _, l := range *logged {
+		for _, fld := range Fields() {
+			if strings.Contains(l, legacyPlaintexts[fld]) {
+				t.Fatalf("notice %q contains the credential", l)
+			}
+		}
 	}
 }

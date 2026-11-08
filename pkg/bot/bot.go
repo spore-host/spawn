@@ -312,7 +312,9 @@ func (c *Client) BatchDeleteRegistrations(ctx context.Context, regs []Registrati
 
 // PutWorkspace writes a workspace registration, replacing any existing one.
 // Every credential field is stored KMS-encrypted; without a KMS client (see
-// WithSecretsKMS) a non-empty credential is an error, never a plaintext write.
+// WithSecretsKMS) a non-empty credential is an error. The one exception is the
+// rollout window before the credentials key exists, in which the legacy
+// plaintext format is written and logged once (botsecret.Field.Seal).
 func (c *Client) PutWorkspace(ctx context.Context, ws *Workspace) error {
 	item, err := attributevalue.MarshalMap(ws)
 	if err != nil {
