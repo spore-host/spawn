@@ -126,6 +126,12 @@ type Prober interface {
 	VPCAndSubnet(ctx context.Context) (detail string, err error)
 	SSMAvailable(ctx context.Context) (detail string, err error)
 
+	// SweepCrossAccountRole reports SpawnSweepCrossAccountRole, which detached
+	// sweeps launch through (#1537): absent (spawn creates it on the first
+	// detached sweep), present and current, or older than this spawn. An error
+	// wrapping ErrMustRemove is a Fail; any other is a Warn.
+	SweepCrossAccountRole(ctx context.Context) (detail string, err error)
+
 	// Optional features → Warn (not Fail) when unavailable.
 	ReaperConfigured(ctx context.Context) (detail string, err error)
 	Route53Available(ctx context.Context) (detail string, err error)
@@ -138,6 +144,10 @@ type Prober interface {
 	// no current-generation families at all.
 	NitroCoverage(ctx context.Context) (detail string, err error)
 }
+
+// ErrMustRemove is wrapped by a probe that found something spawn must never
+// have created where it is: a Fail, not a Warn.
+var ErrMustRemove = errors.New("must be removed")
 
 // ErrNoDefaultVPC is wrapped by a VPCAndSubnet probe when the region has no
 // default VPC but does have subnets, so launches passing --subnet-id still work.
@@ -186,7 +196,7 @@ func Run(ctx context.Context, p Prober) *Report {
 		for _, name := range []string{
 			"account", "region", "EC2 describe permission", "EC2 launch permission",
 			"IAM instance-profile permission", "spored role", "VPC & subnet",
-			"Session Manager", "TTL reaper backstop", "Route 53 (DNS)", "Nitro fleet",
+			"Session Manager", "sweep cross-account role", "TTL reaper backstop", "Route 53 (DNS)", "Nitro fleet",
 		} {
 			add(name, Skip, "", "requires valid credentials")
 		}
@@ -247,6 +257,16 @@ func Run(ctx context.Context, p Prober) *Report {
 		add("Session Manager", Warn, "", "SSM not reachable; `spawn connect` SSM fallback won't work: "+errText(err))
 	} else {
 		add("Session Manager", Pass, detail, "")
+	}
+
+	// Detached sweeps' role (#1537): a Warn while it does not exist, since the
+	// first detached sweep creates it; a Fail only where it must not exist.
+	if detail, err := p.SweepCrossAccountRole(ctx); errors.Is(err, ErrMustRemove) {
+		add("sweep cross-account role", Fail, "", errText(err))
+	} else if err != nil {
+		add("sweep cross-account role", Warn, "", errText(err))
+	} else {
+		add("sweep cross-account role", Pass, detail, "")
 	}
 
 	// Optional features → Warn when unavailable.

@@ -91,3 +91,33 @@ func marshalSweep(t *testing.T, rec SweepRecord) map[string]dynamodbtypes.Attrib
 	}
 	return item
 }
+
+// ActiveInAccount is what `spawn sweep teardown` refuses on (#1537): every
+// unfinished sweep with members in the account, and nothing else.
+func TestSweepStore_ActiveInAccount(t *testing.T) {
+	store, db := newStoreTestClient(t)
+	ctx := context.Background()
+	for _, rec := range []SweepRecord{
+		{SweepID: "run", Status: "RUNNING", AWSAccountID: "111122223333"},
+		{SweepID: "init", Status: "INITIALIZING", AWSAccountID: "111122223333"},
+		{SweepID: "done", Status: "COMPLETED", AWSAccountID: "111122223333"},
+		{SweepID: "failed", Status: "FAILED", AWSAccountID: "111122223333"},
+		{SweepID: "cancelled", Status: "CANCELLED", AWSAccountID: "111122223333"},
+		{SweepID: "elsewhere", Status: "RUNNING", AWSAccountID: "444455556666"},
+	} {
+		if _, err := db.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(defaultDynamoTableName), Item: marshalSweep(t, rec)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.ActiveInAccount(ctx, "111122223333")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, r := range got {
+		ids[r.SweepID] = true
+	}
+	if len(ids) != 2 || !ids["run"] || !ids["init"] {
+		t.Errorf("ActiveInAccount = %v, want run and init", ids)
+	}
+}

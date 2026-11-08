@@ -89,7 +89,7 @@ func TestNoOrchestratorMayPassANestedSpawnRole(t *testing.T) {
 	t.Logf("principals that may pass spawn-instance-*: %v", covered)
 	// The two #1372 names; if discovery stops seeing them it is blind.
 	for _, want := range []string{
-		"scripts/setup-sweep-cross-account-role.sh",
+		sweepCrossAccountPolicySource,
 		"lambda/pipeline-orchestrator/template.yaml#PipelineOrchestratorFunction",
 	} {
 		found := false
@@ -103,11 +103,21 @@ func TestNoOrchestratorMayPassANestedSpawnRole(t *testing.T) {
 }
 
 // discoverPassPrincipals parses every shell script and YAML template in the
-// repository for identity policies.
+// repository for identity policies, and adds the ones spawn renders in Go for
+// a role it provisions itself (SpawnSweepCrossAccountRole, #1537).
 func discoverPassPrincipals(t *testing.T) []passPrincipal {
 	t.Helper()
 	var out []passPrincipal
-	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+	doc, err := spawnaws.SweepCrossAccountPolicyDocument(exAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sweepDoc struct{ Statement []map[string]any }
+	if err := json.Unmarshal([]byte(doc), &sweepDoc); err != nil {
+		t.Fatal(err)
+	}
+	out = append(out, passPrincipal{name: sweepCrossAccountPolicySource, stmts: sweepDoc.Statement})
+	err = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if treewalk.Vanished(repoRoot, path, err) {
 				return nil

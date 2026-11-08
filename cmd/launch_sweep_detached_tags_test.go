@@ -289,12 +289,12 @@ func TestSweepRowUserDataRuns(t *testing.T) {
 
 // TestDetachedPassableProfilesMatchTheGrant is #1331's CLI half: the profiles a
 // detached sweep may use are exactly those whose roles the orchestrator's
-// cross-account role may pass (scripts/setup-sweep-cross-account-role.sh, read
-// here, not restated), and anything else is refused before upload.
+// cross-account role may pass (aws.SweepCrossAccountPolicyDocument, read here,
+// not restated), and anything else is refused before upload.
 func TestDetachedPassableProfilesMatchTheGrant(t *testing.T) {
 	grant := passRoleResources(t, "Allow")
 	if len(grant) == 0 {
-		t.Fatal("found no iam:PassRole resources in the script; the matcher is stale")
+		t.Fatal("found no iam:PassRole resources in the policy; the matcher is stale")
 	}
 	denied := passRoleResources(t, "Deny")
 	match := func(g, role string) bool {
@@ -352,7 +352,7 @@ func TestDetachedPassableProfilesMatchTheGrant(t *testing.T) {
 	for _, d := range denied {
 		probe := strings.TrimSuffix(d, "*") + map[bool]string{true: "0123abcd", false: ""}[strings.HasSuffix(d, "*")]
 		if orchestratorPassableProfile(probe) {
-			t.Errorf("the script denies PassRole on %s, but the CLI lets a detached member use %s", d, probe)
+			t.Errorf("the policy denies PassRole on %s, but the CLI lets a detached member use %s", d, probe)
 		}
 	}
 	if granted(aws.NestedSpawnRoleName()) {
@@ -364,13 +364,9 @@ func TestDetachedPassableProfilesMatchTheGrant(t *testing.T) {
 // role's iam:PassRole statements with the given Effect.
 func passRoleResources(t *testing.T, effect string) []string {
 	t.Helper()
-	src, err := os.ReadFile("../scripts/setup-sweep-cross-account-role.sh")
+	doc, err := aws.SweepCrossAccountPolicyDocument("111122223333")
 	if err != nil {
 		t.Fatal(err)
-	}
-	m := regexp.MustCompile(`(?s)POLICY_DOCUMENT=\$\(cat <<EOF\n(.*?)\nEOF\n\)`).FindSubmatch(src)
-	if m == nil {
-		t.Fatal("found no POLICY_DOCUMENT heredoc")
 	}
 	var policy struct {
 		Statement []struct {
@@ -379,7 +375,7 @@ func passRoleResources(t *testing.T, effect string) []string {
 			Resource interface{}
 		}
 	}
-	if err := json.Unmarshal([]byte(strings.ReplaceAll(string(m[1]), "${CURRENT_ACCOUNT_ID}", "111122223333")), &policy); err != nil {
+	if err := json.Unmarshal([]byte(doc), &policy); err != nil {
 		t.Fatal(err)
 	}
 	var out []string

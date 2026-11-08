@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `spawn sweep setup` and `spawn sweep teardown` (#1537). `setup` creates
+  `SpawnSweepCrossAccountRole` in the compute account, or brings an existing
+  one up to date. `teardown` deletes the role and every policy on it. It
+  refuses while a sweep whose members launch in that account is still running,
+  or when it cannot read the orchestration table to check; `--force` deletes
+  the role anyway. A detached sweep does what `setup` does, so neither command
+  is required.
+- `spawn doctor` checks `SpawnSweepCrossAccountRole`: whether it exists, and
+  whether its policy is this spawn's version, an older one, or the setup
+  script's. It is a warning when the role does not exist yet, and a failure
+  when the role exists in an account spawn must never create it in.
+
 ### Changed
 
 - **`spawn notify workspace list --json` shows `"(redacted)"` for every
@@ -22,6 +36,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SanitizeForLog` and `SanitizePath` are kept, now documented as having no
   caller and why (#868).
 
+- **A detached sweep now creates `SpawnSweepCrossAccountRole` itself** (#1537).
+  The sweep orchestrator launches, tags and cancels every member through this
+  role, and until now only `scripts/setup-sweep-cross-account-role.sh`, run by
+  hand in each account, created it. A detached sweep without it was refused
+  (#1535). Now `spawn launch --param-file` (detached, the default) and `spawn
+  sweep resume --detach` create the role in the compute account before
+  anything else, or adopt the one the script made. They bring its trust and
+  policy up to date on every run. The creation needs `iam:CreateRole` in the
+  compute account, the same permission spawn already uses for instance roles.
+  - **Trust:** `sts:AssumeRole` by `SpawnSweepOrchestratorRole` in the account
+    whose orchestrator the CLI invokes (the infra credentials' account), and
+    nothing else. That is the trust the script wrote. A role that trusts
+    anything more is narrowed to it. There is no `sts:ExternalId`: the
+    orchestrator sends none.
+  - **Policy:** written as `SweepCrossAccountEC2Policy-v1` through the
+    versioned writer from #1558, so the script or an older spawn can only add
+    to it. The script's `SweepCrossAccountEC2Policy` is deleted once the new
+    policy is in place. The policy drops five grants the orchestrator never
+    calls: `ec2:DescribeImages`, `DescribeInstanceStatus`, `DescribeKeyPairs`,
+    `DescribeSubnets` and `DescribeVpcs`. A test now fails on any grant the
+    orchestrator does not call, as one already did for any call without a
+    grant.
+  - **Account boundary:** spawn refuses to create the role in, or to trust,
+    account 942542972736 (hardcoded), any AWS Organizations management account
+    (read with `organizations:DescribeOrganization` where permitted), and the
+    shared infra account 966362334030. A detached sweep there stops before
+    anything is created, and says why.
+  - If spawn may not update an existing role, the sweep goes on with a
+    warning, as it did before. If there is no role and spawn cannot create
+    one, the sweep is refused before anything is created, as in #1535.
+  - New CLI permissions, in the compute account: `iam:UpdateAssumeRolePolicy`,
+    `iam:DeleteRole`, `iam:ListAttachedRolePolicies`, `iam:DetachRolePolicy`
+    (teardown) and `organizations:DescribeOrganization`. Teardown also scans
+    the orchestration table (`dynamodb:Scan`) with the infra credentials.
+
 ### Removed
 
 - **`pkg/security.ValidateMountPath` and `ValidateCommand`**, both uncalled
@@ -30,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a metacharacter denylist that would reject legitimate `--pre-stop` shell
   hooks. Quote with `ShellQuote` and validate users with `ValidateUsername`
   instead (#868).
+
+- `scripts/setup-sweep-cross-account-role.sh`. spawn creates the role
+  (`spawn sweep setup`, or any detached sweep). A role the script made is
+  adopted as it is.
 
 ### Fixed
 

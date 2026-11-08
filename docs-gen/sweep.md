@@ -88,6 +88,28 @@ spawn sweep resume <sweep-id> [flags]
 | `--user-data` |  | string |  | The sweep's --user-data, passed again: the checkpoint does not store it, since it may carry a token. Required when the sweep was launched with it. Not supported with --detach |
 | `--webhook-correlation` |  | string |  | The sweep's --webhook-correlation, passed again: the checkpoint does not store it, since it may carry a token. Required when the sweep was launched with it. Not supported with --detach |
 
+### `spawn sweep setup`
+
+Create SpawnSweepCrossAccountRole in the account detached sweeps launch in, or bring
+an existing one up to date: its trust (the sweep orchestrator's role, and nothing
+else) and its policy.
+
+You do not need to run this: every detached sweep does the same before it creates
+anything else. It is here to set an account up ahead of time, and to update the
+role with credentials that may manage IAM when the ones that launch sweeps may not.
+
+The account is the compute account: your own credentials', unless
+SPAWN_COMPUTE_PROFILE or 'spawn defaults set compute-profile' names another.
+
+spawn refuses to create the role in, or trusting, an AWS Organizations
+management account.
+
+'spawn sweep teardown' removes it.
+
+```
+spawn sweep setup
+```
+
 ### `spawn sweep status`
 
 Show parameter sweep status and progress
@@ -101,4 +123,26 @@ spawn sweep status <sweep-id> [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--check-complete` |  | bool |  | Exit with standardized codes: 0=complete 1=failed 2=running 3=error |
+
+### `spawn sweep teardown`
+
+Delete SpawnSweepCrossAccountRole and every policy on it from the compute account.
+
+Detached sweeps in this account stop working until the role is back; the next
+detached sweep, or 'spawn sweep setup', creates it again.
+
+It refuses while a sweep whose members launch in this account is still running
+(any status but COMPLETED, FAILED or CANCELLED in the orchestration table), or
+when it cannot read that table: the orchestrator would lose the role in the
+middle of launching or cancelling them. --force deletes the role anyway.
+
+```
+spawn sweep teardown [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--force` |  | bool |  | Delete the role even while a sweep in this account is running, or when that cannot be checked |
 

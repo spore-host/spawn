@@ -15,7 +15,6 @@ import (
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 
 	"github.com/spore-host/spawn/pkg/aws"
-	"github.com/spore-host/spawn/pkg/sweep"
 )
 
 // The dispatch table (#1535): every combination of the detach flags and
@@ -85,21 +84,113 @@ func TestSweepDispatchTable(t *testing.T) {
 	}
 }
 
-// roleIAMFake answers requireSweepCrossAccountRole's GetRole.
+// roleIAMFake is the compute account's IAM as the sweep role's provisioning
+// sees it (aws.SweepRoleIAM). err is GetRole's answer while the role does not
+// exist (nil: it exists, with spawn's trust); createErr is CreateRole's.
+// calls is every GetRole's role name: the detached path is the only one that
+// asks.
 type roleIAMFake struct {
-	mu    sync.Mutex
-	err   error
-	calls []string
+	mu        sync.Mutex
+	err       error
+	createErr error
+	putErr    error
+	calls     []string
+	ops       []string
+	created   bool
+	policies  map[string]string
+	// onCreate runs when the role is created.
+	onCreate func()
+}
+
+func (f *roleIAMFake) op(s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, s)
 }
 
 func (f *roleIAMFake) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, awssdk.ToString(in.RoleName))
-	if f.err != nil {
-		return nil, f.err
+	exists := f.created || f.err == nil
+	err := f.err
+	f.mu.Unlock()
+	f.op("GetRole")
+	if !exists {
+		return nil, err
 	}
-	return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName}}, nil
+	trust, _ := aws.SweepCrossAccountTrustDocument(testOrchestratorAccount)
+	return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName, AssumeRolePolicyDocument: awssdk.String(trust)}}, nil
+}
+
+func (f *roleIAMFake) CreateRole(_ context.Context, _ *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
+	f.op("CreateRole")
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	if f.onCreate != nil {
+		f.onCreate()
+	}
+	f.mu.Lock()
+	f.created = true
+	f.mu.Unlock()
+	return &iam.CreateRoleOutput{}, nil
+}
+
+func (f *roleIAMFake) UpdateAssumeRolePolicy(context.Context, *iam.UpdateAssumeRolePolicyInput, ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
+	f.op("UpdateAssumeRolePolicy")
+	return &iam.UpdateAssumeRolePolicyOutput{}, nil
+}
+
+func (f *roleIAMFake) ListRolePolicies(context.Context, *iam.ListRolePoliciesInput, ...func(*iam.Options)) (*iam.ListRolePoliciesOutput, error) {
+	f.op("ListRolePolicies")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := &iam.ListRolePoliciesOutput{}
+	for n := range f.policies {
+		out.PolicyNames = append(out.PolicyNames, n)
+	}
+	return out, nil
+}
+
+func (f *roleIAMFake) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, _ ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error) {
+	f.op("PutRolePolicy " + awssdk.ToString(in.PolicyName))
+	if f.putErr != nil {
+		return nil, f.putErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.policies == nil {
+		f.policies = map[string]string{}
+	}
+	f.policies[awssdk.ToString(in.PolicyName)] = awssdk.ToString(in.PolicyDocument)
+	return &iam.PutRolePolicyOutput{}, nil
+}
+
+func (f *roleIAMFake) DeleteRolePolicy(_ context.Context, in *iam.DeleteRolePolicyInput, _ ...func(*iam.Options)) (*iam.DeleteRolePolicyOutput, error) {
+	f.op("DeleteRolePolicy " + awssdk.ToString(in.PolicyName))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.policies, awssdk.ToString(in.PolicyName))
+	return &iam.DeleteRolePolicyOutput{}, nil
+}
+
+func (f *roleIAMFake) ListAttachedRolePolicies(context.Context, *iam.ListAttachedRolePoliciesInput, ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error) {
+	f.op("ListAttachedRolePolicies")
+	return &iam.ListAttachedRolePoliciesOutput{}, nil
+}
+
+func (f *roleIAMFake) DetachRolePolicy(context.Context, *iam.DetachRolePolicyInput, ...func(*iam.Options)) (*iam.DetachRolePolicyOutput, error) {
+	f.op("DetachRolePolicy")
+	return &iam.DetachRolePolicyOutput{}, nil
+}
+
+func (f *roleIAMFake) DeleteRole(context.Context, *iam.DeleteRoleInput, ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
+	f.op("DeleteRole")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = false
+	f.err = errNoCrossAccountRole
+	return &iam.DeleteRoleOutput{}, nil
 }
 
 func (f *roleIAMFake) count() int {
@@ -108,12 +199,37 @@ func (f *roleIAMFake) count() int {
 	return len(f.calls)
 }
 
+func (f *roleIAMFake) allOps() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ops...)
+}
+
+// testOrchestratorAccount is the account of the sweep orchestrator the tests'
+// role trusts.
+const testOrchestratorAccount = "444455556666"
+
+// stubSweepRoleBoundary answers the questions the role's provisioning asks
+// outside IAM: the orchestrator's account, and the compute account's
+// Organization (none).
+func stubSweepRoleBoundary(t *testing.T) {
+	t.Helper()
+	prevOrch, prevMgmt := sweepOrchestratorAccount, sweepRoleManagementAccount
+	t.Cleanup(func() { sweepOrchestratorAccount, sweepRoleManagementAccount = prevOrch, prevMgmt })
+	sweepOrchestratorAccount = func(context.Context) (string, error) { return testOrchestratorAccount, nil }
+	sweepRoleManagementAccount = func(context.Context, awssdk.Config) (string, error) { return "", nil }
+}
+
 func stubSweepRoleIAM(t *testing.T, f *roleIAMFake) {
 	t.Helper()
+	stubSweepRoleBoundary(t)
 	prev := sweepRoleIAM
 	t.Cleanup(func() { sweepRoleIAM = prev })
-	sweepRoleIAM = func(awssdk.Config) sweep.RoleGetter { return f }
+	sweepRoleIAM = func(awssdk.Config) aws.SweepRoleIAM { return f }
 }
+
+// errCreateRoleDenied is CreateRole refused for want of iam:CreateRole.
+var errCreateRoleDenied = errors.New("AccessDenied: not authorized to perform iam:CreateRole")
 
 var errNoCrossAccountRole = &iamtypes.NoSuchEntityException{Message: awssdk.String("The role with name SpawnSweepCrossAccountRole cannot be found.")}
 
@@ -129,7 +245,8 @@ func dispatchSweepFile(t *testing.T) string {
 
 // runDispatchSweep runs `spawn launch --param-file … <flags>` through
 // runLaunch against the recording AWS fake, with the cross-account role
-// absent, and returns its stderr, the fakes and its error.
+// absent and the credentials not allowed to create it, and returns its
+// stderr, the fakes and its error.
 func runDispatchSweep(t *testing.T, flags map[string]string) (string, *tagLimitAWS, *roleIAMFake, error) {
 	t.Helper()
 	f := serveTagLimitAWS(t)
@@ -139,7 +256,7 @@ func runDispatchSweep(t *testing.T, flags map[string]string) (string, *tagLimitA
 	t.Setenv("SPAWN_COMPUTE_PROFILE", "") // the fake's credentials, not spore-host-dev
 	t.Setenv("SPAWN_INFRA_PROFILE", "")
 	stubTeamName(t)
-	role := &roleIAMFake{err: errNoCrossAccountRole}
+	role := &roleIAMFake{err: errNoCrossAccountRole, createErr: errCreateRoleDenied}
 	stubSweepRoleIAM(t, role)
 	for k, v := range map[string]string{
 		"param-file": dispatchSweepFile(t), "region": "us-east-1", "name": "disp", "yes": "true",
@@ -161,8 +278,8 @@ func isRoleRefusal(err error) bool {
 
 // The printed mode is the path the sweep takes (#1535), through the real
 // runLaunch sweep path. The detached path is recognised by the one thing only
-// it does: ask IAM for SpawnSweepCrossAccountRole (absent here, so it stops
-// there). "--detach" is the bug: it printed "Lambda (detached)" and ran in
+// it does: ensure SpawnSweepCrossAccountRole (absent here, and not creatable,
+// so it stops there). "--detach" is the bug: it printed "Lambda (detached)" and ran in
 // the foreground.
 func TestSweepPrintedModeIsTheDispatchedPath(t *testing.T) {
 	cases := map[string]struct {
@@ -216,9 +333,10 @@ func TestSweepPrintedModeIsTheDispatchedPath(t *testing.T) {
 	}
 }
 
-// A detached sweep in an account without SpawnSweepCrossAccountRole fails
-// before it creates anything (#1535): the only AWS call past the identity
-// lookups is the GetRole, so no IAM role, instance profile, key pair, egress
+// A detached sweep in an account without SpawnSweepCrossAccountRole, whose
+// credentials may not create it, fails before it creates anything (#1535,
+// #1537): the only AWS calls past the identity lookups are the GetRole and
+// the refused CreateRole, so no IAM role, instance profile, key pair, egress
 // proxy, params upload or orchestration record exists for a sweep the
 // orchestrator could not launch. It used to get all the way to "queued
 // successfully".
@@ -236,6 +354,9 @@ func TestDetachedSweepWithoutTheCrossAccountRoleCreatesNothing(t *testing.T) {
 			if role.count() != 1 || role.calls[0] != sweepCrossAccountRoleName {
 				t.Errorf("GetRole calls %v, want one for %s", role.calls, sweepCrossAccountRoleName)
 			}
+			if ops := role.allOps(); len(ops) != 2 || ops[1] != "CreateRole" {
+				t.Errorf("IAM calls %v, want the GetRole and the refused CreateRole", ops)
+			}
 			if calls := f.beyondIdentity(); len(calls) != 0 {
 				t.Errorf("the refused sweep made AWS call(s) beyond the identity lookup: %v", calls)
 			}
@@ -243,23 +364,6 @@ func TestDetachedSweepWithoutTheCrossAccountRoleCreatesNothing(t *testing.T) {
 				t.Errorf("the refused sweep went on to submit:\n%s", out)
 			}
 		})
-	}
-}
-
-// Only a definite absence refuses: a GetRole the caller may not make is
-// reported and the sweep goes on, as before the check.
-func TestCrossAccountRoleCheckRefusesOnlyAbsence(t *testing.T) {
-	var warned []string
-	warn := func(s string) { warned = append(warned, s) }
-	if err := requireSweepCrossAccountRole(t.Context(), &roleIAMFake{}, "111122223333", warn); err != nil || len(warned) != 0 {
-		t.Errorf("role present: err %v, warnings %v", err, warned)
-	}
-	if err := requireSweepCrossAccountRole(t.Context(), &roleIAMFake{err: errNoCrossAccountRole}, "111122223333", warn); !isRoleRefusal(err) || !strings.Contains(err.Error(), "111122223333") {
-		t.Errorf("role absent: err %v, want the refusal naming the account", err)
-	}
-	denied := errors.New("AccessDenied: not authorized to perform iam:GetRole")
-	if err := requireSweepCrossAccountRole(t.Context(), &roleIAMFake{err: denied}, "111122223333", warn); err != nil || len(warned) != 1 || !strings.Contains(warned[0], "could not confirm") {
-		t.Errorf("GetRole denied: err %v, warnings %v; want a warning and no refusal", err, warned)
 	}
 }
 

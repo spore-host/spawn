@@ -73,3 +73,44 @@ func (s *Store) List(ctx context.Context) ([]SweepRecord, error) {
 	}
 	return records, nil
 }
+
+// IsTerminalStatus reports whether a sweep in status s is finished: the
+// orchestrator will launch, tag or cancel nothing more for it.
+func IsTerminalStatus(s string) bool {
+	switch s {
+	case "COMPLETED", "FAILED", "CANCELLED":
+		return true
+	}
+	return false
+}
+
+// ActiveInAccount returns every sweep whose members launch in accountID and
+// that is not finished (IsTerminalStatus): the sweeps the orchestrator may
+// still act for through SpawnSweepCrossAccountRole there. It reads the whole
+// table, every page of it.
+func (s *Store) ActiveInAccount(ctx context.Context, accountID string) ([]SweepRecord, error) {
+	var out []SweepRecord
+	p := dynamodb.NewScanPaginator(s.db, &dynamodb.ScanInput{TableName: aws.String(s.tableName)})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("scan sweeps: %w", err)
+		}
+		for _, item := range page.Items {
+			var rec SweepRecord
+			if err := attributevalue.UnmarshalMap(item, &rec); err != nil {
+				return nil, fmt.Errorf("unmarshal sweep: %w", err)
+			}
+			if rec.AWSAccountID == accountID && !IsTerminalStatus(rec.Status) {
+				out = append(out, rec)
+			}
+		}
+	}
+	return out, nil
+}
+
+// ActiveSweepsInAccount is ActiveInAccount on the default table, with cfg's
+// credentials: those of the account the orchestration table is in.
+func ActiveSweepsInAccount(ctx context.Context, cfg aws.Config, accountID string) ([]SweepRecord, error) {
+	return NewStore(dynamodb.NewFromConfig(cfg)).ActiveInAccount(ctx, accountID)
+}

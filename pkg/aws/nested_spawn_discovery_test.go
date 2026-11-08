@@ -44,6 +44,7 @@ var nestedSpawnNotGranted = map[string]string{
 	"iam:CreateInstanceProfile":    "IAM write; nested spores never write IAM",
 	"iam:AddRoleToInstanceProfile": "IAM write; nested spores never write IAM",
 	"iam:DeleteRolePolicy":         "IAM write; nested spores never write IAM",
+	"iam:UpdateAssumeRolePolicy":   "IAM write (a detached sweep's SpawnSweepCrossAccountRole, #1537); nested spores never write IAM",
 	"iam:ListRolePolicies":         "only reached by the role-setup paths a nested spore skips",
 	"iam:GetRole":                  "only reached by the role-setup paths a nested spore skips",
 	"iam:GetInstanceProfile":       "only reached by the role-setup paths a nested spore skips",

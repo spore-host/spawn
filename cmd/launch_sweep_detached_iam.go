@@ -15,7 +15,7 @@ import (
 // sweep-orchestrator Lambda through SpawnSweepCrossAccountRole in the member
 // account, and RunInstances with a profile needs iam:PassRole on the profile's
 // role. That role may pass exactly the roles spawn itself creates
-// (scripts/setup-sweep-cross-account-role.sh), and only to EC2:
+// (aws.SweepCrossAccountPolicyDocument, #1537), and only to EC2:
 //
 //   - spored-instance-role, in spored-instance-profile, the default
 //     (SetupSporedIAMRole);

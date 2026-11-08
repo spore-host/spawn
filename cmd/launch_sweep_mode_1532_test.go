@@ -22,7 +22,7 @@ func stubStdinTTY(t *testing.T, tty bool) {
 const wizardRefusal = "not supported by the interactive wizard"
 
 // runModeLaunch runs runLaunch against the recording AWS fake, with the
-// sweep cross-account role absent, stdin a TTY and the given flags only: no
+// sweep cross-account role absent and not creatable, stdin a TTY and the given flags only: no
 // --name and no --instance-type unless flags sets them.
 func runModeLaunch(t *testing.T, flags map[string]string) (string, *roleIAMFake, error) {
 	t.Helper()
@@ -34,7 +34,7 @@ func runModeLaunch(t *testing.T, flags map[string]string) (string, *roleIAMFake,
 	t.Setenv("SPAWN_INFRA_PROFILE", "")
 	stubTeamName(t)
 	stubStdinTTY(t, true)
-	role := &roleIAMFake{err: errNoCrossAccountRole}
+	role := &roleIAMFake{err: errNoCrossAccountRole, createErr: errCreateRoleDenied}
 	stubSweepRoleIAM(t, role)
 	for k, v := range flags {
 		setLaunchFlag(t, k, v)

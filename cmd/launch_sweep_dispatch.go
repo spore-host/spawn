@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
-	"github.com/spore-host/spawn/pkg/sweep"
 )
 
 // Which orchestration path a parameter sweep takes (#1535).
@@ -124,45 +122,6 @@ func refuseWaitOnPath(wait bool, d sweepDispatchDecision) error {
 	return nil
 }
 
-// sweepCrossAccountRoleName is the role the sweep orchestrator assumes in the
-// account the members launch in.
-const sweepCrossAccountRoleName = sweep.CrossAccountRoleName
-
-// sweepRoleIAM builds the IAM client requireSweepCrossAccountRole asks, with
-// the credentials of the account the members launch in. A var so the hermetic
-// tests can count what reaches it.
-var sweepRoleIAM = sweep.NewRoleGetter
-
-// requireSweepCrossAccountRole refuses a detached sweep in an account without
-// SpawnSweepCrossAccountRole, before the sweep creates anything (#1535).
-//
-// The orchestrator launches every member through that role. Without it, the
-// CLI used to create the CLI IAM role, the instance profile, the egress
-// proxies, the params upload and the orchestration record, invoke the
-// orchestrator, and report "queued successfully"; the orchestrator then failed
-// to assume the role and launched nothing. The CLI cannot test the assume
-// itself (the role trusts only the orchestrator's role), so it checks the
-// role is there, with iam:GetRole, which spawn launch already calls.
-//
-// Only a definite absence refuses. Any other error (no iam:GetRole, a
-// throttle) is reported and the sweep goes on, as it did before this check:
-// a missing permission to look is not evidence the role is missing.
-func requireSweepCrossAccountRole(ctx context.Context, c sweep.RoleGetter, accountID string, warn func(string)) error {
-	err := sweep.CheckCrossAccountRole(ctx, c)
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, sweep.ErrCrossAccountRoleMissing) {
-		return fmt.Errorf("a detached sweep needs %s in account %s: the sweep orchestrator launches every member "+
-			"through it, and this account has none, so it could launch nothing. Nothing was created. "+
-			"Run the sweep with --no-detach to launch the members from this CLI instead, or use an account "+
-			"set up for detached sweeps", sweepCrossAccountRoleName, accountID)
-	}
-	warn(fmt.Sprintf("could not confirm %s exists in account %s (%v); the sweep orchestrator needs it to launch the members",
-		sweepCrossAccountRoleName, accountID, err))
-	return nil
-}
-
 // memberAccountLine is the line a detached sweep prints, before it creates
 // anything, naming the account its members launch in and where that came
 // from (#1538). recordAccount is a resumed sweep's recorded account ("" at
@@ -189,34 +148,4 @@ var newComputeClient = func(ctx context.Context, region string) (*aws.Client, er
 		return nil, fmt.Errorf("failed to load compute AWS config: %w", err)
 	}
 	return aws.NewClientFromConfig(cfg), nil
-}
-
-// requireDetachedSweepRole is requireSweepCrossAccountRole for the account a
-// detached sweep's members launch in: the compute account, as
-// launchSweepDetached resolves it (spawnconfig.ResolveComputeProfile: the
-// caller's own unless an override names another, #1538). recordAccount is the account a resumed
-// sweep's record names ("" at launch); when the credentials are for another
-// account, the role there says nothing about this sweep, so nothing is
-// checked.
-func requireDetachedSweepRole(ctx context.Context, recordAccount string) error {
-	cfg, err := spawnconfig.LoadComputeAWSConfig(ctx, "")
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %w", err)
-	}
-	accountID, err := aws.NewClientFromConfig(cfg).GetAccountID(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get AWS account ID: %w", err)
-	}
-	// Before anything is created, say where the members launch (#1538).
-	fmt.Fprintln(os.Stderr, memberAccountLine(accountID, recordAccount, spawnconfig.ResolveComputeProfile()))
-	warn := func(msg string) { fmt.Fprintf(os.Stderr, "⚠️  %s\n", msg) }
-	if recordAccount != "" && recordAccount != accountID {
-		warn(fmt.Sprintf("not checking %s: the sweep's members launch in account %s, and these credentials are for %s",
-			sweepCrossAccountRoleName, recordAccount, accountID))
-		return nil
-	}
-	if cfg.Region == "" {
-		cfg.Region = "us-east-1" // IAM is global; the SDK still wants a region to sign for
-	}
-	return requireSweepCrossAccountRole(ctx, sweepRoleIAM(cfg), accountID, warn)
 }

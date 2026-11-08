@@ -162,6 +162,19 @@ func batchQueue(t *testing.T) *Policy {
 	return mustPolicy(t)(ParsePolicyJSON("cmd BatchQueuePolicy", doc))
 }
 
+// sweepCrossAccountPolicy is SpawnSweepCrossAccountRole's policy, as spawn
+// provisions it in the compute account (#1537).
+func sweepCrossAccountPolicy(t *testing.T) *Policy {
+	t.Helper()
+	doc, err := spawnaws.SweepCrossAccountPolicyDocument(exAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustPolicy(t)(ParsePolicyJSON(sweepCrossAccountPolicySource, doc))
+}
+
+const sweepCrossAccountPolicySource = "pkg/aws SweepCrossAccountPolicyDocument (SpawnSweepCrossAccountRole)"
+
 func scanSelfPolicy(t *testing.T) *Policy {
 	t.Helper()
 	doc, err := reaperiam.ScanSelfPolicyDocument()
@@ -287,7 +300,7 @@ var principals = []principal{
 			// ssm: the egress proxy's readiness probe (#1515), on the
 			// assumed role in the member account, like its EC2 calls.
 			{name: "member account", services: []string{"ec2", "iam", "ssm"}, variants: []variant{
-				{"SpawnSweepCrossAccountRole", shellPolicy("scripts/setup-sweep-cross-account-role.sh")},
+				{"SpawnSweepCrossAccountRole", sweepCrossAccountPolicy},
 			}},
 			{name: "function role", variants: []variant{
 				{"SpawnSweepOrchestratorRole", shellPolicy("scripts/setup-sweep-orchestrator-lambda-role.sh")},
