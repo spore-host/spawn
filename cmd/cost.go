@@ -30,7 +30,10 @@ For a parameter sweep or job array, shows the full breakdown:
 For a single instance launched with 'spawn launch' (which has no sweep cost
 record), shows an on-the-fly estimate of its cost so far: the on-demand rate
 (spawn:price-per-hour tag) × its compute time across every stop and start
-(spored's spawn:compute-seconds; compute bills only while running), plus EBS
+(spored's spawn:compute-seconds; compute bills only while running) — for a
+Spot instance, the Spot price spored samples, integrated over that compute
+time (spawn:spot-accrual), or the on-demand rate, labelled, when spored could
+not read it — plus EBS
 over the time since first launch when spored has measured it (the
 spawn:cost-footprint tag, or spawn:ebs-hourly-cost from an older spored;
 EBS bills while stopped too), plus $0.005/hr for each public IPv4 address spored has
@@ -336,7 +339,12 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "Rate:            $%.4f/hr (spawn:price-per-hour)\n", rate)
+	fp := enforcedFootprint(inst)
+	if fp.Accrual != nil {
+		fmt.Fprintf(&b, "Rate:            $%.4f/hr on-demand (spawn:price-per-hour); --cost-limit counts %s\n", rate, costLimitBasisLabel(inst))
+	} else {
+		fmt.Fprintf(&b, "Rate:            $%.4f/hr (spawn:price-per-hour)\n", rate)
+	}
 	if inst.Tags[aws.PriceSourceTag] == "static" {
 		// The launch priced this instance from truffle's static table. The
 		// instance records only THAT (spawn:price-source), not when the table
@@ -347,10 +355,16 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 		fmt.Fprintf(&b, "                 ⚠️  %s (the instance records only that its rate was static)\n", label)
 	}
 	est := estimateInstanceCost(inst, rt.Compute)
+	if fp.Accrual != nil {
+		// A Spot instance's compute, as spored charges it (#1497).
+		est = fp.Accrual.At(rt.Compute)
+	}
 	unknownWindow := rt.Window.Ended && !rt.Window.Known
 	switch {
 	case !rt.ComputeFromTag && unknownWindow:
 		fmt.Fprintln(&b, "Est. compute:    unknown, not counted (no spawn:compute-seconds tag, and the termination time is unknown)")
+	case rt.ComputeFromTag && fp.Accrual != nil:
+		fmt.Fprintf(&b, "Est. compute:    ~$%.2f (spored's integral of the rate over compute time)\n", est)
 	case rt.ComputeFromTag:
 		fmt.Fprintf(&b, "Est. compute:    ~$%.2f (rate × compute time)\n", est)
 	default:
@@ -359,7 +373,6 @@ func singleInstanceCostReport(inst *aws.InstanceInfo, now time.Time) string {
 	// The rest, and the total, through the function --cost-limit is enforced
 	// with (costLimitSpend, pkg/costmodel), so this cannot disagree with it (#51).
 	spend := costLimitSpend(inst, rt.Compute, rt.Since)
-	fp := enforcedFootprint(inst)
 	switch {
 	case fp.EBSPerHour > 0 && unknownWindow:
 		fmt.Fprintf(&b, "Est. storage:    unknown, not counted (%s)\n", accrualUnknownReason)

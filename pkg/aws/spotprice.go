@@ -14,9 +14,9 @@ import (
 )
 
 // SpotPriceTag records the spot market price spawn observed for an instance's
-// availability zone, type and product at launch (#896). It is display-only:
-// --cost-limit stays enforced against the on-demand spawn:price-per-hour, which
-// can only overstate a spot instance's spend.
+// availability zone, type and product at launch (#896). spored charges
+// --cost-limit's compute at it until its own first read of the Spot price, and
+// from then on at the prices it samples (spawn:spot-accrual, #1497).
 const SpotPriceTag = "spawn:spot-price-per-hour"
 
 // PriceSourceTag records where spawn:price-per-hour came from: "live" or
@@ -32,8 +32,9 @@ type SpotPrice struct {
 	Timestamp          time.Time
 }
 
-// spotPriceAPI is the slice of EC2 a spot price lookup needs.
-type spotPriceAPI interface {
+// SpotPriceAPI is the slice of EC2 a spot price lookup needs. An *ec2.Client
+// satisfies it.
+type SpotPriceAPI interface {
 	DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 	DescribeSpotPriceHistory(ctx context.Context, in *ec2.DescribeSpotPriceHistoryInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSpotPriceHistoryOutput, error)
 }
@@ -169,6 +170,19 @@ func (c *Client) CurrentSpotPrice(ctx context.Context, region, instanceID string
 	return spotPriceForInstance(ctx, c.regionalEC2(region), types.Instance{InstanceId: aws.String(instanceID)}, nil)
 }
 
+// spotPriceAPI is SpotPriceAPI under the name the package used before it was
+// exported (#1497).
+type spotPriceAPI = SpotPriceAPI
+
+// SpotPriceForInstance returns the Spot price now in effect for the instance
+// with this ID: its zone, type and billing platform from DescribeInstances,
+// then DescribeSpotPriceHistory. spored calls it from the instance, with the
+// instance role, to charge --cost-limit at the Spot price (#1497). Needs
+// ec2:DescribeInstances and ec2:DescribeSpotPriceHistory.
+func SpotPriceForInstance(ctx context.Context, api SpotPriceAPI, instanceID string) (SpotPrice, error) {
+	return spotPriceForInstance(ctx, api, types.Instance{InstanceId: aws.String(instanceID)}, nil)
+}
+
 // spotPriceTagAPI adds the tag write recordLaunchSpotPrice needs.
 type spotPriceTagAPI interface {
 	spotPriceAPI
@@ -177,7 +191,7 @@ type spotPriceTagAPI interface {
 
 // recordLaunchSpotPrice looks up a just-launched spot instance's price and
 // records it in SpotPriceTag, so spored can cost the instance at what it
-// actually pays rather than the on-demand rate (#896). inst should already
+// actually pays rather than the on-demand rate (#896, #1497). inst should already
 // carry its zone and platform (see launchedForSpotPrice); if it does not, the
 // re-describe retries EC2's post-launch NotFound (#1442). Best-effort: a
 // failure is logged and the launch proceeds — status then labels its figures

@@ -702,8 +702,11 @@ func RetryPlacementGroupDelete(ctx context.Context, name string, del func() erro
 func SetPGDeleteWaitForTest(budget, interval time.Duration) func()
 func SporedBaselinePolicyDocument() string
 func SporedInstanceRolePolicyDocument() string
+func SpotPriceForInstance(ctx context.Context, api SpotPriceAPI, instanceID string) (SpotPrice, error)
 func UserDataSize(encoded string) (decoded, encodedLen int)
 func ValidatePolicyNames(policies []string, allowFullAccess bool) error
+method SpotPriceAPI.DescribeInstances (ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+method SpotPriceAPI.DescribeSpotPriceHistory (ctx context.Context, in *ec2.DescribeSpotPriceHistoryInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSpotPriceHistoryOutput, error)
 type AMIHealthCheck struct
 type AMIInfo struct
 type AMIWaitOptions struct
@@ -757,6 +760,7 @@ type SnapshotSourceKind int
 type SporedLiveness struct
 type SporedObservability struct
 type SpotPrice struct
+type SpotPriceAPI interface
 type SubnetChoice struct
 type SubnetHint struct
 type TagLimitError struct
@@ -1058,6 +1062,7 @@ type WorkspaceProvider interface
 const ConsoleLogEndMarker
 const ConsoleLogStartPrefix
 const ContainerMemoryFloorGiB
+const CostBasisEnv
 const DefaultEFSMountPoint
 const DefaultFSxMountPoint
 const DefaultFlushOutputsSeconds
@@ -1107,6 +1112,7 @@ field Candidate.InstanceType string
 field Candidate.MemoryGiB float64
 field Candidate.OnDemandPrice float64
 field Candidate.VCPUs int
+field CompletionRecord.CostBasis *CostBasis
 field CompletionRecord.CostEstimate float64
 field CompletionRecord.EndedAt string
 field CompletionRecord.ExitCode int
@@ -1121,6 +1127,13 @@ field CompletionRecord.StartedAt string
 field CompletionRecord.State TaskState
 field CompletionRecord.TaskID string
 field CompletionRecord.TerminalReason ExitReason
+field CostBasis.Accrued float64
+field CostBasis.ComputeBasis string
+field CostBasis.ComputePerHour float64
+field CostBasis.Fallback string
+field CostBasis.Limit float64
+field CostBasis.RateCollectedAt string
+field CostBasis.RateSource string
 field LaunchResult.AZ string
 field LaunchResult.InstanceID string
 field LaunchResult.InstanceType string
@@ -1224,6 +1237,7 @@ func StartedAtPath() string
 method InstanceFinder.FindCandidates (ctx context.Context, req ResourceRequest) ([]Candidate, error)
 type Candidate struct
 type CompletionRecord struct
+type CostBasis struct
 type ExitReason string
 type InstanceFinder interface
 type LaunchResult struct

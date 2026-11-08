@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
@@ -8,7 +9,9 @@ import (
 )
 
 // enforcedFootprint is what spored enforces --cost-limit with, read from the
-// tags it keeps current: the on-demand rate (spawn:price-per-hour), every
+// tags it keeps current: the on-demand rate (spawn:price-per-hour), or for a
+// Spot instance the Spot compute accrual spored records (spawn:spot-accrual,
+// #1497), every
 // attached EBS volume and every public IPv4 address (#51), in spawn:cost-footprint
 // or, from a spored before #1428, the three tags it replaced
 // (costmodel.MeasuredFromTags).
@@ -24,8 +27,41 @@ func enforcedFootprint(instance *aws.InstanceInfo) costmodel.Footprint {
 // component is the enforced one.
 func footprintAt(instance *aws.InstanceInfo, perHour float64) costmodel.Footprint {
 	f := enforcedFootprint(instance)
-	f.ComputePerHour = perHour
+	f.ComputePerHour, f.Accrual = perHour, nil
 	return f
+}
+
+// costLimitBasisLabel says which compute rate --cost-limit counts for
+// instance, as spored records it (#1497). A fallback is labelled with why and
+// when its rate was collected (truffle#184).
+func costLimitBasisLabel(instance *aws.InstanceInfo) string {
+	f := enforcedFootprint(instance)
+	if f.Accrual == nil {
+		if instance != nil && instance.SpotInstance {
+			return "compute at the on-demand rate: this instance's spored records no Spot price " +
+				"(it predates spawn#1497, or has not read one yet)"
+		}
+		return "compute at the on-demand rate"
+	}
+	when := "time unknown"
+	if !f.Accrual.SampledAt.IsZero() {
+		when = f.Accrual.SampledAt.UTC().Format(time.RFC3339)
+	}
+	if f.Accrual.Basis == costmodel.BasisSpot {
+		return fmt.Sprintf("compute at the Spot price spored samples, last $%.4f/hr as of %s", f.Accrual.PerHour, when)
+	}
+	src := "its price source was not recorded"
+	switch instance.Tags[aws.PriceSourceTag] {
+	case "live":
+		src = "read live from the AWS Price List at launch"
+	case "static":
+		// The instance records only that its rate was static, not when that
+		// table was collected or why the live Price List was not used
+		// (spawn#1512), so the label says both are unknown.
+		src = aws.DisplayPrice{Source: "static"}.SourceLabel() + " (the instance records only that its rate was static)"
+	}
+	return fmt.Sprintf("compute at the on-demand rate $%.4f/hr, a FALLBACK: spored could not read the Spot price "+
+		"(since %s); that rate is spawn:price-per-hour, %s", f.Accrual.PerHour, when, src)
 }
 
 // costLimitSpend is the CLI's view of the spend --cost-limit has counted:

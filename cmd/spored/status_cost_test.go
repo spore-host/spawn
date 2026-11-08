@@ -96,14 +96,20 @@ func TestStatusReport_SpotInstanceIsCostedAtItsSpotPrice(t *testing.T) {
 	if r.Cost.EffectiveRate == nil || r.Cost.SavingsPercent < 55 {
 		t.Errorf("effective rate/saving = %v/%.0f%%, want the spot discount to show", r.Cost.EffectiveRate, r.Cost.SavingsPercent)
 	}
-	// --cost-limit is enforced at the on-demand rate; status must not report it
-	// as further from the limit than enforcement measures.
-	if r.Cost.CostLimitUsed < 1.8 {
-		t.Errorf("cost-limit used = $%.2f, want the on-demand measure (~$1.9) that enforcement uses", r.Cost.CostLimitUsed)
+	// --cost-limit charges a Spot instance's compute at its Spot price
+	// (#1497): before, it was charged at on-demand (~$1.95 here) and the
+	// instance was terminated at about a third of its budget. Status reports
+	// what enforcement measures, and says at which rate.
+	if r.Cost.CostLimitUsed < 0.70 || r.Cost.CostLimitUsed > 0.80 {
+		t.Errorf("cost-limit used = $%.2f, want the Spot measure (~$0.73) that enforcement uses", r.Cost.CostLimitUsed)
+	}
+	if r.Cost.CostLimitBasis != "spot" || r.Cost.CostLimitRate != issueSpot || r.Cost.CostLimitFallback != "" {
+		t.Errorf("cost-limit basis = %q at $%.4f (fallback %q), want spot at $%.4f",
+			r.Cost.CostLimitBasis, r.Cost.CostLimitRate, r.Cost.CostLimitFallback, issueSpot)
 	}
 
 	out := renderTable(t, r)
-	for _, want := range []string{"$0.3600/hr spot", "On-demand rate:   $0.9738/hr", "Spot rate:"} {
+	for _, want := range []string{"$0.3600/hr spot", "On-demand rate:   $0.9738/hr", "Spot rate:", "counting compute at the Spot price, now $0.3600/hr"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing %q:\n%s", want, out)
 		}

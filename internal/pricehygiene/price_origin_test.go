@@ -80,6 +80,9 @@ var notRenderSites = map[string]string{
 		"so the report says static with the date and reason unknown (TestSingleInstanceCostReportSaysAStaticRateIsStatic); " +
 		"recording both at launch is tracked there",
 	"lambda/pipeline-orchestrator.priceFn": "production seam returning a DisplayPrice; ensureStagePrice renders it",
+	"cmd.costLimitBasisLabel": "KNOWN GAP spawn#1512, as singleInstanceCostReport: labels the on-demand fallback a Spot " +
+		"instance's --cost-limit falls back to (#1497) from spawn:price-source alone, so a static rate says static with " +
+		"the date and reason unknown (TestCostLimitBasisLabelSaysAStaticFallbackIsStatic)",
 }
 
 // TestEveryPriceDisplaySiteIsGated discovers every non-test function in the

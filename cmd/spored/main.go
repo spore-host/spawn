@@ -687,7 +687,8 @@ type statusOnComplete struct {
 
 type statusCost struct {
 	// PricePerHour is the ON-DEMAND rate (spawn:price-per-hour): the comparison
-	// baseline, and what --cost-limit is enforced against.
+	// baseline, and what --cost-limit charges an on-demand instance's compute
+	// at (a Spot instance's is charged at its Spot price, CostLimitBasis, #1497).
 	PricePerHour float64 `json:"price_per_hour"`
 	// RatePerHour is the rate the cost figures are charged at — the spot price
 	// for a spot instance when spawn recorded one, else the on-demand rate — and
@@ -722,6 +723,15 @@ type statusCost struct {
 	CostLimitUsed      float64 `json:"cost_limit_used,omitempty"` // compute + EBS + public IPv4, from the enforcement function (spawn#540: "cost-limit consumed"; #959)
 	CostLimitUsedPct   float64 `json:"cost_limit_used_pct,omitempty"`
 	CostLimitRemaining float64 `json:"cost_limit_remaining,omitempty"`
+	// CostLimitBasis is the rate the cap charges compute at (#1497): "spot"
+	// for a Spot instance whose Spot price spored reads, "on-demand"
+	// otherwise. CostLimitFallback is why a Spot instance is on the on-demand
+	// rate, and CostLimitRateLabel the full description, collection date and
+	// source included.
+	CostLimitBasis     string  `json:"cost_limit_basis,omitempty"`
+	CostLimitRate      float64 `json:"cost_limit_compute_per_hour,omitempty"`
+	CostLimitFallback  string  `json:"cost_limit_fallback,omitempty"`
+	CostLimitRateLabel string  `json:"cost_limit_rate_label,omitempty"`
 }
 
 // Rate bases for statusCost.RateBasis.
@@ -1055,6 +1065,9 @@ func buildStatusReport(ag *agent.Agent, config *provider.Config, identity *provi
 			cost.CostLimitUsed = used
 			cost.CostLimitUsedPct = (used / config.CostLimit) * 100
 			cost.CostLimitRemaining = config.CostLimit - used
+			b := ag.CostLimitBasis()
+			cost.CostLimitBasis, cost.CostLimitRate = b.Basis, b.PerHour
+			cost.CostLimitFallback, cost.CostLimitRateLabel = b.Fallback, b.Label
 		}
 
 		report.Cost = cost
@@ -1293,6 +1306,9 @@ func renderStatusTable(report *statusReport) error {
 		if cost.CostLimit > 0 {
 			fmt.Printf("  Cost limit:       $%.2f  ($%.2f used, compute + EBS + public IPv4, %.0f%% — $%.2f remaining)\n",
 				cost.CostLimit, cost.CostLimitUsed, cost.CostLimitUsedPct, cost.CostLimitRemaining)
+			if cost.CostLimitRateLabel != "" {
+				fmt.Printf("                    counting %s\n", cost.CostLimitRateLabel)
+			}
 		}
 
 		if cost.EBSCostKnown {

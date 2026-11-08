@@ -21,6 +21,15 @@
 // and its launch Elastic IP is released by spored, `spawn terminate` or the TTL
 // reaper.
 //
+// # Spot instances
+//
+// A Spot instance's compute is charged at its Spot price, not the on-demand
+// rate (#1497): spored samples DescribeSpotPriceHistory and integrates it over
+// compute time (ComputeAccrual, recorded in spawn:spot-accrual), and falls
+// back to the on-demand rate, labelled, when it cannot read the price. Before
+// #1497 the on-demand rate was used, about 3x the Spot price, and a Spot
+// instance was terminated at about a third of the budget its user set.
+//
 // # What is not counted, deliberately
 //
 //   - ENIs and EFA interfaces: free.
@@ -80,6 +89,13 @@ const (
 
 	TagPricePerHour   = "price-per-hour"
 	TagComputeSeconds = "compute-seconds"
+
+	// TagComputeAccrual is a Spot instance's compute cost as spored integrates
+	// it from the Spot price it samples (#1497), in the form
+	// EncodeComputeAccrual writes. Only spored writes it, and only on a Spot
+	// instance; its presence is what tells every reader that --cost-limit
+	// counts compute at the Spot price rather than spawn:price-per-hour.
+	TagComputeAccrual = "spot-accrual"
 )
 
 // FootprintTags are the suffixes of the footprint tags spored writes on every
@@ -180,9 +196,13 @@ func (m Measured) Max(o Measured) Measured {
 // Footprint is what an instance pays for by the hour, split by how each part
 // is timed.
 type Footprint struct {
-	// ComputePerHour is the instance rate. Enforcement uses the on-demand rate
-	// (spawn:price-per-hour), which can only overstate a spot instance.
+	// ComputePerHour is the instance rate: the on-demand rate
+	// (spawn:price-per-hour), or for a Spot instance whose spored integrates its
+	// Spot price, the rate it is charging now (Accrual.PerHour).
 	ComputePerHour float64
+	// Accrual, when set, is how compute is charged instead of ComputePerHour x
+	// compute time: the integral of the Spot price spored has sampled (#1497).
+	Accrual *ComputeAccrual
 	// EBSPerHour is every attached volume (spawn:ebs-hourly-cost).
 	EBSPerHour float64
 	// PublicIPv4 is the number of auto-assigned public IPv4 addresses; they are
@@ -205,8 +225,12 @@ type Spend struct {
 // included). Negative durations count as zero.
 func Accrue(f Footprint, compute, wall time.Duration) Spend {
 	ch, wh := hours(compute), hours(wall)
+	computeCost := f.ComputePerHour * ch
+	if f.Accrual != nil {
+		computeCost = f.Accrual.At(compute)
+	}
 	s := Spend{
-		Compute:    f.ComputePerHour * ch,
+		Compute:    computeCost,
 		EBS:        f.EBSPerHour * wh,
 		PublicIPv4: PublicIPv4PerHour * (float64(f.PublicIPv4)*ch + float64(f.ElasticIPv4)*wh),
 	}
@@ -232,15 +256,24 @@ func (f Footprint) IPv4PerHour() float64 {
 }
 
 // FromTags reads a Footprint from an instance's tags, keyed by full tag name
-// with the given prefix ("spawn"). The compute rate is spawn:price-per-hour.
+// with the given prefix ("spawn"). The compute rate is spawn:price-per-hour,
+// unless spored has recorded a Spot compute accrual (spawn:spot-accrual,
+// #1497): then compute is charged as that accrual, exactly as spored
+// enforces it. spawn:spot-price-per-hour alone does not switch the rate: a
+// spored that predates #1497 records no accrual and enforces at on-demand.
 func FromTags(tags map[string]string, prefix string) Footprint {
 	m := MeasuredFromTags(tags, prefix)
-	return Footprint{
+	f := Footprint{
 		ComputePerHour: parseFloat(tags[prefix+":"+TagPricePerHour]),
 		EBSPerHour:     m.EBSPerHour,
 		PublicIPv4:     m.PublicIPv4,
 		ElasticIPv4:    m.ElasticIPv4,
 	}
+	if acc, ok := ParseComputeAccrual(tags[prefix+":"+TagComputeAccrual]); ok {
+		f.ComputePerHour = acc.PerHour
+		f.Accrual = &acc
+	}
+	return f
 }
 
 // IPv4Measured reports whether spored has recorded the instance's public IPv4

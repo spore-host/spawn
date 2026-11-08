@@ -230,6 +230,12 @@ type Agent struct {
 	// (nil means time.Now; tests only).
 	externalIdle      atomic.Pointer[ExternalIdle]
 	externalIdleClock func() time.Time
+
+	// spot is the Spot compute accounting --cost-limit charges a Spot
+	// instance through (#1497, spotaccrual.go), and spotSampleInterval its
+	// read period (zero means spotPriceSampleInterval; tests only).
+	spot               spotAccrual
+	spotSampleInterval time.Duration
 }
 
 // cfg returns the current config under a read lock. Callers get a stable pointer
@@ -353,6 +359,11 @@ func newAgent(ctx context.Context, prov provider.Provider, activate bool) (*Agen
 	// The daemon IS the clock; a query agent is not until it adopts the
 	// daemon's (AdoptPublishedComputeClock, #896).
 	agent.liveClock = activate
+
+	// Spot compute accounting (#1497): from spawn:spot-accrual or the launch's
+	// spawn:spot-price-per-hour. A query agent (`spored status`) reports the
+	// daemon's last recorded sum from the same tag.
+	agent.seedSpotAccrual(config, agent.startTime)
 
 	// Carry compute over from earlier boots (#928). The tag alone lost whatever
 	// the last pre-stop write missed, and counting from spored's own start
@@ -618,6 +629,10 @@ func (a *Agent) Monitor(ctx context.Context) {
 	// spot decision off the critical path.
 	go a.monitorSpotInterruptions(ctx)
 
+	// The Spot price --cost-limit charges compute at (#1497), read off this
+	// loop for the same reason; checkAndAct applies each read.
+	go a.monitorSpotPrice(ctx)
+
 	// A hybrid member's peers file is refreshed off this loop too, for the same
 	// reason: discovery makes EC2 and DynamoDB calls (#933).
 	peerInterval := a.peerRefreshInterval
@@ -792,6 +807,9 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	}
 
 	// 3. Check cost limit (fires independently of or alongside TTL — first-to-fire wins)
+	// A Spot instance's compute is charged at its Spot price: fold in the
+	// sampler's latest read first (#1497).
+	a.applySpotSample(ctx)
 	if a.config.CostLimit > 0 && a.config.PricePerHour > 0 {
 		// Use TOTAL compute time across the instance's life, not just this boot's
 		// uptime: computeSecondsBase carries the compute accumulated before this
@@ -803,7 +821,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 		remaining := a.config.CostLimit - accumulated
 
 		if remaining <= 0 {
-			log.Printf("Cost limit reached (limit: $%.4f, accumulated: $%.4f)", a.config.CostLimit, accumulated)
+			log.Printf("Cost limit reached (limit: $%.4f, accumulated: $%.4f; %s)", a.config.CostLimit, accumulated, a.CostLimitBasis().Label)
 			a.terminate(ctx, fmt.Sprintf("cost limit reached ($%.2f)", a.config.CostLimit), taskproto.ExitCostLimitExceeded)
 			return
 		}
@@ -975,7 +993,9 @@ func (a *Agent) writeComputeSecondsTag(ctx context.Context) {
 //
 // Compute is the on-demand rate x TOTAL compute time (base + this boot's
 // uptime); using the total, not just this boot, stops the cost clock resetting
-// on a stop/start. EBS and Elastic IPs bill on the WALL CLOCK since the
+// on a stop/start. A Spot instance's compute is instead its Spot price
+// integrated over that compute time (spotaccrual.go, #1497), or the on-demand
+// rate, labelled, when spored cannot read the Spot price. EBS and Elastic IPs bill on the WALL CLOCK since the
 // original launch (a stopped instance still pays for them); auto-assigned
 // public IPv4 is released on stop, so it bills with compute.
 //
@@ -995,12 +1015,16 @@ func (a *Agent) accumulatedComputeCost() float64 {
 
 // costFootprint is the enforced Footprint from the agent's config.
 func (a *Agent) costFootprint() costmodel.Footprint {
-	return costmodel.Footprint{
+	f := costmodel.Footprint{
 		ComputePerHour: a.config.PricePerHour,
 		EBSPerHour:     a.config.EBSHourlyCost,
 		PublicIPv4:     a.config.PublicIPv4Count,
 		ElasticIPv4:    a.config.ElasticIPv4Count,
 	}
+	if acc, ok := a.spotComputeAccrual(); ok {
+		f.ComputePerHour, f.Accrual = acc.PerHour, &acc
+	}
+	return f
 }
 
 // wallSinceLaunch is the wall clock since the original launch, which EBS and

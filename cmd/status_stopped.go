@@ -75,14 +75,16 @@ type ec2StatusReport struct {
 	StorageThisStop float64 `json:"storage_cost_this_stop,omitempty"`
 	// Public IPv4 (#51): auto-assigned addresses bill with compute (released on
 	// stop), Elastic IPs on the wall clock. Known once spored has recorded them.
-	PublicIPv4Count   int     `json:"public_ipv4_count,omitempty"`
-	ElasticIPv4Count  int     `json:"elastic_ipv4_count,omitempty"`
-	IPv4Known         bool    `json:"ipv4_known"`
-	IPv4Cost          float64 `json:"ipv4_cost"`
-	IPv4ThisStop      float64 `json:"ipv4_cost_this_stop,omitempty"`
-	StoppedPerHour    float64 `json:"stopped_rate_per_hour,omitempty"`
-	CostLimit         float64 `json:"cost_limit,omitempty"`
-	CostLimitUsed     float64 `json:"cost_limit_used,omitempty"`
+	PublicIPv4Count  int     `json:"public_ipv4_count,omitempty"`
+	ElasticIPv4Count int     `json:"elastic_ipv4_count,omitempty"`
+	IPv4Known        bool    `json:"ipv4_known"`
+	IPv4Cost         float64 `json:"ipv4_cost"`
+	IPv4ThisStop     float64 `json:"ipv4_cost_this_stop,omitempty"`
+	StoppedPerHour   float64 `json:"stopped_rate_per_hour,omitempty"`
+	CostLimit        float64 `json:"cost_limit,omitempty"`
+	CostLimitUsed    float64 `json:"cost_limit_used,omitempty"`
+	// CostLimitBasis is the rate the cap charges compute at (#1497).
+	CostLimitBasis    string  `json:"cost_limit_basis,omitempty"`
 	CumulativeCost    float64 `json:"cumulative_cost"`
 	CumulativeKnown   bool    `json:"cumulative_known"`
 	EffectiveRate     float64 `json:"effective_rate_per_hour,omitempty"`
@@ -159,8 +161,8 @@ func buildEC2StatusReport(instance *aws.InstanceInfo, rate statusRate, now time.
 
 	// Every figure through pkg/costmodel.Accrue, the function --cost-limit is
 	// enforced with (#51); only the compute rate differs (a spot instance is
-	// shown at its spot price, and enforced at on-demand, which can only
-	// overstate it).
+	// shown at its spot price; the cap's own figure below is the accrual
+	// spored enforces, #1497).
 	compute := time.Duration(r.ComputeSeconds * float64(time.Second))
 	elapsed := time.Duration(r.ElapsedSeconds * float64(time.Second))
 	fp := footprintAt(instance, rate.PerHour)
@@ -185,10 +187,11 @@ func buildEC2StatusReport(instance *aws.InstanceInfo, rate statusRate, now time.
 	r.CumulativeKnown = rate.PerHour > 0 && r.ComputeKnown && r.EBSKnown && !r.TerminationTimeUnknown
 	r.CumulativeCost = r.ComputeCost + r.StorageCost + r.IPv4Cost
 
-	// The cap's own figure, at the enforced (on-demand) rate (#51).
+	// The cap's own figure, at the rate spored enforces it with (#51, #1497).
 	if limit := parseTagFloat(instance.Tags["spawn:cost-limit"]); limit > 0 && r.ComputeKnown {
 		r.CostLimit = limit
 		r.CostLimitUsed = costLimitSpend(instance, compute, elapsed).Total
+		r.CostLimitBasis = costLimitBasisLabel(instance)
 	}
 
 	if r.CumulativeKnown && r.ElapsedSeconds >= minEC2EffectiveRateWindow.Seconds() {
@@ -297,8 +300,8 @@ func renderEC2Status(r ec2StatusReport, loc *time.Location) string {
 		fmt.Fprintf(&b, "  Total:          at least $%.2f  (storage and Elastic IPs not counted: termination time unknown)\n", r.CumulativeCost)
 	}
 	if r.CostLimit > 0 {
-		fmt.Fprintf(&b, "  Cost limit:     $%.2f  ($%.2f counted at the on-demand rate, compute + EBS + public IPv4)\n",
-			r.CostLimit, r.CostLimitUsed)
+		fmt.Fprintf(&b, "  Cost limit:     $%.2f  ($%.2f counted, compute + EBS + public IPv4; %s)\n",
+			r.CostLimit, r.CostLimitUsed, r.CostLimitBasis)
 	}
 	if r.EffectiveRate > 0 {
 		note := ""

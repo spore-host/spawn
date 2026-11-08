@@ -285,6 +285,14 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	// reading it grants nothing new.
 	p("INSTANCE_JSON=\"$(cat %s 2>/dev/null)\"\n\n", shQuote(instanceFactsPath()))
 
+	// cost_basis (spawn#1497): when a --cost-limit ended the task, spored passes
+	// the rate it charged compute at, and why, as one JSON object in
+	// CostBasisEnv. spored builds it with encoding/json; nothing else runs this
+	// hook with it set (`spawn terminate` and the reaper run it over SSM
+	// without), so an unset value means no field rather than a guess.
+	p("COST_JSON=''\n")
+	p("if [ -n \"${%s:-}\" ]; then COST_JSON=\"\\\"cost_basis\\\": ${%s},\"; fi\n\n", CostBasisEnv, CostBasisEnv)
+
 	// The log is the artifact that actually answers "how far did it get" — upload
 	// it FIRST, before the record, so a hook that runs out of time still salvages
 	// the more useful half.
@@ -313,8 +321,8 @@ func GenerateFlushScript(spec *TaskSpec, opts WrapperOptions) (string, error) {
 	//
 	// Built in memory and written by writeRecordFile, exactly as the wrapper's
 	// record is, so a full /tmp cannot turn it into an empty object (#1179).
-	p("printf -v REC %s %s %s \"$STARTED_AT\" \"$ENDED_AT\" \"$INSTANCE_JSON\" \"$OUT_JSON\" \"$LOGS_JSON\" \"$RETRY_CLASS\" \"$REASON\"\n",
-		shQuote(`{\n  "task_id": %s,\n  "run_id": %s,\n  "exit_code": -1,\n  "state": "`+string(StateFailed)+`",\n  "started_at": "%s",\n  "ended_at": "%s",\n  %s\n  %s\n  "logs": %s,\n  "retry_class": "%s",\n  "terminal_reason": "%s"\n}`),
+	p("printf -v REC %s %s %s \"$STARTED_AT\" \"$ENDED_AT\" \"$INSTANCE_JSON\" \"$OUT_JSON\" \"$COST_JSON\" \"$LOGS_JSON\" \"$RETRY_CLASS\" \"$REASON\"\n",
+		shQuote(`{\n  "task_id": %s,\n  "run_id": %s,\n  "exit_code": -1,\n  "state": "`+string(StateFailed)+`",\n  "started_at": "%s",\n  "ended_at": "%s",\n  %s\n  %s\n  %s\n  "logs": %s,\n  "retry_class": "%s",\n  "terminal_reason": "%s"\n}`),
 		shQuote(jsonStr(taskID)), shQuote(jsonStr(runID)))
 	writeRecordFile(p, "spawn_up "+flushCp, "UPLOAD_FAILED=1", "$REC", localPath(terminalFileName), "\"$RESULTS_PREFIX/completion.json\"")
 	writeRecordFile(p, "spawn_up "+flushCp, "UPLOAD_FAILED=1", "-1", localPath(exitCodeFileName), "\"$RESULTS_PREFIX/.exitcode\"")

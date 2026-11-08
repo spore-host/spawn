@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/costmodel"
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/instancestate"
@@ -479,6 +480,20 @@ func (p *EC2Provider) CheckSpotInterruption(ctx context.Context) (*InterruptionI
 	}, nil
 }
 
+// CurrentSpotPrice reads the Spot price now in effect for this instance's
+// type, zone and platform (#1497), with the instance role: ec2:DescribeInstances
+// and ec2:DescribeSpotPriceHistory, both in the spored baseline policy. Bounded,
+// so a slow EC2 endpoint cannot stall the sampler.
+func (p *EC2Provider) CurrentSpotPrice(ctx context.Context) (float64, time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	sp, err := spawnaws.SpotPriceForInstance(ctx, p.ec2Client, p.identity.InstanceID)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	return sp.PricePerHour, sp.Timestamp, nil
+}
+
 func (p *EC2Provider) GetProviderType() string {
 	return "ec2"
 }
@@ -746,6 +761,12 @@ func configFromTags(tags []types.TagDescription) (*Config, string) {
 			if price, err := strconv.ParseFloat(*tag.Value, 64); err == nil && price > 0 {
 				config.SpotPricePerHour = price
 			}
+		case tagprefix.Tag(costmodel.TagComputeAccrual):
+			if acc, ok := costmodel.ParseComputeAccrual(*tag.Value); ok {
+				config.SpotAccrual = &acc
+			}
+		case tagprefix.Tag("price-source"):
+			config.PriceSource = *tag.Value
 		case tagprefix.Tag("dns-name"):
 			config.DNSName = *tag.Value
 		case tagprefix.Tag("dns-domain"):

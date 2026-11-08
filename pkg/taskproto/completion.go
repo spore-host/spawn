@@ -84,6 +84,40 @@ type CompletionRecord struct {
 	// (any record from before #1297) as "not reported", not as "none staged".
 	OutputsStaged    OutputsStaged     `json:"outputs_staged,omitempty"`
 	OutputsNotStaged []OutputNotStaged `json:"outputs_not_staged,omitempty"`
+
+	// CostBasis is how --cost-limit priced the instance when it ended the task
+	// (spawn#1497): set only on a record the terminal-flush hook wrote for
+	// terminal_reason cost_limit_exceeded, by a spored that passes it.
+	// Additive and omitempty like the fields above.
+	CostBasis *CostBasis `json:"cost_basis,omitempty"`
+}
+
+// CostBasisEnv is the environment variable spored passes the CostBasis JSON
+// object to the terminal-flush hook in (spawn#1497).
+const CostBasisEnv = "SPAWN_COST_BASIS_JSON"
+
+// CostBasis says what a --cost-limit termination counted, and at which compute
+// rate (spawn#1497). A Spot instance is charged at the Spot price spored
+// samples; when it cannot read that price it falls back to the on-demand rate,
+// and the record says so, why, and when that rate was collected.
+type CostBasis struct {
+	// Limit and Accrued are the cap and the spend that reached it, USD:
+	// compute + EBS + public IPv4.
+	Limit   float64 `json:"cost_limit"`
+	Accrued float64 `json:"accrued"`
+	// ComputeBasis is "spot" or "on-demand"; ComputePerHour the rate compute
+	// was being charged at when the limit fired.
+	ComputeBasis   string  `json:"compute_basis"`
+	ComputePerHour float64 `json:"compute_per_hour"`
+	// RateCollectedAt is when that rate was read (RFC3339): the Spot price's
+	// sample time, or for the on-demand rate, the launch that recorded it.
+	RateCollectedAt string `json:"rate_collected_at,omitempty"`
+	// RateSource is where the on-demand rate came from at launch: "live" (the
+	// AWS Price List API) or "static" (a static price table), when recorded.
+	RateSource string `json:"rate_source,omitempty"`
+	// Fallback is set when a Spot instance was charged the on-demand rate
+	// because spored could not read the Spot price, and says why.
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // OutputsStaged is the outcome of a lifecycle kill's output stage-out
