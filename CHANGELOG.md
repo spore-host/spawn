@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`spawn notify workspace list --json` shows `"(redacted)"` for every
+  credential field a workspace holds** (signing secret, bot token, refresh
+  token, incoming webhook URL), and an empty value for one it does not hold.
+  `workspace add --json` redacts the same way. In `pkg/bot`, `Workspace`'s
+  credential fields are inputs to `PutWorkspace` only; read them with
+  `Client.Credential` (#868).
+
+- **`pkg/security`: `EncryptSecret` and `DecryptSecret` take a small `KMSAPI`
+  interface (which `*kms.Client` satisfies) and an encryption-context map.**
+  They had no caller before this release. `MaskSecret`, `MaskURL`,
+  `SanitizeForLog` and `SanitizePath` are kept, now documented as having no
+  caller and why (#868).
+
+### Removed
+
+- **`pkg/security.ValidateMountPath` and `ValidateCommand`**, both uncalled
+  and both unsafe to start calling: `ValidateMountPath` rejected `spawn
+  launch`'s own default mount points (`/efs`, `/fsx`), and `ValidateCommand`
+  is a metacharacter denylist that would reject legitimate `--pre-stop` shell
+  hooks. Quote with `ShellQuote` and validate users with `ValidateUsername`
+  instead (#868).
+
 ### Fixed
 
 - `--cost-limit` on a Spot instance now counts compute at the Spot price, not
@@ -49,6 +73,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   success, and the instance launched without the policy.
 
 ### Security
+
+- **Chat-platform workspace credentials are stored encrypted at rest with
+  KMS**: the signing secret, bot token, refresh token and incoming webhook URL
+  of each `spore-bot-workspaces` item (#868). A new `pkg/botsecret`, built on
+  the existing `pkg/security` helpers, is the only code that reads or writes
+  those attributes; each value is bound to its item and field by encryption
+  context. `spawn notify workspace add`, the dashboard's Slack OAuth install
+  and every token refresh write through it. The KMS key
+  `alias/spore-bot-secrets` is the switch: until it exists, writers store the
+  old plaintext format (and log that once), so this release can be deployed
+  before or after the spore-bot that decrypts (spore-host/spore-host#611).
+  Once it exists every write is encrypted, and a missing or unusable key
+  fails the write with a message naming it; a key named with
+  `SPORE_BOT_SECRETS_KMS_KEY` that does not exist is always an error.
+  Plaintext values written earlier still read, logged once per field, and are
+  re-encrypted in place by spore-bot's hourly migration sweep, with no manual
+  step. `deployment/cloudformation/spore-bot.yaml` creates the key, grants the
+  bot function `kms:Encrypt` for every field and `kms:Decrypt` for the ones it
+  reads, and schedules the sweep;
+  `lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh` grants the
+  dashboard role the same, scoped to that key alias. `spawn notify workspace
+  add` now needs `kms:Encrypt`, and `notify register` needs `kms:Encrypt` and
+  `kms:Decrypt`. Upgrade the CLI before the key is created: an older CLI
+  cannot use an encrypted bot token. A source gate fails if any other Go code
+  names the attributes.
 
 - The spored instance role gains `ec2:DescribeSpotPriceHistory` (read-only
   public market data, `Resource: "*"`: the API has no resource-level scoping),

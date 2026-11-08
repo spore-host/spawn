@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/spf13/cobra"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/bot"
+	"github.com/spore-host/spawn/pkg/botsecret"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
@@ -50,8 +50,10 @@ var (
 // botClient builds a bot store Client from the given config, honoring the
 // per-command table overrides (--table/--registry-table and --workspaces-table).
 // Empty overrides fall back to the env-resolved defaults inside the store.
+// Workspace credentials are KMS-encrypted on write with the key
+// botsecret.KeyID() names (#868).
 func botClient(cfg aws.Config) *bot.Client {
-	return bot.NewClientWithTableNames(dynamodb.NewFromConfig(cfg), botTable, botWorkspacesTable)
+	return bot.NewClientFromConfig(cfg, botTable, botWorkspacesTable)
 }
 
 var botCmd = &cobra.Command{
@@ -401,7 +403,8 @@ Run this once after installing the Slack app in a workspace:
 			return err
 		}
 		if botJSONOutput || getOutputFormat() == "json" {
-			return json.NewEncoder(os.Stdout).Encode(ws)
+			out := redactWorkspace(ws, func(f botsecret.Field) bool { return *ws.Input(f) != "" })
+			return json.NewEncoder(os.Stdout).Encode(out)
 		}
 		fmt.Printf("Registered workspace: %s/%s", botPlatform, botWorkspaceID)
 		if botWorkspaceName != "" {
@@ -449,11 +452,7 @@ var botWorkspaceListCmd = &cobra.Command{
 			return err
 		}
 		if botJSONOutput || getOutputFormat() == "json" {
-			for i := range wss {
-				wss[i].BotToken = "(redacted)"
-				wss[i].SigningSecret = "(redacted)"
-			}
-			return json.NewEncoder(os.Stdout).Encode(wss)
+			return writeWorkspacesJSON(os.Stdout, wss)
 		}
 		if len(wss) == 0 {
 			fmt.Println("No workspaces registered.")
@@ -578,6 +577,33 @@ deleted automatically. Remove it separately with:
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// redacted replaces a credential in --json output.
+const redacted = "(redacted)"
+
+// redactWorkspace returns ws with every credential field (botsecret.Fields)
+// either "(redacted)", where present reports one is stored, or empty. JSON
+// output never carries a credential, plaintext or sealed (#868).
+func redactWorkspace(ws bot.Workspace, present func(botsecret.Field) bool) bot.Workspace {
+	for _, f := range botsecret.Fields() {
+		v := ""
+		if present(f) {
+			v = redacted
+		}
+		*ws.Input(f) = v
+	}
+	return ws
+}
+
+// writeWorkspacesJSON writes `notify workspace list --json`: workspaces as
+// read, every credential field redacted.
+func writeWorkspacesJSON(w io.Writer, wss []bot.Workspace) error {
+	out := make([]bot.Workspace, len(wss))
+	for i := range wss {
+		out[i] = redactWorkspace(wss[i], wss[i].HasCredential)
+	}
+	return json.NewEncoder(w).Encode(out)
+}
+
 // lookupSlackUserByEmail resolves a Slack user ID from an email address using
 // the workspace's bot token stored in spore-bot-workspaces DynamoDB.
 func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, workspaceID, email string) (string, error) {
@@ -586,23 +612,9 @@ func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, works
 	if err != nil || ws == nil {
 		return "", fmt.Errorf("workspace %s/%s not registered (run spawn notify workspace add first)", platform, workspaceID)
 	}
-	if ws.BotToken == "" {
-		return "", fmt.Errorf("no bot token stored for workspace %s — re-run spawn notify workspace add with --bot-token", workspaceID)
-	}
-
-	// Refresh token if rotation is enabled and token is expired
-	botToken := ws.BotToken
-	if ws.TokenRotation && ws.RefreshToken != "" && ws.TokenExpiresAt > 0 {
-		if time.Now().Add(5*time.Minute).Unix() >= ws.TokenExpiresAt {
-			newToken, newRefresh, expiresIn, err := exchangeRefreshTokenCLI(ctx, ws.RefreshToken)
-			if err != nil {
-				return "", fmt.Errorf("refresh Slack token: %w", err)
-			}
-			botToken = newToken
-			// Update stored tokens
-			newExpiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second).Unix()
-			_ = client.UpdateWorkspaceTokens(ctx, platform, workspaceID, newToken, newRefresh, newExpiresAt)
-		}
+	botToken, err := freshBotToken(ctx, client, ws, platform, workspaceID, time.Now(), exchangeRefreshTokenCLI)
+	if err != nil {
+		return "", err
 	}
 
 	// Call Slack users.lookupByEmail
@@ -635,6 +647,42 @@ func lookupSlackUserByEmail(ctx context.Context, cfg aws.Config, platform, works
 		return "", fmt.Errorf("Slack API error: %s", slackResp.Error)
 	}
 	return slackResp.User.ID, nil
+}
+
+// refreshExchanger swaps a refresh token for a new access token, refresh token
+// and lifetime in seconds (exchangeRefreshTokenCLI; a fake in tests).
+type refreshExchanger func(ctx context.Context, refreshToken string) (string, string, int, error)
+
+// freshBotToken returns ws's bot token, decrypted, refreshing it first when
+// Slack token rotation is on and it expires within 5 minutes. A refresh is
+// written back sealed (UpdateWorkspaceTokens), which is also what moves a
+// rotating workspace's legacy plaintext tokens to sealed ones (#868).
+func freshBotToken(ctx context.Context, client *bot.Client, ws *bot.Workspace, platform, workspaceID string, now time.Time, exchange refreshExchanger) (string, error) {
+	botToken, err := client.Credential(ctx, ws, botsecret.BotToken)
+	if err != nil {
+		return "", err
+	}
+	if botToken == "" {
+		return "", fmt.Errorf("no bot token stored for workspace %s — re-run spawn notify workspace add with --bot-token", workspaceID)
+	}
+	if !ws.TokenRotation || !ws.HasCredential(botsecret.RefreshToken) || ws.TokenExpiresAt <= 0 ||
+		now.Add(5*time.Minute).Unix() < ws.TokenExpiresAt {
+		return botToken, nil
+	}
+	refresh, err := client.Credential(ctx, ws, botsecret.RefreshToken)
+	if err != nil {
+		return "", err
+	}
+	newToken, newRefresh, expiresIn, err := exchange(ctx, refresh)
+	if err != nil {
+		return "", fmt.Errorf("refresh Slack token: %w", err)
+	}
+	newExpiresAt := now.Add(time.Duration(expiresIn) * time.Second).Unix()
+	if err := client.UpdateWorkspaceTokens(ctx, platform, workspaceID, newToken, newRefresh, newExpiresAt); err != nil {
+		// The new token works for this call; say the stored pair is stale.
+		fmt.Fprintf(os.Stderr, "warning: refreshed the Slack token but could not store it: %v\n", err)
+	}
+	return newToken, nil
 }
 
 // exchangeRefreshTokenCLI calls Slack's oauth.v2.exchange to get new tokens.

@@ -168,7 +168,7 @@ func TestEncryptDecrypt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ciphertext, err := EncryptSecret(ctx, kmsClient, keyID, tt.plaintext)
+			ciphertext, err := EncryptSecret(ctx, kmsClient, keyID, tt.plaintext, nil)
 			if err != nil {
 				t.Fatalf("EncryptSecret: %v", err)
 			}
@@ -179,7 +179,7 @@ func TestEncryptDecrypt(t *testing.T) {
 				t.Error("ciphertext should differ from plaintext")
 			}
 
-			got, err := DecryptSecret(ctx, kmsClient, ciphertext)
+			got, err := DecryptSecret(ctx, kmsClient, ciphertext, nil)
 			if err != nil {
 				t.Fatalf("DecryptSecret: %v", err)
 			}
@@ -201,10 +201,10 @@ func TestEncryptSecret_Errors(t *testing.T) {
 	}
 	keyID := *keyOut.KeyMetadata.KeyId
 
-	if _, err := EncryptSecret(ctx, kmsClient, "", "plaintext"); err == nil {
+	if _, err := EncryptSecret(ctx, kmsClient, "", "plaintext", nil); err == nil {
 		t.Error("expected error for empty keyID")
 	}
-	if _, err := EncryptSecret(ctx, kmsClient, keyID, ""); err == nil {
+	if _, err := EncryptSecret(ctx, kmsClient, keyID, "", nil); err == nil {
 		t.Error("expected error for empty plaintext")
 	}
 }
@@ -214,10 +214,10 @@ func TestDecryptSecret_Errors(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	kmsClient := env.KMSClient()
 
-	if _, err := DecryptSecret(ctx, kmsClient, ""); err == nil {
+	if _, err := DecryptSecret(ctx, kmsClient, "", nil); err == nil {
 		t.Error("expected error for empty ciphertext")
 	}
-	if _, err := DecryptSecret(ctx, kmsClient, "not-base64!@#"); err == nil {
+	if _, err := DecryptSecret(ctx, kmsClient, "not-base64!@#", nil); err == nil {
 		t.Error("expected error for invalid base64")
 	}
 }
