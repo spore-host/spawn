@@ -22,6 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status`, `spawn cost` and `spawn extend` read, so they show the figure that
   terminates the instance. An instance whose spored predates this keeps the
   on-demand rate until its spored is upgraded.
+- An older spawn launching in the same account no longer strips a newer
+  spawn's grants from the shared instance roles (#1558).
+  `spored-instance-role` is shared by every launch that names no IAM, and a
+  `spawn-instance-*` role by every launch with the same IAM flags. Every launch
+  rewrote the role's spored policy with the grants its own CLI carried. So in
+  an account where two spawn versions launched, the policy flipped between
+  them, and running instances lost whatever the newer version had added. Found
+  live: a v0.161.0 launch removed `ec2:DescribeSpotPriceHistory` (#1497), and
+  a running Spot instance's next price read got `UnauthorizedOperation`.
+  spawn now writes the spored grants as a versioned policy, `spored-policy-v1`
+  or `spored-baseline-policy-v1`. No released spawn touches these names. A
+  spawn that finds a newer version on the role leaves it alone and warns.
+  spawn deletes the policies the new one replaces: the unversioned
+  `spored-policy` / `spored-baseline-policy`, and older versions. A spawn up
+  to v0.161.0 still rewrites its unversioned policy. IAM grants the union of a
+  role's policies, so that write can now only add grants, never remove the
+  newer ones. `spawn-inline-policy` (`--iam-policy`) now carries only the
+  named templates. It also held a third copy of the spored grants, which the
+  versioned baseline already gives every role. Launching now also calls
+  `iam:ListRolePolicies` and `iam:DeleteRolePolicy` on those roles. Without
+  them, spawn still writes its version, warns, and leaves the superseded
+  copies in place.
+- A spored policy write that IAM refused for size (`LimitExceeded`: a role's
+  inline policies over 10,240 characters) is now an error. It used to count as
+  success, and the instance launched without the policy.
 
 ### Security
 

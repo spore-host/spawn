@@ -51,11 +51,6 @@ func selfTerminateIn(t *testing.T, what, doc string) {
 func TestEverySporedPolicyLetsTheInstanceTerminateOnlyItself(t *testing.T) {
 	selfTerminateIn(t, "dynamic baseline (CreateOrGetInstanceProfile)", (&Client{}).sporedBaselinePolicyDoc())
 	selfTerminateIn(t, "static shared role (SetupSporedIAMRole)", sporedDCVRolePolicy)
-	b, err := json.Marshal((&Client{}).buildInlinePolicy([]string{"s3:ReadOnly"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	selfTerminateIn(t, "inline --iam-policy role", string(b))
 }
 
 // And as stored: what each writer actually sends to IAM, read back.
@@ -67,10 +62,9 @@ func TestTheSelfTerminateGrantReachesIAM(t *testing.T) {
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatalf("SetupSporedIAMRole: %v", err)
 	}
-	selfTerminateIn(t, "stored spored-policy", storedPolicy(t, ic, SporedRoleName, "spored-policy"))
+	selfTerminateIn(t, "stored "+sporedRolePolicyName(), storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()))
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-1080", Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatalf("CreateOrGetInstanceProfile: %v", err)
 	}
-	selfTerminateIn(t, "stored spored-baseline-policy", storedPolicy(t, ic, "spawn-test-1080", "spored-baseline-policy"))
-	selfTerminateIn(t, "stored spawn-inline-policy", storedPolicy(t, ic, "spawn-test-1080", "spawn-inline-policy"))
+	selfTerminateIn(t, "stored "+sporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-1080", sporedBaselinePolicyName()))
 }

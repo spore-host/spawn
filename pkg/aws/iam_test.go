@@ -184,16 +184,21 @@ func TestSporedBaselinePolicyDoc(t *testing.T) {
 	}
 }
 
-func TestBuildInlinePolicyIncludesBaseline(t *testing.T) {
+// The spored grants are the versioned baseline, written on every role
+// (ensureSporedBaselinePolicy); a second, unversioned copy in spawn-inline-policy
+// is what a mixed-version account rewrote with older grants (#1558).
+func TestBuildInlinePolicyCarriesOnlyTheTemplates(t *testing.T) {
 	client := &Client{}
-	// Even with only a user template, the spored baseline must be present.
 	pol := client.buildInlinePolicy([]string{"s3:ReadOnly"})
 	b, err := json.Marshal(pol)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "ec2:DescribeTags") {
-		t.Errorf("buildInlinePolicy dropped the spored self-management baseline:\n%s", string(b))
+	if strings.Contains(string(b), "ec2:DescribeTags") {
+		t.Errorf("buildInlinePolicy carries the spored self-management grants again:\n%s", string(b))
+	}
+	if !strings.Contains(string(b), "s3:GetObject") {
+		t.Errorf("buildInlinePolicy dropped the s3:ReadOnly template:\n%s", string(b))
 	}
 }
 
@@ -335,7 +340,7 @@ func TestPolicyJSONValidity(t *testing.T) {
 // was granted on "*" with no condition.
 func TestSporedTagPermissionsScoped(t *testing.T) {
 	c := &Client{}
-	policy := c.buildInlinePolicy(nil) // base spored policy, no extra templates
+	policy := c.sporedBaselinePolicy()
 
 	stmts, ok := policy["Statement"].([]interface{})
 	if !ok {
@@ -382,7 +387,7 @@ func TestSporedTagPermissionsScoped(t *testing.T) {
 // call the Function URL; the Lambda authorizes the verified caller account.
 func TestSporedDNSInvokeGrant(t *testing.T) {
 	c := &Client{}
-	policy := c.buildInlinePolicy(nil)
+	policy := c.sporedBaselinePolicy()
 
 	stmts, _ := policy["Statement"].([]interface{})
 	found := false
@@ -413,7 +418,7 @@ func TestSporedDNSInvokeGrant(t *testing.T) {
 // with AccessDenied (the spored role previously had no fsx:* perms).
 func TestSporedFSxMountGrant(t *testing.T) {
 	c := &Client{}
-	policy := c.buildInlinePolicy(nil)
+	policy := c.sporedBaselinePolicy()
 	stmts, _ := policy["Statement"].([]interface{})
 
 	need := map[string]bool{

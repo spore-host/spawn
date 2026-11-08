@@ -55,14 +55,9 @@ func parsePolicy(t *testing.T, what, doc string) []policyStatement {
 // sporedPolicies is every policy document a spored instance role is given.
 func sporedPolicies(t *testing.T) map[string]string {
 	t.Helper()
-	inline, err := json.Marshal((&Client{}).buildInlinePolicy([]string{"s3:ReadOnly"}))
-	if err != nil {
-		t.Fatal(err)
-	}
 	return map[string]string{
 		"dynamic baseline (CreateOrGetInstanceProfile)": (&Client{}).sporedBaselinePolicyDoc(),
 		"static shared/DCV role (SetupSporedIAMRole)":   sporedDCVRolePolicy,
-		"inline --iam-policy role":                      string(inline),
 	}
 }
 
@@ -107,11 +102,11 @@ func TestTheOwnElasticIPStatementsReachIAM(t *testing.T) {
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatalf("SetupSporedIAMRole: %v", err)
 	}
-	ownEIPStatementsIn(t, "stored spored-policy", storedPolicy(t, ic, SporedRoleName, "spored-policy"))
+	ownEIPStatementsIn(t, "stored "+sporedRolePolicyName(), storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()))
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-661", Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatalf("CreateOrGetInstanceProfile: %v", err)
 	}
-	ownEIPStatementsIn(t, "stored spored-baseline-policy", storedPolicy(t, ic, "spawn-test-661", "spored-baseline-policy"))
+	ownEIPStatementsIn(t, "stored "+sporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-661", sporedBaselinePolicyName()))
 }
 
 // ---- a small evaluator, for the "can it release what it does not own" half ----

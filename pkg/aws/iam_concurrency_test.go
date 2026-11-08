@@ -48,7 +48,7 @@ func TestCreateOrGetInstanceProfile_PolicyFileGetsSporedBaseline(t *testing.T) {
 	roleName := "spawn-502-policyfile-test"
 	out, err := iamClient.GetRolePolicy(context.Background(), &iam.GetRolePolicyInput{
 		RoleName:   &roleName,
-		PolicyName: strPtr("spored-baseline-policy"),
+		PolicyName: strPtr(sporedBaselinePolicyName()),
 	})
 	if err != nil {
 		t.Fatalf("role %q missing spored-baseline-policy entirely (spawn#502 regression): %v", roleName, err)

@@ -43,6 +43,8 @@ var nestedSpawnNotGranted = map[string]string{
 	"iam:AttachRolePolicy":         "IAM write; nested spores never write IAM",
 	"iam:CreateInstanceProfile":    "IAM write; nested spores never write IAM",
 	"iam:AddRoleToInstanceProfile": "IAM write; nested spores never write IAM",
+	"iam:DeleteRolePolicy":         "IAM write; nested spores never write IAM",
+	"iam:ListRolePolicies":         "only reached by the role-setup paths a nested spore skips",
 	"iam:GetRole":                  "only reached by the role-setup paths a nested spore skips",
 	"iam:GetInstanceProfile":       "only reached by the role-setup paths a nested spore skips",
 	// Not part of a plain child launch.
