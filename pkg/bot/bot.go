@@ -17,6 +17,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -310,12 +311,36 @@ func (c *Client) BatchDeleteRegistrations(ctx context.Context, regs []Registrati
 
 // ── workspaces ────────────────────────────────────────────────────────────
 
+// PlatformTeams is the Platform value of a Microsoft Teams workspace.
+const PlatformTeams = "teams"
+
+// ErrTeamsSigningSecret is returned by PutWorkspace for a Teams workspace that
+// carries a signing secret. spore-bot authenticates Teams requests with Bot
+// Framework tokens only and never reads a Teams signing secret; the value
+// operators were once told to store there, the Azure Bot App ID, is public.
+// It mirrors spore-bot's own refusal (errTeamsSigningSecret).
+var ErrTeamsSigningSecret = errors.New("teams workspaces take no signing secret: " +
+	"spore-bot verifies Teams requests with Bot Framework tokens (the App ID is public; never store it)")
+
+// IsTeams reports whether ws is a Teams workspace, by its platform or its
+// "teams#" key.
+func (ws *Workspace) IsTeams() bool {
+	return strings.EqualFold(ws.Platform, PlatformTeams) ||
+		strings.HasPrefix(strings.ToLower(ws.WorkspaceKey), PlatformTeams+"#")
+}
+
 // PutWorkspace writes a workspace registration, replacing any existing one.
 // Every credential field is stored KMS-encrypted; without a KMS client (see
 // WithSecretsKMS) a non-empty credential is an error. The one exception is the
 // rollout window before the credentials key exists, in which the legacy
 // plaintext format is written and logged once (botsecret.Field.Seal).
+//
+// A Teams workspace with a signing secret is refused with
+// ErrTeamsSigningSecret before anything is encrypted or written.
 func (c *Client) PutWorkspace(ctx context.Context, ws *Workspace) error {
+	if ws.IsTeams() && ws.SigningSecret != "" {
+		return fmt.Errorf("workspace %s: %w", ws.WorkspaceKey, ErrTeamsSigningSecret)
+	}
 	item, err := attributevalue.MarshalMap(ws)
 	if err != nil {
 		return fmt.Errorf("marshal workspace: %w", err)

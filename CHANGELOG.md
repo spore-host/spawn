@@ -51,6 +51,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     not go through spore-bot. SMS notifications go through spore-bot's
     registrations, so they are walled off with chat.
 
+### Security
+
+- **`spawn notify workspace add --platform teams` refuses `--signing-secret`
+  and no longer requires it** (GHSA-ccj3-jfqj-m3mh). spore-bot verifies Teams
+  requests with Bot Framework tokens only and never reads a Teams signing
+  secret; the value the Teams setup guide used to say to store there, the
+  Azure Bot App ID, is public. Slack still requires `--signing-secret`. In
+  `pkg/bot`, `PutWorkspace` refuses a Teams workspace that carries a signing
+  secret (`ErrTeamsSigningSecret`), before anything is encrypted or written.
+  `spawn notify workspace list` warns, on stderr, about each Teams workspace
+  that still stores one, by name only, and points to step 3 of the [Teams
+  setup guide](https://docs.spore.host/guides/teams-setup), which says how to
+  remove it and what to rotate.
+
 ### Documentation
 
 - The chat reference (`docs-gen/notify.md`, the two launch flags and the
