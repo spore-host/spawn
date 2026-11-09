@@ -2,6 +2,10 @@
 
 *Aliases: bot*
 
+EXPERIMENTAL: chat-platform notifications are not supported in this
+release. Every command here requires SPAWN_EXPERIMENTAL_CHAT=1 (or
+experimental.chat: true in ~/.spawn/config.yaml) and otherwise refuses.
+
 Register and manage Slack/Teams/SMS notifications for instances.
 
 Lets authorized users receive lifecycle events (launch, idle stop, TTL warn,

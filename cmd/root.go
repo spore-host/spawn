@@ -73,6 +73,10 @@ func Execute() {
 	// for exactly this release (#1274); pkg/launcher cannot import cmd either.
 	launcher.CallerVersion = version()
 
+	// Chat-platform entry points are hidden from help unless opted in
+	// (chat_gate.go, spore-host/spore-host#611).
+	applyChatVisibility(chatEnabled())
+
 	// Start async update check (non-blocking, respects SPORE_NO_UPDATE_CHECK).
 	updateCh := startUpdateCheck(version())
 

@@ -59,7 +59,7 @@ code and it determines what breaks when a schedule is disabled.
 
 | function | source | notes |
 |---|---|---|
-| `spawn-dashboard-api` | `lambda/dashboard-api/` | the dashboard's REST backend |
+| `spawn-dashboard-api` | `lambda/dashboard-api/` | the dashboard's REST backend. Its Slack endpoints (`/api/slack/*`) are experimental and answer 404 unless the function's environment sets `SPAWN_EXPERIMENTAL_CHAT=1`; the hosted function must not set it for 1.0 (spore-host#611) |
 | `spawn-dashboard-websocket` | `lambda/dashboard-websocket/` | WebSocket connect/disconnect |
 
 `spore-bot` used to be listed here. It is not API Gateway-fronted — Slack, Teams,
@@ -94,6 +94,14 @@ orphans:
 | `spore-bot` | spore-host (umbrella) — see [spore-bot](#spore-bot) |
 
 ### spore-bot
+
+> **Experimental, unsupported in 1.0.** The chat-platform integrations
+> (Slack, Teams, Discord, and the SMS that rides spore-bot's registrations) are
+> walled off for 1.0, and the hosted spore-bot is being decommissioned
+> separately (spore-host#611, #644). The CLI entry points need
+> `SPAWN_EXPERIMENTAL_CHAT=1`; the dashboard-api's Slack endpoints need the same
+> variable on the function. The facts below are kept for the decommission and
+> for a self-host.
 
 **Per the spore-host repo, not measured from the account** (read 2026-10-15 at
 spore-host `a80e751`, spore-host#573; spawn#1043). The next `spawn footprint` run
@@ -288,6 +296,15 @@ files, docs, a package the Lambda does not compile, a Dependabot bump to a modul
 it does not link, and DynamoDB item writes (backfills are data, not deploys).
 EC2, EFS and FSx calls are workload resources, not operated state, so a smoke
 test is not a deploy input.
+
+**Deploy notes.** A Lambda's code can ask its deployer to check something a
+code update does not change, such as an environment variable that must stay
+unset. A `// deploychecklist:note <text>` line comment, alone on its line in a
+file compiled into the Lambda, appears under that Lambda's entry as a
+`note:` checkbox (and in the JSON as `notes`). The note lives next to the
+setting it is about, so it disappears with it. `dashboard-api` carries one:
+keep `SPAWN_EXPERIMENTAL_CHAT` unset on the hosted function, so its Slack
+endpoints stay off (spore-host#611).
 
 **What it cannot judge.** A changed line means the shipped bytes differ. It
 does not mean the behaviour does. On v0.151.0 the tool reports `dashboard-api` as

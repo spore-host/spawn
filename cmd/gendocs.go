@@ -24,6 +24,12 @@ var gendocsCmd = &cobra.Command{
 	Hidden: true,
 	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// The reference keeps the experimental chat commands and flags, each
+		// labelled experimental in its own text, whatever this shell opts in
+		// to: the fragments must not depend on SPAWN_EXPERIMENTAL_CHAT
+		// (chat_gate.go).
+		applyChatVisibility(true)
+		defer applyChatVisibility(chatEnabled())
 		frags, err := docgen.Generate(rootCmd, docgen.Options{CLIName: "spawn"})
 		if err != nil {
 			return fmt.Errorf("generate docs: %w", err)

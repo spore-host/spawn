@@ -58,9 +58,22 @@ func botClient(cfg aws.Config) *bot.Client {
 
 var botCmd = &cobra.Command{
 	Use:     "notify",
-	Short:   "Manage chat and SMS notification registrations for instances",
+	Short:   "Manage chat and SMS notification registrations for instances (experimental)",
 	Aliases: []string{"bot"},
-	Long: `Register and manage Slack/Teams/SMS notifications for instances.
+	// Hidden, and refused by chatGatePreRun, unless SPAWN_EXPERIMENTAL_CHAT=1
+	// (spore-host/spore-host#611): see chat_gate.go. Execute un-hides it when
+	// opted in.
+	Hidden:            true,
+	PersistentPreRunE: chatGatePreRun,
+	// Runnable so a bare `spawn notify` passes through the gate too, rather
+	// than printing the help of a command this release does not support.
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	Long: `EXPERIMENTAL: chat-platform notifications are not supported in this
+release. Every command here requires SPAWN_EXPERIMENTAL_CHAT=1 (or
+experimental.chat: true in ~/.spawn/config.yaml) and otherwise refuses.
+
+Register and manage Slack/Teams/SMS notifications for instances.
 
 Lets authorized users receive lifecycle events (launch, idle stop, TTL warn,
 termination) and control instances via chat slash commands without CLI access.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -44,6 +45,37 @@ type LambdaResult struct {
 	DeployKind string   `json:"deploy_kind"`
 	Reasons    []string `json:"reasons"`
 	Changes    []Change `json:"changes"`
+	// Notes are what the Lambda's own code asks its deployer to check, from
+	// `// deploychecklist:note` lines in the files compiled into it at --to
+	// (see deployNotes). Additive, so the schema is unchanged.
+	Notes []string `json:"notes,omitempty"`
+}
+
+// deployNoteRe is a deploy note: a line comment, alone on its line, starting
+// `deploychecklist:note`. Anchored (CLAUDE.md "Writing a gate", rule 3), so a
+// sentence or string that mentions the marker is not a note.
+var deployNoteRe = regexp.MustCompile(`^\s*//\s*deploychecklist:note\s+(\S.*?)\s*$`)
+
+// deployNotes collects the deploy notes in a Lambda's compiled files. They
+// come from the code rather than a list here, so a note travels with the
+// setting it is about and disappears with it (rule 4).
+func deployNotes(t *Tree, files []string) ([]string, error) {
+	var out []string
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".go") {
+			continue
+		}
+		b, err := t.read(f)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if m := deployNoteRe.FindStringSubmatch(line); m != nil {
+				out = append(out, m[1]+" ("+f+")")
+			}
+		}
+	}
+	return out, nil
 }
 
 type InputResult struct {
@@ -155,6 +187,9 @@ func compareLambda(from, to *Tree, a, b *LambdaComponent, compile compileFunc) (
 		return r, err
 	}
 	r.Changes = append(r.Changes, mech...)
+	if r.Notes, err = deployNotes(to, cb.Files); err != nil {
+		return r, err
+	}
 
 	r.Status, r.DeployKind = StatusUnchanged, KindNone
 	if len(r.Changes) > 0 {
@@ -277,6 +312,9 @@ func writeMarkdown(w io.Writer, r *Report) {
 		}
 		for _, m := range l.Mechanisms {
 			p("  - deploy (%s): `%s`\n", m.Kind, m.Command)
+		}
+		for _, n := range l.Notes {
+			p("  - [ ] note: %s\n", n)
 		}
 	}
 	if len(unchanged) > 0 {

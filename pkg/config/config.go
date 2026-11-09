@@ -24,6 +24,9 @@ type Config struct {
 	Compliance     ComplianceConfig     `yaml:"compliance"`
 	Infrastructure InfrastructureConfig `yaml:"infrastructure"`
 	Defaults       LaunchDefaults       `yaml:"defaults"`
+	// Experimental holds opt-ins for features not supported in this release
+	// (see ExperimentalChatEnabled).
+	Experimental ExperimentalConfig `yaml:"experimental,omitempty"`
 }
 
 // DNSConfig represents DNS configuration.
