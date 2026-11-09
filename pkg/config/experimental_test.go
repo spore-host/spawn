@@ -13,7 +13,7 @@ import (
 func chatOptInEnv(t *testing.T, env *string, fileBody string) {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	t.Setenv(ExperimentalChatEnv, "")
 	if env == nil {
 		_ = os.Unsetenv(ExperimentalChatEnv)

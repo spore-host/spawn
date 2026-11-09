@@ -40,7 +40,7 @@ func chatTestEnv(t *testing.T, optIn bool) (home string, awsActivity func() (loa
 	t.Helper()
 	isolateAWSEnv(t)
 	home = t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	if optIn {
 		t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
 		// Opted in, chat also needs the operator's own bot: spore.host hosts
