@@ -727,9 +727,9 @@ func bodyFuncs() string {
 // rewrites these three constants by name, so rename them only together with
 // scripts/awsclipin. Run that script by hand to move the pin now.
 const (
-	awsCLIVersion       = "2.39.3"
-	awsCLISHA256x86_64  = "14cb35809ad7547dd3c69fa9899a3975fbd850b6a6791f3fe264856490cd9a63"
-	awsCLISHA256aarch64 = "f6eb845fbacb11bee87de3f5fbe8043773cbe89d0414607b44b71e216eb9226b"
+	awsCLIVersion       = "2.39.6"
+	awsCLISHA256x86_64  = "7a121264f2637a3b90767aaf5bdd43ee88b8c925a931d0479fa2ce22b1a2fa76"
+	awsCLISHA256aarch64 = "5763332bdcb432c19ee122545856fd350c3bb306753212deedcfccc76f4d20c3"
 )
 
 // AWSCLIPin is one architecture's pinned AWS CLI installer zip: what the Linux

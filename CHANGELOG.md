@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Linux bootstrap installs AWS CLI 2.39.6 instead of 2.39.3 on an image with no aws CLI** (#1495). This changes the published bootstrap body, so deploy the sweep orchestrator from the release that ships it, as the deploy checklist says. Both installer zips' signatures verified against the AWS CLI team's PGP key (`FB5DB77FD5C118B80511ADA8A6310ACC4672475C`) before their sha256s were pinned: x86_64 `7a121264f2637a3b90767aaf5bdd43ee88b8c925a931d0479fa2ce22b1a2fa76`, aarch64 `5763332bdcb432c19ee122545856fd350c3bb306753212deedcfccc76f4d20c3`. Opened by the weekly AWS CLI pin workflow.
+
 ### Documentation
 
 - The self-hosting spore-bot template (`deployment/cloudformation/spore-bot.yaml`)
