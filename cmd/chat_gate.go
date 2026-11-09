@@ -58,12 +58,21 @@ var chatDefaultKeys = map[string]bool{"slack-workspace": true}
 
 // chatLaunchFlagsGate refuses a launch that sets any chat flag without the
 // opt-in. Called first in runLaunch, ahead of every AWS call and dispatch.
+//
+// Opted in, a --slack-workspace also needs the operator's own spore-bot
+// (SPORE_NOTIFY_URL): spore.host no longer hosts one, so that is checked here
+// too, rather than after the launch's first AWS calls.
 func chatLaunchFlagsGate(cmd *cobra.Command) error {
 	for _, name := range chatLaunchFlags {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
 			if err := requireChat(); err != nil {
 				return fmt.Errorf("--%s: %w", name, err)
 			}
+		}
+	}
+	if f := cmd.Flags().Lookup("slack-workspace"); f != nil && f.Changed && f.Value.String() != "" {
+		if _, err := spawnconfig.ResolveNotifyURL(); err != nil {
+			return fmt.Errorf("--slack-workspace: %w", err)
 		}
 	}
 	return nil

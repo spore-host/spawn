@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     function turns them off on its next deploy. The release deploy checklist
     now carries `// deploychecklist:note` lines from a Lambda's compiled code,
     and dashboard-api's says to keep the variable unset.
+  - **No built-in bot endpoint any more.** spore.host's hosted spore-bot is
+    gone, so spawn no longer falls back to it. `SPORE_NOTIFY_URL` (where
+    spored posts lifecycle notices) and `SPORE_BOT_LAMBDA_ROLE_ARN` (the
+    principal `spawn notify register` makes `SpawnBotCrossAccount` trust) have
+    no default: opted in, a chat launch (`--slack-workspace`, or a stored
+    default) needs `SPORE_NOTIFY_URL` set to your self-hosted bot's https URL,
+    and `notify register` without `--role-arn` needs
+    `SPORE_BOT_LAMBDA_ROLE_ARN`. Each is refused before any AWS call when
+    unset, and a value naming the retired hosted bot (its Function URL, its
+    API, or a bot role in the spore.host infra account) is refused rather than
+    used. `deployment/cloudformation/bot-cross-account-role.yaml` likewise has
+    no default `BotLambdaRoleArn` and requires an `ExternalId` of your own
+    (at least 16 characters); it no longer falls back to the shared
+    `<prefix>-bot` ExternalId, which spore-bot stopped presenting in
+    spore-host/spore-host#413.
   - Unaffected: `--completion-webhook-url`, `--spot-webhook-url` and the
     reaper's `REAPER_NOTIFY_URL`, which POST straight to your endpoint and do
     not go through spore-bot. SMS notifications go through spore-bot's
@@ -41,9 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The chat reference (`docs-gen/notify.md`, the two launch flags and the
   `slack-workspace` default) is kept and labelled experimental; `notify` is no
   longer in the README's command list, which has an "Experimental" section
-  instead. `deployment/cloudformation/spore-bot.yaml` and
-  `bot-cross-account-role.yaml` carry an "experimental, unsupported in 1.0"
-  header, with no functional change.
+  instead. `deployment/cloudformation/spore-bot.yaml` carries an
+  "experimental, unsupported in 1.0" header, with no functional change;
+  `bot-cross-account-role.yaml` carries it too, with the default changes
+  above.
 
 - The self-hosting spore-bot template (`deployment/cloudformation/spore-bot.yaml`)
   and `docs/infra-account.md` point to the new [Rotating bot

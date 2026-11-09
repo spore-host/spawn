@@ -25,6 +25,12 @@ import (
 // works with it; help hides them; and a default launch puts nothing
 // chat-related on the instance.
 
+// A self-hosted bot's endpoints, for tests that opt in.
+const (
+	selfHostedNotifyURL = "https://bot.example.invalid"
+	selfHostedBotRole   = "arn:aws:iam::111122223333:role/my-spore-bot-role"
+)
+
 // chatTestEnv isolates the opt-in's two sources and AWS. HOME is a temp dir
 // (no ~/.spawn/config.yaml unless the test writes one), the variable is unset
 // unless optIn, and every AWS request, through the loadAWSConfig seam or any
@@ -37,6 +43,10 @@ func chatTestEnv(t *testing.T, optIn bool) (home string, awsActivity func() (loa
 	t.Setenv("HOME", home)
 	if optIn {
 		t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
+		// Opted in, chat also needs the operator's own bot: spore.host hosts
+		// none (#611). TestChatOptInNeedsTheOperatorsOwnBot unsets these.
+		t.Setenv(spawnconfig.EnvNotifyURL, selfHostedNotifyURL)
+		t.Setenv(spawnconfig.EnvBotLambdaRoleARN, selfHostedBotRole)
 	} else {
 		t.Setenv(spawnconfig.ExperimentalChatEnv, "")
 		_ = os.Unsetenv(spawnconfig.ExperimentalChatEnv)
@@ -427,4 +437,66 @@ func TestResumeDropsRecordedChatWithoutTheOptIn(t *testing.T) {
 	if rec.Base.SlackWorkspaceID != "T1" || rec.Base.NotifyURL == "" {
 		t.Errorf("opted in, and the resume dropped the chat settings: %+v", rec.Base)
 	}
+}
+
+// TestChatOptInNeedsTheOperatorsOwnBot: opted in, chat still makes no call to
+// spore.host's retired hosted bot. With no SPORE_NOTIFY_URL a chat launch is
+// refused, and with no SPORE_BOT_LAMBDA_ROLE_ARN (and no --role-arn) so is
+// `notify register`, each before any AWS call; a value naming the retired bot
+// is refused the same way; and nothing falls back to a built-in endpoint.
+func TestChatOptInNeedsTheOperatorsOwnBot(t *testing.T) {
+	resetRootOutputFlag(t)
+	resetCommandFlags(t, botCmd)
+	retiredURL := "https://awdzf7fbbsvqcrnrzusqjsuybm0iiyvf.lambda-url.us-east-1.on.aws"
+	retiredRole := "arn:aws:iam::" + "966362334030" + ":role/" + "spore-bot-role"
+
+	for _, notifyURL := range []string{"", retiredURL} {
+		t.Run("launch, SPORE_NOTIFY_URL="+notifyURL, func(t *testing.T) {
+			keepLaunchGlobals(t)
+			_, activity := chatTestEnv(t, true)
+			t.Setenv(spawnconfig.EnvNotifyURL, notifyURL)
+			setLaunchFlag(t, "instance-type", "t4g.small")
+			setLaunchFlag(t, "slack-workspace", "T1")
+			err := runLaunch(launchCmd, []string{"box"})
+			if err == nil || !strings.Contains(err.Error(), spawnconfig.EnvNotifyURL) {
+				t.Fatalf("err = %v, want a refusal naming %s", err, spawnconfig.EnvNotifyURL)
+			}
+			if loads, reqs := activity(); loads != 0 || reqs != 0 {
+				t.Errorf("refused, but loaded an AWS config %d time(s) and sent %d request(s)", loads, reqs)
+			}
+			// The config builder refuses too, for a path that reaches it
+			// without the flag (a stored default).
+			if _, err := buildLaunchConfig(nil); err == nil || !strings.Contains(err.Error(), spawnconfig.EnvNotifyURL) {
+				t.Errorf("buildLaunchConfig: err = %v, want a refusal naming %s", err, spawnconfig.EnvNotifyURL)
+			}
+		})
+	}
+
+	for _, role := range []string{"", retiredRole} {
+		t.Run("notify register, SPORE_BOT_LAMBDA_ROLE_ARN="+role, func(t *testing.T) {
+			_, activity := chatTestEnv(t, true)
+			t.Setenv(spawnconfig.EnvBotLambdaRoleARN, role)
+			err := runRootForTest(t, "notify", "register", "--platform", "slack", "--instance", "i-0123456789abcdef0",
+				"--user-id", "U1", "--workspace-id", "T1")
+			if err == nil || !strings.Contains(err.Error(), spawnconfig.EnvBotLambdaRoleARN) {
+				t.Fatalf("err = %v, want a refusal naming %s", err, spawnconfig.EnvBotLambdaRoleARN)
+			}
+			if loads, reqs := activity(); loads != 0 || reqs != 0 {
+				t.Errorf("refused, but loaded an AWS config %d time(s) and sent %d request(s)", loads, reqs)
+			}
+		})
+	}
+
+	t.Run("notify register --role-arn needs no bot principal", func(t *testing.T) {
+		_, activity := chatTestEnv(t, true)
+		t.Setenv(spawnconfig.EnvBotLambdaRoleARN, "")
+		err := runRootForTest(t, "notify", "register", "--platform", "slack", "--instance", "i-0123456789abcdef0",
+			"--user-id", "U1", "--workspace-id", "T1", "--role-arn", "arn:aws:iam::111122223333:role/SpawnBotCrossAccount", "--external-id", "x")
+		if err != nil && strings.Contains(err.Error(), spawnconfig.EnvBotLambdaRoleARN) {
+			t.Errorf("--role-arn was given, and register still asked for the bot principal: %v", err)
+		}
+		if loads, _ := activity(); loads == 0 {
+			t.Errorf("register with --role-arn never reached AWS (err: %v)", err)
+		}
+	})
 }

@@ -222,6 +222,8 @@ func TestSweepFlagRulesHoldAgainstTheCode(t *testing.T) {
 	// The chat flags are experimental (chat_gate.go): opted in, so they are
 	// held to the same rule as every other carried flag.
 	t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
+	// And the operator's own bot: spore.host hosts none (#611).
+	t.Setenv(spawnconfig.EnvNotifyURL, "https://bot.example.invalid")
 	steering := sweepSteeringSource(t)
 	vars := launchCmdFlagVars(t)
 	for _, n := range launchFlagNames(t) {

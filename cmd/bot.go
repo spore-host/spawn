@@ -103,12 +103,14 @@ Both the instance ID and instance name (DNS name or spawn:name tag) are
 accepted as the target in slash commands once registered.
 
 Without --role-arn, spawn creates the SpawnBotCrossAccount role in your
-account, trusting spore-bot's execution role (SPORE_BOT_LAMBDA_ROLE_ARN
-overrides it) under a per-account ExternalId, and stores that ExternalId in the
+account, trusting your self-hosted spore-bot's execution role, which
+SPORE_BOT_LAMBDA_ROLE_ARN must name (spore.host no longer hosts a bot, so there
+is no default), under a per-account ExternalId, and stores that ExternalId in the
 registration. If the role exists but trusts a different principal, or has no
-per-account ExternalId, register stops and says so. A role spawn created
-before #1046 trusted the prism-bot stack's role; --repair rewrites its trust
-policy. A role spawn did not create is never modified.
+per-account ExternalId, register stops and says so; --repair rewrites the
+trust policy of a role spawn created (for example one that still trusts
+spore.host's retired hosted bot). A role spawn did not create is never
+modified.
 
 With --role-arn (for example the bot-cross-account-role.yaml stack's RoleArn
 output), pass the ExternalId in that role's trust policy with --external-id.`,
@@ -134,6 +136,18 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 	if tagpfx == "" {
 		tagprefix.Init()
 		tagpfx = tagprefix.Prefix()
+	}
+
+	// Without --role-arn spawn creates a role trusting the operator's own
+	// spore-bot. spore.host no longer hosts one, so there is no default
+	// principal: refused here, before any AWS call (spore-host/spore-host#611).
+	var botPrincipal string
+	if botRoleARN == "" {
+		p, err := spawnconfig.ResolveBotLambdaRoleARN()
+		if err != nil {
+			return err
+		}
+		botPrincipal = p
 	}
 
 	ctx := context.Background()
@@ -195,7 +209,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		fmt.Printf("No --role-arn provided — ensuring %s role exists in account %s...\n",
 			botCrossAccountRoleName, accountID)
 		roleARN, externalID, err = bot.EnsureCrossAccountRole(ctx, iam.NewFromConfig(cfg),
-			spawnconfig.GetBotLambdaRoleARN(), botRepair, generateExternalID, os.Stdout)
+			botPrincipal, botRepair, generateExternalID, os.Stdout)
 		if err != nil {
 			return fmt.Errorf("cross-account role: %w", err)
 		}

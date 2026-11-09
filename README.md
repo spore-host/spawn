@@ -223,8 +223,9 @@ Slack, Teams and Discord notifications (`spawn notify`, `spawn launch
 --slack-workspace` / `--notify-platform`, and the `slack-workspace` default) are
 **experimental and not supported in this release**. They are hidden from
 `--help` and refuse to run unless you opt in with `SPAWN_EXPERIMENTAL_CHAT=1`
-(or `experimental: {chat: true}` in `~/.spawn/config.yaml`). The hosted
-spore-bot they talk to is being decommissioned. For lifecycle notices, use
+(or `experimental: {chat: true}` in `~/.spawn/config.yaml`). spore.host no
+longer hosts a bot, so even opted in they need your own self-hosted spore-bot
+(`SPORE_NOTIFY_URL`, `SPORE_BOT_LAMBDA_ROLE_ARN`). For lifecycle notices, use
 `--completion-webhook-url` and `--spot-webhook-url`, which POST straight to
 your own endpoint and are unaffected.
 

@@ -12,19 +12,17 @@ import (
 	"github.com/spore-host/spawn/internal/treewalk"
 
 	"gopkg.in/yaml.v3"
-
-	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
-// The principal a SpawnBotCrossAccount role trusts is stated in three places:
-// pkg/config (what `spawn notify register` writes into the trust policy), the
-// BotLambdaRoleArn parameter of deployment/cloudformation/bot-cross-account-role.yaml
-// (what a customer deploying the template trusts), and whatever docs mention it.
-// Before #1046 they named three different roles: the code a CloudFormation-
-// generated prism-bot role that spore-bot no longer runs as, the template no
-// default at all and an example role that never existed (spore-bot-lambda).
-// These tests make pkg/config's DefaultBotLambdaRoleARN the one source and fail
-// when anything else disagrees.
+// The principal a SpawnBotCrossAccount role trusts is stated in two places:
+// SPORE_BOT_LAMBDA_ROLE_ARN (what `spawn notify register` writes into the
+// trust policy) and the BotLambdaRoleArn parameter of
+// deployment/cloudformation/bot-cross-account-role.yaml. Before #1046 the repo
+// named three different roles for it; after it, both defaulted to the hosted
+// spore-bot's role. spore.host no longer hosts a bot (spore-host#611), so
+// neither has a default any more: the operator names their own self-hosted
+// bot. These tests fail if a default principal, or any reference to the
+// retired hosted bot's role, comes back.
 
 const botTemplate = "deployment/cloudformation/bot-cross-account-role.yaml"
 
@@ -108,11 +106,35 @@ func mapGet(n *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-func TestBotCrossAccountTemplateTrustsTheDefaultBotPrincipal(t *testing.T) {
+func TestBotCrossAccountTemplateHasNoDefaultPrincipal(t *testing.T) {
 	cfn := readCFNBotTrust(t)
-	if cfn.principalDefault != spawnconfig.DefaultBotLambdaRoleARN {
-		t.Errorf("%s: parameter %s defaults to %q, but `spawn notify register` trusts %q (pkg/config DefaultBotLambdaRoleARN). Make them the same.",
-			botTemplate, cfn.principalParam, cfn.principalDefault, spawnconfig.DefaultBotLambdaRoleARN)
+	if cfn.principalDefault != "" {
+		t.Errorf("%s: parameter %s defaults to %q. spore.host hosts no bot (spore-host#611): the principal must be the operator's own, with no default.",
+			botTemplate, cfn.principalParam, cfn.principalDefault)
+	}
+}
+
+// TestBotCrossAccountTemplateHasNoSharedExternalID: the role's ExternalId is
+// the operator's own, with no default and no fallback to the legacy shared
+// "<prefix>-bot" value, which spore-bot no longer presents (spore-host#413).
+func TestBotCrossAccountTemplateHasNoSharedExternalID(t *testing.T) {
+	b, err := os.ReadFile(botTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	p := mapGet(mapGet(doc.Content[0], "Parameters"), "ExternalId")
+	if p == nil {
+		t.Fatalf("%s has no ExternalId parameter; the template's shape changed", botTemplate)
+	}
+	if d := mapGet(p, "Default"); d != nil {
+		t.Errorf("%s: ExternalId has a Default (%q); it must be the operator's own value", botTemplate, d.Value)
+	}
+	if regexp.MustCompile(`(?m)^[^#]*\$\{TagPrefix\}-bot`).Match(b) {
+		t.Errorf("%s still writes the shared ${TagPrefix}-bot ExternalId somewhere", botTemplate)
 	}
 }
 
@@ -120,17 +142,21 @@ func TestBotCrossAccountTemplateTrustsTheDefaultBotPrincipal(t *testing.T) {
 // account. The role-name class is IAM's own.
 var iamRoleARN = regexp.MustCompile(`arn:aws:iam::(?:\d{12}|\*|\$\{AWS::AccountId\}):role/([\w+=,.@-]+)`)
 
-// Every IAM role ARN anywhere in the repo that names a bot role is a statement
-// of what the bot runs as, and must be DefaultBotLambdaRoleARN. The one bot
-// role that is not the principal is the trustor, the customer-side role the
-// bot assumes; its name is read from the template, not listed here.
-func TestEveryBotPrincipalARNInTheRepoIsTheDefault(t *testing.T) {
+// retiredHostedBotAccount is the spore.host infra account the hosted bot ran
+// in. No self-hosted bot runs there, so a bot role ARN in it is the retired
+// hosted principal (spore-bot-role, or the prism-bot stack's role).
+const retiredHostedBotAccount = "966362334030"
+
+// Every IAM role ARN anywhere in the repo that names a bot role in the
+// retired hosted account would point a trust at a bot that no longer exists.
+// The trustor, the customer-side role the bot assumes, is not a principal; its
+// name is read from the template, not listed here.
+func TestNoFileNamesTheRetiredHostedBotPrincipal(t *testing.T) {
 	trustor := readCFNBotTrust(t).trustorRoleName
-	want := spawnconfig.DefaultBotLambdaRoleARN
 
 	skipDir := map[string]bool{".git": true, "bin": true, "node_modules": true, "vendor": true, "dist": true}
 	var bad []string
-	agreeing, scanned := 0, 0
+	scanned := 0
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if treewalk.Vanished(".", path, err) {
@@ -158,11 +184,9 @@ func TestEveryBotPrincipalARNInTheRepoIsTheDefault(t *testing.T) {
 				if !strings.Contains(strings.ToLower(name), "bot") || name == trustor {
 					continue
 				}
-				if m[0] == want {
-					agreeing++
-					continue
+				if strings.Contains(m[0], "::"+retiredHostedBotAccount+":") {
+					bad = append(bad, path+": "+m[0])
 				}
-				bad = append(bad, path+": "+m[0])
 			}
 		}
 		return nil
@@ -173,12 +197,8 @@ func TestEveryBotPrincipalARNInTheRepoIsTheDefault(t *testing.T) {
 	if scanned < 100 {
 		t.Fatalf("scanned only %d files; the walk has broken rather than the repo having shrunk", scanned)
 	}
-	// The template's default is always one; finding none means the matcher broke.
-	if agreeing == 0 {
-		t.Fatalf("found no occurrence of %s in the repo, not even %s's default; the matcher is broken", want, botTemplate)
-	}
 	for _, b := range bad {
-		t.Errorf("%s names a bot principal other than DefaultBotLambdaRoleARN (%s)", b, want)
+		t.Errorf("%s names spore.host's retired hosted bot principal; the principal is the operator's own (SPORE_BOT_LAMBDA_ROLE_ARN)", b)
 	}
 }
 

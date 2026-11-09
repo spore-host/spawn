@@ -203,6 +203,8 @@ func TestResumedMemberIsTheLaunchedMember(t *testing.T) {
 	// Opted in to the experimental chat flags (chat_gate.go), so they are
 	// carried like every other flag.
 	t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
+	// And the operator's own bot: spore.host hosts none (#611).
+	t.Setenv(spawnconfig.EnvNotifyURL, "https://bot.example.invalid")
 	for _, n := range carriedSweepFlags(t) {
 		t.Run(n, func(t *testing.T) {
 			keepLaunchGlobals(t)
@@ -627,6 +629,8 @@ func TestMemberRecordRoundTripsEveryLaunchConfigField(t *testing.T) {
 func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
 	// Opted in to the experimental chat flags (chat_gate.go).
 	t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
+	// And the operator's own bot: spore.host hosts none (#611).
+	t.Setenv(spawnconfig.EnvNotifyURL, "https://bot.example.invalid")
 	pfOf := func(t *testing.T) (string, error) {
 		t.Helper()
 		base, err := sweepBaseConfig(context.Background())

@@ -100,8 +100,10 @@ orphans:
 > walled off for 1.0, and the hosted spore-bot is being decommissioned
 > separately (spore-host#611, #644). The CLI entry points need
 > `SPAWN_EXPERIMENTAL_CHAT=1`; the dashboard-api's Slack endpoints need the same
-> variable on the function. The facts below are kept for the decommission and
-> for a self-host.
+> variable on the function. spawn has no built-in bot endpoint any more:
+> `SPORE_NOTIFY_URL` and `SPORE_BOT_LAMBDA_ROLE_ARN` have no default, and a
+> value naming the hosted bot below is refused. The facts below are kept for
+> the decommission and for a self-host.
 
 **Per the spore-host repo, not measured from the account** (read 2026-10-15 at
 spore-host `a80e751`, spore-host#573; spawn#1043). The next `spawn footprint` run
