@@ -110,6 +110,9 @@ the measured facts.
   spore-host's `infra/tofu/spore-bot`. Tofu ignores code and environment.
 - **Environment variables** (the bot's secrets) are set out-of-band with
   `aws lambda update-function-configuration`; neither of the above touches them.
+  To rotate one, or a workspace credential in `spore-bot-workspaces`, follow
+  [Rotating bot credentials](https://docs.spore.host/guides/rotating-bot-credentials):
+  it changes one variable and keeps the rest, without printing any of them.
 - **There is no CloudFormation stack.** The `spore-bot` stack was deleted on
   2026-06-14 when Tofu adopted the function; creating one again would fight Tofu
   for ownership.
