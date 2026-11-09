@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Chat-platform integrations (Slack, Teams, Discord) are experimental and
+  unsupported in 1.0** (spore-host/spore-host#611, #644). They are walled off,
+  not removed: every user-facing entry point is hidden from `--help` and
+  refuses, exiting non-zero before any AWS call, unless you opt in with
+  `SPAWN_EXPERIMENTAL_CHAT=1` (or `experimental: {chat: true}` in
+  `~/.spawn/config.yaml`; the environment variable wins, so `=0` turns a file
+  opt-in off). Gated: the whole `spawn notify` group (alias `spawn bot`,
+  including `notify workspace …`, `notify register` and the deprecated
+  `notify workspace-*` shims), `spawn launch --slack-workspace` and
+  `--notify-platform`, and `spawn defaults set slack-workspace`.
+  - Without the opt-in a launch configures no chat notifications on the
+    instance: no notify URL, workspace, platform or slash command reaches the
+    launch config object, so spored starts no notifier. A
+    `defaults.slack_workspace` already in `~/.spawn/config.yaml` is ignored,
+    with a notice, rather than failing the launch; `spawn defaults unset
+    slack-workspace` still removes it.
+  - The dashboard API's Slack endpoints (`/api/slack/oauth`,
+    `/api/slack/oauth/callback`, `/api/slack/token/rotate`) answer 404 unless
+    the function's environment sets `SPAWN_EXPERIMENTAL_CHAT=1`, so the hosted
+    function turns them off on its next deploy. The release deploy checklist
+    now carries `// deploychecklist:note` lines from a Lambda's compiled code,
+    and dashboard-api's says to keep the variable unset.
+  - Unaffected: `--completion-webhook-url`, `--spot-webhook-url` and the
+    reaper's `REAPER_NOTIFY_URL`, which POST straight to your endpoint and do
+    not go through spore-bot. SMS notifications go through spore-bot's
+    registrations, so they are walled off with chat.
+
 ### Documentation
+
+- The chat reference (`docs-gen/notify.md`, the two launch flags and the
+  `slack-workspace` default) is kept and labelled experimental; `notify` is no
+  longer in the README's command list, which has an "Experimental" section
+  instead. `deployment/cloudformation/spore-bot.yaml` and
+  `bot-cross-account-role.yaml` carry an "experimental, unsupported in 1.0"
+  header, with no functional change.
 
 - The self-hosting spore-bot template (`deployment/cloudformation/spore-bot.yaml`)
   and `docs/infra-account.md` point to the new [Rotating bot

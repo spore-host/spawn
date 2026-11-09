@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
@@ -22,6 +23,9 @@ import (
 //     flat `notify workspace-*` shims;
 //   - `spawn launch --slack-workspace` and `--notify-platform`;
 //   - `spawn defaults set slack-workspace`.
+//
+// A `spawn sweep resume` of a sweep whose checkpoint records chat settings
+// drops them, with a notice, unless opted in (stripChatFromResumedBase).
 //
 // And on the launch path nothing chat-related reaches an instance: a stored
 // defaults.slack_workspace is ignored with a notice, and buildLaunchConfig
@@ -89,4 +93,24 @@ func chatGatePreRun(cmd *cobra.Command, args []string) error {
 // not being applied.
 func warnIgnoredChatDefault(key, value string) {
 	fmt.Fprintf(os.Stderr, "ℹ️  ignoring defaults.%s (%s) in ~/.spawn/config.yaml: %s\n", key, value, spawnconfig.ExperimentalChatRefusal)
+}
+
+// clearChatSettings blanks every chat setting in c and reports whether any
+// was set.
+func clearChatSettings(c *aws.LaunchConfig) bool {
+	had := c.SlackWorkspaceID != "" || c.NotifyURL != "" || c.NotifyCommand != "" || c.NotifyPlatform != ""
+	c.SlackWorkspaceID, c.NotifyURL, c.NotifyCommand, c.NotifyPlatform = "", "", "", ""
+	return had
+}
+
+// stripChatFromResumedBase drops the chat settings a sweep checkpoint recorded,
+// unless chat is opted in, so a resume configures no chat notifications on the
+// members it relaunches. Nil-safe: an older checkpoint has no member record.
+func stripChatFromResumedBase(member *SweepMemberRecord) {
+	if member == nil || chatEnabled() {
+		return
+	}
+	if clearChatSettings(&member.Base) {
+		fmt.Fprintf(os.Stderr, "ℹ️  this sweep was launched with chat notifications; resuming without them: %s\n", spawnconfig.ExperimentalChatRefusal)
+	}
 }

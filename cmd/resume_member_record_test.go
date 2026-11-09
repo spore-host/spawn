@@ -22,6 +22,7 @@ import (
 
 	"github.com/spore-host/spawn/internal/treewalk"
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/platform"
 )
 
@@ -199,6 +200,9 @@ func setSweepFlag(t *testing.T, dir, name string) string {
 // launched member's. A withheld setting is passed again, as the resume
 // requires.
 func TestResumedMemberIsTheLaunchedMember(t *testing.T) {
+	// Opted in to the experimental chat flags (chat_gate.go), so they are
+	// carried like every other flag.
+	t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
 	for _, n := range carriedSweepFlags(t) {
 		t.Run(n, func(t *testing.T) {
 			keepLaunchGlobals(t)
@@ -621,6 +625,8 @@ func TestMemberRecordRoundTripsEveryLaunchConfigField(t *testing.T) {
 // rebuild, re-render or re-upload anything, and the orchestrator must read
 // the launch's params on every invocation.
 func TestDetachedResumeRelaunchesFromParamsCarryingEveryFlag(t *testing.T) {
+	// Opted in to the experimental chat flags (chat_gate.go).
+	t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
 	pfOf := func(t *testing.T) (string, error) {
 		t.Helper()
 		base, err := sweepBaseConfig(context.Background())

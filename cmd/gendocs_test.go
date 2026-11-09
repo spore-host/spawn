@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/spore-host/libs/docgen"
 )
 
 // The committed reference fragments must correspond EXACTLY to the commands that
@@ -35,7 +33,7 @@ import (
 // disagree, whatever the cause — a fragment deleted by hand, a command added
 // without regenerating, or a future generator that writes somewhere new.
 func TestDocsGenFragmentsMatchTheCommandSetExactly(t *testing.T) {
-	frags, err := docgen.Generate(rootCmd, docgen.Options{CLIName: "spawn"})
+	frags, err := generateDocFragments()
 	if err != nil {
 		t.Fatalf("docgen.Generate: %v", err)
 	}

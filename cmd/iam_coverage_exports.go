@@ -16,6 +16,14 @@ func RootCommand() *cobra.Command {
 	return rootCmd
 }
 
+// ShowExperimentalChat un-hides the experimental chat commands (chat_gate.go)
+// until the returned func is called. The inventory, like docs-gen, keeps them:
+// a user who opts in with SPAWN_EXPERIMENTAL_CHAT=1 needs their permissions.
+func ShowExperimentalChat() (restore func()) {
+	applyChatVisibility(true)
+	return func() { applyChatVisibility(chatEnabled()) }
+}
+
 // BatchQueuePolicy is the inline policy of a batch queue's role (#1344).
 func BatchQueuePolicy(scheduleBucket, resultsBucket, resultsPrefix string) (string, error) {
 	return batchQueuePolicy(scheduleBucket, resultsBucket, resultsPrefix)

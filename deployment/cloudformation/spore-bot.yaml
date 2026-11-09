@@ -2,6 +2,14 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: 'spore-bot — Slack/Teams/Discord/SMS chat interface for instance control (spore.host + prism)'
 
+# EXPERIMENTAL — UNSUPPORTED IN 1.0. The chat-platform integrations this
+# template serves (Slack, Teams, Discord, and SMS through the same
+# registrations) are walled off for the 1.0 release (spore-host/spore-host#611,
+# #644): the spawn CLI's chat entry points refuse unless SPAWN_EXPERIMENTAL_CHAT=1,
+# and the hosted spore-bot is being decommissioned. The template is kept,
+# unchanged, so the feature can return after 1.0; deploy it only if you accept
+# running an unsupported component.
+#
 # SELF-HOSTING ONLY. This is the first-time setup for running your own spore-bot.
 # It is NOT how hosted spore.host deploys it: there the bot's code lives in the
 # spore-host repo (lambda/spore-bot, shipped with `make deploy`), its shape

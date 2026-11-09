@@ -217,6 +217,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A checkpoint from a launch with chat notifications replays them only
+	// with the opt-in (chat_gate.go); without it they are dropped, with a
+	// notice, and the rest of the sweep resumes.
+	stripChatFromResumedBase(member)
 	noteOldCheckpointSettings(state)
 	// The profile the original CLI IAM flags resolved to: the param file never
 	// held it, so without this a resumed row fell back to

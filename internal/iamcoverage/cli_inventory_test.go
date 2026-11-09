@@ -37,9 +37,13 @@ type cliCommand struct {
 }
 
 // cliCommands walks the live command tree. Hidden commands are internal
-// plumbing (doc generation, the bootstrap body) and are left out. rootPre are
+// plumbing (doc generation, the bootstrap body) and are left out, except the
+// experimental chat group, which is hidden only from help. rootPre are
 // the root's persistent pre-runs, which every command inherits.
 func cliCommands() (rootPre []any, runnable []cliCommand) {
+	// The experimental chat commands are hidden from help, not internal: the
+	// reference keeps them, for whoever opts in.
+	defer spawncmd.ShowExperimentalChat()()
 	root := spawncmd.RootCommand()
 	persistentOf := func(c *cobra.Command) []any {
 		var out []any

@@ -1,4 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
+# EXPERIMENTAL — UNSUPPORTED IN 1.0, like spore-bot.yaml, which it serves
+# (spore-host/spore-host#611). `spawn notify register` needs
+# SPAWN_EXPERIMENTAL_CHAT=1. No functional change.
 Description: >
   Cross-account IAM role that allows the spore-bot Lambda (in spore-host-infra)
   to perform EC2 operations on instances in this account.
