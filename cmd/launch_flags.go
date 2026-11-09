@@ -370,8 +370,14 @@ func init() {
 	launchCmd.Flags().StringVar(&userData, "user-data", "", "User data (@file or inline)")
 	launchCmd.Flags().StringVar(&userDataFile, "user-data-file", "", "User data file")
 	launchCmd.Flags().StringVar(&dnsName, "dns", "", "Override DNS name if different from --name (advanced)")
-	launchCmd.Flags().StringVar(&slackWorkspaceID, "slack-workspace", "", "Slack workspace ID for lifecycle notifications (e.g. T03NE3GTY)")
-	launchCmd.Flags().StringVar(&notifyPlatform, "notify-platform", "", "Chat platform for lifecycle notifications: slack (default), teams, or discord")
+	// Chat notifications are experimental and walled off (chat_gate.go,
+	// spore-host/spore-host#611): hidden, and refused by chatLaunchFlagsGate,
+	// without SPAWN_EXPERIMENTAL_CHAT=1.
+	launchCmd.Flags().StringVar(&slackWorkspaceID, "slack-workspace", "", "Experimental, needs SPAWN_EXPERIMENTAL_CHAT=1: Slack workspace ID for lifecycle notifications via spore-bot (e.g. T03NE3GTY)")
+	launchCmd.Flags().StringVar(&notifyPlatform, "notify-platform", "", "Experimental, needs SPAWN_EXPERIMENTAL_CHAT=1: chat platform for lifecycle notifications: slack (default), teams, or discord")
+	for _, n := range chatLaunchFlags {
+		_ = launchCmd.Flags().MarkHidden(n)
+	}
 	launchCmd.Flags().StringVar(&activePorts, "active-ports", "", "TCP ports whose established connections are counted and reported (the spawn:logged-in-count tag). They do NOT prevent the idle stop: an abandoned browser tab holds a connection open forever. To keep a busy app alive, use --active-processes (e.g. '8787' for RStudio, '8787,8888' for RStudio+Jupyter)")
 	launchCmd.Flags().StringVar(&activeProcesses, "active-processes", "", "Process names to monitor, prevents the idle stop while any are running (e.g. 'rsession' for RStudio, 'rsession,jupyter' for multiple)")
 	launchCmd.Flags().StringVar(&idleCPUThreshold, "idle-cpu-threshold", "", "CPU percentage below which spored counts the instance as idle (above 0, at most 100; default 5). Stored in the launch's config object, not a tag")
@@ -585,8 +591,14 @@ func applyLaunchDefaults(cmd *cobra.Command) {
 	if err != nil || d == nil {
 		return
 	}
+	// A stored chat default is applied only with the opt-in; without it the
+	// launch goes ahead without chat notifications and says why (chat_gate.go).
 	if !cmd.Flags().Changed("slack-workspace") && d.SlackWorkspace != "" {
-		slackWorkspaceID = d.SlackWorkspace
+		if chatEnabled() {
+			slackWorkspaceID = d.SlackWorkspace
+		} else {
+			warnIgnoredChatDefault("slack_workspace", d.SlackWorkspace)
+		}
 	}
 	if !cmd.Flags().Changed("active-processes") && d.ActiveProcesses != "" {
 		activeProcesses = d.ActiveProcesses

@@ -96,7 +96,6 @@ spawn list
 | `schedule` | Scheduled execution |
 | `sweep` | Parameter sweeps |
 | `sweep cancel` | Cancel a running parameter sweep |
-| `notify` | Chat notification (Slack/Teams) |
 | `slurm` | Convert Slurm sbatch scripts |
 | `resources` | List all AWS resources spawn has created (tagged `spawn:managed`) |
 | `orphans` | Report spawn-managed resources that look abandoned (billable leaks) |
@@ -217,6 +216,18 @@ forgotten session doesn't keep billing.
 To author or override catalog entries (your own images, an in-house app, or a
 pinned AMI), see **[docs/catalog-schema.md](docs/catalog-schema.md)** and the
 example overlay at **[docs/catalog-overlay.example.yaml](docs/catalog-overlay.example.yaml)**.
+
+## Experimental: chat-platform notifications
+
+Slack, Teams and Discord notifications (`spawn notify`, `spawn launch
+--slack-workspace` / `--notify-platform`, and the `slack-workspace` default) are
+**experimental and not supported in this release**. They are hidden from
+`--help` and refuse to run unless you opt in with `SPAWN_EXPERIMENTAL_CHAT=1`
+(or `experimental: {chat: true}` in `~/.spawn/config.yaml`). spore.host no
+longer hosts a bot, so even opted in they need your own self-hosted spore-bot
+(`SPORE_NOTIFY_URL`, `SPORE_BOT_LAMBDA_ROLE_ARN`). For lifecycle notices, use
+`--completion-webhook-url` and `--spot-webhook-url`, which POST straight to
+your own endpoint and are unaffected.
 
 ## spored
 

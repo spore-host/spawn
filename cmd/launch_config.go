@@ -315,11 +315,21 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 			config.DNSName = dnsName
 		}
 	}
+	// Chat settings reach the instance only with the opt-in (chat_gate.go):
+	// every path that builds a config (single, sweep, pipe, --dry-run) refuses
+	// them otherwise, so no default launch writes a notify URL, workspace or
+	// platform for spored to act on.
+	if (slackWorkspaceID != "" || notifyPlatform != "") && !chatEnabled() {
+		return nil, errChatExperimental
+	}
 	if slackWorkspaceID != "" {
 		config.SlackWorkspaceID = slackWorkspaceID
-		// The spore-bot Lambda Function URL — hard-coded for hosted spore.host;
-		// can be overridden via SPORE_NOTIFY_URL env var for self-hosted deployments.
-		notifyURL := spawnconfig.GetNotifyURL()
+		// The operator's own spore-bot: spore.host no longer hosts one, so
+		// there is no default to fall back to (spore-host/spore-host#611).
+		notifyURL, err := spawnconfig.ResolveNotifyURL()
+		if err != nil {
+			return nil, fmt.Errorf("--slack-workspace: %w", err)
+		}
 		config.NotifyURL = notifyURL
 		config.NotifyCommand = "/spore" // routes notifications to spore-bot workspace config
 	}

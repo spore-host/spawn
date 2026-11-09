@@ -10,14 +10,27 @@ import (
 var defaultsCmd = &cobra.Command{
 	Use:   "defaults",
 	Short: "Manage default launch settings (~/.spawn/config.yaml)",
-	Long: `Manage default values for spawn launch flags.
+	// Without the slack-workspace key: chat is experimental and hidden from
+	// help (chat_gate.go). applyChatVisibility re-renders it when opted in.
+	Long: defaultsLongHelp(false),
+}
+
+// defaultsLongHelp is `spawn defaults`' help. withChat lists the experimental
+// slack-workspace key, which is hidden unless chat is opted in.
+func defaultsLongHelp(withChat bool) string {
+	chatKey, chatExample := "", ""
+	if withChat {
+		chatKey = "  slack-workspace    Experimental, needs SPAWN_EXPERIMENTAL_CHAT=1: Slack workspace\n" +
+			"                     ID for lifecycle notifications (e.g. T03NE3GTY)\n"
+		chatExample = "  spawn defaults set slack-workspace T03NE3GTY\n"
+	}
+	return `Manage default values for spawn launch flags.
 
 Defaults are stored in ~/.spawn/config.yaml and applied whenever the
 corresponding flag is not explicitly provided on the command line.
 
 Valid keys:
-  slack-workspace    Slack workspace ID for lifecycle notifications (e.g. T03NE3GTY)
-  active-processes   Process names to monitor for idle detection (e.g. rsession)
+` + chatKey + `  active-processes   Process names to monitor for idle detection (e.g. rsession)
   active-ports       TCP ports to monitor for active connections (e.g. 8787)
   idle-timeout       Default idle timeout duration (e.g. 30m, 1h)
   hibernate-on-idle  Hibernate instead of stopping on idle (true/false)
@@ -29,12 +42,11 @@ Valid keys:
                      that launch in a dedicated account (e.g. spore-host-dev).
 
 Examples:
-  spawn defaults set slack-workspace T03NE3GTY
-  spawn defaults set active-processes rsession
+` + chatExample + `  spawn defaults set active-processes rsession
   spawn defaults set idle-timeout 1h
   spawn defaults set compute-profile spore-host-dev
   spawn defaults list
-  spawn defaults unset active-processes`,
+  spawn defaults unset active-processes`
 }
 
 var defaultsSetCmd = &cobra.Command{
@@ -43,6 +55,13 @@ var defaultsSetCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key, value := args[0], args[1]
+		// Setting a chat default is a chat entry point (chat_gate.go);
+		// unsetting one stays open, so a stored value can always be removed.
+		if chatDefaultKeys[key] && value != "" {
+			if err := requireChat(); err != nil {
+				return fmt.Errorf("%s: %w", key, err)
+			}
+		}
 		if err := spawnconfig.SetLaunchDefault(key, value); err != nil {
 			return err
 		}
@@ -78,6 +97,9 @@ var defaultsListCmd = &cobra.Command{
 		for _, key := range spawnconfig.KnownDefaultKeys() {
 			val := spawnconfig.GetDefaultValue(d, key)
 			if val != "" {
+				if chatDefaultKeys[key] && !chatEnabled() {
+					val += " (ignored: chat is experimental; set " + spawnconfig.ExperimentalChatEnv + "=1)"
+				}
 				fmt.Printf("%-20s %s\n", key, val)
 				any = true
 			}

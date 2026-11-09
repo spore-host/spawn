@@ -450,3 +450,71 @@ func TestRemovedInputsAndLambdasAreReported(t *testing.T) {
 		t.Errorf("a removed Lambda should name the mechanism that used to deploy it, got %s", got)
 	}
 }
+
+// TestDeployNotesComeFromTheCompiledCode: a `// deploychecklist:note` line in a
+// file compiled into a Lambda reaches that Lambda's checklist entry, in the
+// JSON and the markdown; one in a test file, in a package it does not compile,
+// or merely quoted in a string or a prose comment does not.
+func TestDeployNotesComeFromTheCompiledCode(t *testing.T) {
+	dir := newFixture(t, map[string]string{
+		"lambda/dash/main.go": "package main\n\n// deploychecklist:note keep FEATURE_X unset on the hosted function\n\n" +
+			"// Prose that mentions deploychecklist:note is not a note.\nvar s = \"// deploychecklist:note not a note either\"\n\nfunc main() { _ = s }\n",
+		"lambda/dash/main_test.go": "package main\n\n// deploychecklist:note from a test file\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n",
+		"pkg/unused/unused.go":     "package unused\n\n// deploychecklist:note from a package nothing compiles\nfunc H() int { return 2 }\n",
+	})
+	r, err := checklist(dir, "v1", "v2", goListCompile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := wantLambda(t, r, "lambda/dash", StatusChanged, KindCodeOnly)
+	want := "keep FEATURE_X unset on the hosted function (lambda/dash/main.go)"
+	if len(l.Notes) != 1 || l.Notes[0] != want {
+		t.Fatalf("dash notes = %q, want exactly [%q]", l.Notes, want)
+	}
+	for _, other := range r.Lambdas {
+		if other.ID != "lambda/dash" && len(other.Notes) > 0 {
+			t.Errorf("%s has notes %q from code it does not compile", other.ID, other.Notes)
+		}
+	}
+	var md bytes.Buffer
+	writeMarkdown(&md, r)
+	if !strings.Contains(md.String(), "  - [ ] note: "+want+"\n") {
+		t.Errorf("the markdown checklist does not carry the note:\n%s", md.String())
+	}
+}
+
+// TestSpawnDashboardAPICarriesTheChatGateNote: the real dashboard-api's note,
+// that its Slack endpoints stay off on the hosted function (spore-host#611), is
+// discovered from its compiled code.
+func TestSpawnDashboardAPICarriesTheChatGateNote(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := newTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := discover(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := inv.Lambdas["lambda/dashboard-api"]
+	if c == nil {
+		t.Fatal("lambda/dashboard-api was not discovered")
+	}
+	comp, err := goListCompile(tree, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes, err := deployNotes(tree, comp.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range notes {
+		if strings.Contains(n, "SPAWN_EXPERIMENTAL_CHAT") && strings.Contains(n, "spawn-dashboard-api") {
+			return
+		}
+	}
+	t.Errorf("dashboard-api's notes %q do not tell the deployer to keep SPAWN_EXPERIMENTAL_CHAT off the hosted function", notes)
+}

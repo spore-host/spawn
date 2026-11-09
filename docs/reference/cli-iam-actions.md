@@ -89,6 +89,7 @@ instances):
 | `spawn list-amis` | `ec2:DescribeImages`, `ec2:DescribeInstanceTypes`, `ssm:GetParameter` |
 | `spawn list-sweeps` | `dynamodb:Scan` |
 | `spawn logs` | `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:GetConsoleOutput`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
+| `spawn notify` | none |
 | `spawn notify deregister` | `dynamodb:DeleteItem` |
 | `spawn notify disable` | `dynamodb:UpdateItem` |
 | `spawn notify enable` | `dynamodb:UpdateItem` |

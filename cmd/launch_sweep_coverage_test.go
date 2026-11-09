@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	spawnconfig "github.com/spore-host/spawn/pkg/config"
 )
 
 // The launch-flag gate for parameter sweeps (#697, #1366).
@@ -218,6 +219,11 @@ func changedConfigFields(a, b aws.LaunchConfig) []string {
 //   - one said to act on the CLI alone must change neither;
 //   - one said to steer the sweep must be read by the sweep path's own code.
 func TestSweepFlagRulesHoldAgainstTheCode(t *testing.T) {
+	// The chat flags are experimental (chat_gate.go): opted in, so they are
+	// held to the same rule as every other carried flag.
+	t.Setenv(spawnconfig.ExperimentalChatEnv, "1")
+	// And the operator's own bot: spore.host hosts none (#611).
+	t.Setenv(spawnconfig.EnvNotifyURL, "https://bot.example.invalid")
 	steering := sweepSteeringSource(t)
 	vars := launchCmdFlagVars(t)
 	for _, n := range launchFlagNames(t) {

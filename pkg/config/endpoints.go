@@ -3,7 +3,9 @@ package config
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -131,12 +133,6 @@ func configComputeProfile() string {
 
 // ── Service endpoint URLs ─────────────────────────────────────────────────────
 
-// notifyURLs maps environment → hosted notification Lambda URL.
-var notifyURLs = map[Environment]string{
-	EnvProd:  "https://awdzf7fbbsvqcrnrzusqjsuybm0iiyvf.lambda-url.us-east-1.on.aws",
-	EnvInteg: "https://awdzf7fbbsvqcrnrzusqjsuybm0iiyvf.lambda-url.us-east-1.on.aws", // update when integ stack exists
-}
-
 // dnsEndpointURLs maps environment → hosted DNS Lambda URL.
 var dnsEndpointURLs = map[Environment]string{
 	EnvProd:  "https://zqonqra6blwh7342ujuxv3bwei0wnpyq.lambda-url.us-east-1.on.aws/",
@@ -152,15 +148,6 @@ var dnsEndpointURLs = map[Environment]string{
 // function name and account already pin it to the one updater.
 const DefaultDNSFunctionARN = "arn:aws:lambda:*:966362334030:function:spawn-dns-updater"
 
-// GetNotifyURL returns the notification Lambda callback URL.
-// Precedence: SPORE_NOTIFY_URL → environment-specific default.
-func GetNotifyURL() string {
-	if v := os.Getenv("SPORE_NOTIFY_URL"); v != "" {
-		return v
-	}
-	return notifyURLs[GetEnvironment()]
-}
-
 // GetDNSEndpointURL returns the DNS Lambda endpoint URL.
 // Precedence: SPORE_DNS_URL → environment-specific default.
 func GetDNSEndpointURL() string {
@@ -170,39 +157,85 @@ func GetDNSEndpointURL() string {
 	return dnsEndpointURLs[GetEnvironment()]
 }
 
-// ── Bot / notification registration ──────────────────────────────────────────
+// ── Bot / notification endpoints (experimental, self-hosted only) ──────────
 
-// SporeBotRoleName is the execution role of the hosted spore-bot Lambda. It is
-// a fixed name, created by spore-host's infra/tofu/spore-bot
-// (aws_iam_role.spore_bot), not one CloudFormation generated with a random
-// suffix, so recreating a stack cannot change it (#476, #1046).
-const SporeBotRoleName = "spore-bot-role"
-
-// DefaultBotLambdaRoleARN is the principal that SpawnBotCrossAccount roles
-// trust: the hosted spore-bot Lambda's execution role. It is the single source
-// for that ARN; deployment/cloudformation/bot-cross-account-role.yaml's
-// BotLambdaRoleArn default must equal it, and bot_principal_test.go fails the
-// build when any file in the repo names a different bot principal.
+// spore.host no longer hosts a chat bot (spore-host/spore-host#611): its Slack
+// apps, credentials, Function URL and execution role are gone. So the two
+// endpoints a chat feature needs have NO built-in default, and are used only
+// behind the experimental opt-in (ExperimentalChatEnabled):
 //
-// It was the prism-bot stack's auto-generated function role until #1046, which
-// spore-bot no longer runs as.
-const DefaultBotLambdaRoleARN = "arn:aws:iam::966362334030:role/" + SporeBotRoleName
+//   - SPORE_NOTIFY_URL, the self-hosted spore-bot's base URL (the
+//     LambdaFunctionUrl output of deployment/cloudformation/spore-bot.yaml),
+//     where spored POSTs lifecycle notifications;
+//   - SPORE_BOT_LAMBDA_ROLE_ARN, that bot's execution role, which the
+//     SpawnBotCrossAccount role `spawn notify register` creates trusts.
+//
+// Until #611 both fell back to the hosted bot. A value naming the retired
+// hosted bot is refused rather than used, so nothing can call it again.
+const (
+	EnvNotifyURL        = "SPORE_NOTIFY_URL"
+	EnvBotLambdaRoleARN = "SPORE_BOT_LAMBDA_ROLE_ARN"
+)
 
-// botLambdaRoleARNs maps environment → spore-bot Lambda execution role ARN
-// that cross-account IAM roles trust for bot operations.
-var botLambdaRoleARNs = map[Environment]string{
-	EnvProd:  DefaultBotLambdaRoleARN,
-	EnvInteg: DefaultBotLambdaRoleARN, // update when an integ stack exists
-}
+// retiredHostedBotURLMarkers are substrings of the retired hosted bot's
+// endpoints: its Lambda Function URL id and its API Gateway API id.
+var retiredHostedBotURLMarkers = []string{"awdzf7fbbsvqcrnrzusqjsuybm0iiyvf", "g8iytgzrn8"}
 
-// GetBotLambdaRoleARN returns the ARN of the spore-bot Lambda execution role.
-// Precedence: SPORE_BOT_LAMBDA_ROLE_ARN → environment-specific default.
-func GetBotLambdaRoleARN() string {
-	if v := os.Getenv("SPORE_BOT_LAMBDA_ROLE_ARN"); v != "" {
-		return v
+// retiredHostedBotAccount is the spore.host infra account that ran the hosted
+// bot. No self-hosted bot runs there, so any bot role in it is the retired one
+// (spore-bot-role, or the prism-bot stack's role before #1046).
+const retiredHostedBotAccount = "966362334030"
+
+// GetNotifyURL returns SPORE_NOTIFY_URL, or "" when it is unset. There is no
+// default; see ResolveNotifyURL.
+func GetNotifyURL() string { return strings.TrimSpace(os.Getenv(EnvNotifyURL)) }
+
+// GetBotLambdaRoleARN returns SPORE_BOT_LAMBDA_ROLE_ARN, or "" when it is
+// unset. There is no default; see ResolveBotLambdaRoleARN.
+func GetBotLambdaRoleARN() string { return strings.TrimSpace(os.Getenv(EnvBotLambdaRoleARN)) }
+
+// ResolveNotifyURL returns the operator's own spore-bot base URL, or an error
+// that says what to set. It is refused when unset, when it is not an https
+// URL with a host, and when it names the retired hosted bot.
+func ResolveNotifyURL() (string, error) {
+	v := GetNotifyURL()
+	if v == "" {
+		return "", fmt.Errorf("%s is not set: spore.host no longer hosts a chat bot, so chat notifications need your own self-hosted spore-bot; "+
+			"set %s to its base URL (the LambdaFunctionUrl output of deployment/cloudformation/spore-bot.yaml)", EnvNotifyURL, EnvNotifyURL)
 	}
-	return botLambdaRoleARNs[GetEnvironment()]
+	u, err := url.Parse(v)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return "", fmt.Errorf("%s must be an https:// URL with a host (your self-hosted spore-bot's base URL)", EnvNotifyURL)
+	}
+	for _, m := range retiredHostedBotURLMarkers {
+		if strings.Contains(strings.ToLower(u.Host), m) {
+			return "", fmt.Errorf("%s names spore.host's retired hosted bot (%s), which no longer exists; point it at your own self-hosted spore-bot", EnvNotifyURL, u.Host)
+		}
+	}
+	return v, nil
 }
+
+// ResolveBotLambdaRoleARN returns the operator's own spore-bot execution role
+// ARN, or an error that says what to set. It is refused when unset, when it is
+// not an IAM role ARN, and when it names the retired hosted bot's role.
+func ResolveBotLambdaRoleARN() (string, error) {
+	v := GetBotLambdaRoleARN()
+	if v == "" {
+		return "", fmt.Errorf("%s is not set: spore.host no longer hosts a chat bot, so the %s role must trust your own self-hosted spore-bot; "+
+			"set %s to its execution role ARN (`aws lambda get-function-configuration --function-name <bot> --query Role`), or pass --role-arn for a role you created", EnvBotLambdaRoleARN, "SpawnBotCrossAccount", EnvBotLambdaRoleARN)
+	}
+	m := roleARNRe.FindStringSubmatch(v)
+	if m == nil {
+		return "", fmt.Errorf("%s=%q is not an IAM role ARN (arn:aws:iam::<account>:role/<name>)", EnvBotLambdaRoleARN, v)
+	}
+	if m[1] == retiredHostedBotAccount && strings.Contains(strings.ToLower(m[2]), "bot") {
+		return "", fmt.Errorf("%s names spore.host's retired hosted bot role (%s), which no longer exists; name your own self-hosted spore-bot's execution role", EnvBotLambdaRoleARN, v)
+	}
+	return v, nil
+}
+
+// roleARNRe is an IAM role ARN: the account and the role name (with path).
+var roleARNRe = regexp.MustCompile(`^arn:aws[a-z-]*:iam::(\d{12}):role/(.+)$`)
 
 // ── Portal BYOA onboarding (phone-home) ──────────────────────────────────────
 

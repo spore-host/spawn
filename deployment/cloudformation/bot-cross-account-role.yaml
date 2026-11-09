@@ -1,7 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
+# EXPERIMENTAL — UNSUPPORTED IN 1.0, like spore-bot.yaml, which it serves
+# (spore-host/spore-host#611). `spawn notify register` needs
+# SPAWN_EXPERIMENTAL_CHAT=1.
+#
+# spore.host no longer hosts a bot, so this template has no default principal
+# and no default ExternalId: BotLambdaRoleArn must name YOUR self-hosted
+# spore-bot's execution role, and ExternalId must be a value of your own. The
+# old defaults (the hosted spore-bot-role, and the shared "<prefix>-bot"
+# ExternalId when none was given) trusted a bot that no longer exists.
 Description: >
-  Cross-account IAM role that allows the spore-bot Lambda (in spore-host-infra)
-  to perform EC2 operations on instances in this account.
+  Cross-account IAM role that allows a self-hosted spore-bot Lambda to perform
+  EC2 operations on instances in this account.
 
   Deploy this template in each AWS account that has instances you want to control
   via the Slack/Teams bot. The RoleArn output goes into `spawn bot register --role-arn`.
@@ -9,14 +18,12 @@ Description: >
 Parameters:
   BotLambdaRoleArn:
     Type: String
-    # Must equal DefaultBotLambdaRoleARN in pkg/config/endpoints.go (the
-    # principal `spawn notify register` trusts); bot_principal_test.go fails CI
-    # when they differ (#1046).
-    Default: arn:aws:iam::966362334030:role/spore-bot-role
+    # No Default: the hosted spore-bot's role is retired (spore-host#611), and
+    # bot_principal_test.go fails CI if a default principal comes back.
     Description: >
-      ARN of the spore-bot Lambda execution role in spore-host-infra. The
-      default is the hosted spore-bot's role; override it only for a
-      self-hosted spore-bot.
+      ARN of your self-hosted spore-bot Lambda's execution role (the same value
+      as SPORE_BOT_LAMBDA_ROLE_ARN for `spawn notify register`). Required:
+      spore.host no longer hosts a bot.
     AllowedPattern: 'arn:aws:iam::\d{12}:role/.+'
     ConstraintDescription: Must be a valid IAM role ARN
 
@@ -38,15 +45,15 @@ Parameters:
 
   ExternalId:
     Type: String
-    Default: ''
+    # No Default and no fallback: the legacy shared "<prefix>-bot" value is
+    # one spore-bot no longer presents (spore-host#413), so a role trusting it
+    # could never be assumed (spore-host#611).
+    MinLength: 16
     Description: >
       STS ExternalId the spore-bot Lambda must present when assuming this role.
-      Set it to a high-entropy value of your own (e.g. `openssl rand -hex 16`),
-      one per account, and register instances with that same value:
+      Required: a high-entropy value of your own (e.g. `openssl rand -hex 16`),
+      one per account. Register instances with that same value:
       `spawn notify register --role-arn <RoleArn output> --external-id <value>`.
-      Leaving it EMPTY writes the legacy shared value (TagPrefix + "-bot", e.g.
-      "spawn-bot"), which spore-bot no longer presents (spore-host#413), so the
-      bot cannot assume a role created that way.
 
   ScopeStartStopByTag:
     Type: String
@@ -64,7 +71,6 @@ Parameters:
       tag.
 
 Conditions:
-  UseCustomExternalId: !Not [!Equals [!Ref ExternalId, '']]
   ScopeByTag: !Equals [!Ref ScopeStartStopByTag, 'true']
   IsPrism: !Equals [!Ref TagPrefix, 'prism']
 
@@ -84,10 +90,9 @@ Resources:
             Action: sts:AssumeRole
             Condition:
               StringEquals:
-                # Per-account ExternalId when provided; otherwise the legacy
-                # shared "${TagPrefix}-bot", which spore-bot stopped presenting
-                # in spore-host#413 (see the ExternalId parameter).
-                sts:ExternalId: !If [UseCustomExternalId, !Ref ExternalId, !Sub '${TagPrefix}-bot']
+                # The per-account ExternalId; there is no shared fallback
+                # (spore-host#413, #611).
+                sts:ExternalId: !Ref ExternalId
       Policies:
         - PolicyName: BotEC2Policy
           PolicyDocument:
@@ -146,6 +151,5 @@ Outputs:
 
   ExternalId:
     Description: >
-      External ID required when assuming this role. The per-account value when
-      one was provided; otherwise the legacy shared value (TagPrefix + "-bot").
-    Value: !If [UseCustomExternalId, !Ref ExternalId, !Sub '${TagPrefix}-bot']
+      External ID required when assuming this role (the per-account value).
+    Value: !Ref ExternalId

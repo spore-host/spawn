@@ -115,7 +115,7 @@ spawn launch <name> [flags]
 | `--no-dns` |  | bool |  | Do not register DNS for this instance (by default spored registers the --name/--dns name). Overrides dns.enabled in ~/.spawn/config.yaml for this launch (#549) |
 | `--no-public-ip` |  | bool |  | Launch with private IPs only: no public IP on any interface, and no Elastic IP for a multi-card --efa launch, so the region's Elastic IP quota does not limit the fleet. Needs --subnet-id, or --az to let spawn pick a subnet. Before anything is created spawn checks that the subnet can reach what spored and the SSM agent need: a 0.0.0.0/0 route to a NAT gateway or to a working NAT instance (running, source/destination check off, a public IPv4 address, in a subnet routed to an internet gateway), or VPC endpoints for s3 (gateway), ec2, ssm, ssmmessages and ec2messages (interface, private DNS enabled), and refuses the launch if not. On an image other than Amazon's Amazon Linux or a spawn create-ami image built from it (stock Ubuntu, say), which may have no aws CLI, the bootstrap also downloads it from awscli.amazonaws.com, so without a NAT route that launch needs --bootstrap-egress proxy. A sweep checks each member's subnet, a detached one at --detach. spawn connect uses SSM. Refused with --dns and --wait-for-ssh; the DNS record --name implies is skipped |
 | `--no-timeout` |  | bool |  | Disable automatic timeout (NOT RECOMMENDED: creates zombie risk) |
-| `--notify-platform` |  | string |  | Chat platform for lifecycle notifications: slack (default), teams, or discord |
+| `--notify-platform` |  | string |  | Experimental, needs SPAWN_EXPERIMENTAL_CHAT=1: chat platform for lifecycle notifications: slack (default), teams, or discord |
 | `--on-complete` |  | string |  | Action when workload signals completion: terminate, stop, hibernate. Use 'terminate' for batch/headless workloads — 'stop' leaves EBS (and any attached EIP) billing indefinitely, which is easy to forget in accounts without a hosted reaper |
 | `--on-idle` |  | string |  | Action when the instance goes idle: stop (default) or hibernate. Mirrors --on-complete. NOTE: a stopped/hibernated instance keeps billing for its EBS volumes (and any attached Elastic IP) — for batch/headless work prefer --on-complete terminate so cost is fully bounded |
 | `--os` |  | string |  | Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset. |
@@ -140,7 +140,7 @@ spawn launch <name> [flags]
 | `--session-timeout` |  | string | `30m` | Auto-logout idle shells (0 to disable) |
 | `--skip-mpi-install` |  | bool |  | Skip MPI installation (use with custom AMIs that have MPI pre-installed) |
 | `--skip-region-check` |  | bool |  | Skip data locality region mismatch warnings |
-| `--slack-workspace` |  | string |  | Slack workspace ID for lifecycle notifications (e.g. T03NE3GTY) |
+| `--slack-workspace` |  | string |  | Experimental, needs SPAWN_EXPERIMENTAL_CHAT=1: Slack workspace ID for lifecycle notifications via spore-bot (e.g. T03NE3GTY) |
 | `--spot-max-price` |  | string |  | Max Spot price |
 | `--spot-webhook-url` |  | string |  | On spot interruption, spored POSTs a fire-once, best-effort notice to this URL within the ~2-min window (off-node consumers; empty = disabled) |
 | `--spot` |  | bool |  | Launch as Spot instance. With a stop-based lifecycle (--idle-timeout, --on-complete stop\|hibernate, --hibernate) the request is persistent so EC2 can stop it; otherwise one-time |

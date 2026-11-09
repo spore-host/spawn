@@ -41,6 +41,13 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		}, nil
 	}
 
+	// The Slack endpoints are experimental and off unless this function opts
+	// in (chat_gate.go): refused here, before any of them, and before the AWS
+	// config is loaded.
+	if resp, handled := chatEndpointGate(path); handled {
+		return resp, nil
+	}
+
 	// OAuth routes bypass authentication — they're called by Slack's redirect,
 	// not by an authenticated spore.host user.
 	if path == "/api/slack/oauth" && method == "GET" {

@@ -25,6 +25,12 @@ import (
 )
 
 func runLaunch(cmd *cobra.Command, args []string) error {
+	// Chat notifications are experimental (spore-host/spore-host#611): refuse
+	// --slack-workspace / --notify-platform without the opt-in, first, before
+	// any AWS call and ahead of every dispatch below.
+	if err := chatLaunchFlagsGate(cmd); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	waitForSSHSet = cmd.Flags().Changed("wait-for-ssh")
 	var kerr error

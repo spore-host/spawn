@@ -6,7 +6,8 @@ Defaults are stored in ~/.spawn/config.yaml and applied whenever the
 corresponding flag is not explicitly provided on the command line.
 
 Valid keys:
-  slack-workspace    Slack workspace ID for lifecycle notifications (e.g. T03NE3GTY)
+  slack-workspace    Experimental, needs SPAWN_EXPERIMENTAL_CHAT=1: Slack workspace
+                     ID for lifecycle notifications (e.g. T03NE3GTY)
   active-processes   Process names to monitor for idle detection (e.g. rsession)
   active-ports       TCP ports to monitor for active connections (e.g. 8787)
   idle-timeout       Default idle timeout duration (e.g. 30m, 1h)

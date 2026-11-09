@@ -24,7 +24,7 @@ var gendocsCmd = &cobra.Command{
 	Hidden: true,
 	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		frags, err := docgen.Generate(rootCmd, docgen.Options{CLIName: "spawn"})
+		frags, err := generateDocFragments()
 		if err != nil {
 			return fmt.Errorf("generate docs: %w", err)
 		}
@@ -93,4 +93,15 @@ var gendocsCmd = &cobra.Command{
 func init() {
 	gendocsCmd.Flags().StringVar(&gendocsOut, "out", "docs-gen", "Output directory for generated reference fragments")
 	rootCmd.AddCommand(gendocsCmd)
+}
+
+// generateDocFragments is the reference gen-docs writes. It keeps the
+// experimental chat commands and flags, each labelled experimental in its own
+// text, whatever this shell opts in to: the fragments must not depend on
+// SPAWN_EXPERIMENTAL_CHAT (chat_gate.go). The drift gate compares against
+// this, not a bare docgen.Generate, so the two cannot disagree about it.
+func generateDocFragments() (map[string][]byte, error) {
+	applyChatVisibility(true)
+	defer applyChatVisibility(chatEnabled())
+	return docgen.Generate(rootCmd, docgen.Options{CLIName: "spawn"})
 }

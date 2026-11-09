@@ -44,6 +44,10 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 	// Commands deliberately deferred to Tier 2/3 (real instance / SSH / spored /
 	// SQS / external integration that Substrate's control-plane emulation can't
 	// faithfully serve), each with a reason.
+	//
+	// `notify` is not here: chat notifications are experimental and hidden
+	// from `spawn --help` unless SPAWN_EXPERIMENTAL_CHAT=1 (cmd/chat_gate.go,
+	// spore-host/spore-host#611), so it is not in the live set this reads.
 	deferred := map[string]string{
 		"connect":         "Tier 2: real SSH to a booted instance",
 		"extend":          "Tier 2: SSH → spored reload on a live instance",
@@ -57,7 +61,6 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"slurm":           "Tier 3: real Slurm submit/cluster",
 		"burst":           "Tier 3: cross-account burst needs real dev-account identity",
 		"onboard":         "Tier 2/3: real IAM CreateRole + SigV4 phone-home POST to the AuthType:AWS_IAM Function URL; role-creation + verified-caller flow needs a real account (validate/signing logic unit-tested)",
-		"notify":          "Tier 1/3: external notification delivery",
 		"dns":             "Tier 2: Route53 + live instance public IP",
 		"fsx":             "Tier 2/3: FSx lifecycle against a real filesystem",
 		"capacity-block":  "Tier 1/3: real DescribeCapacityBlockOfferings; purchase is a non-refundable write never run in CI (typed-gate logic unit-tested in cmd)",
