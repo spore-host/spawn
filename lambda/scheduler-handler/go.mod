@@ -15,7 +15,6 @@ require (
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.339.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/iam v1.53.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.17.24 // indirect
 )
 

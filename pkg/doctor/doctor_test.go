@@ -21,6 +21,7 @@ type mockProber struct {
 	vpcErr          error
 	ssmErr          error
 	reaperErr       error
+	sweepRoleErr    error
 	nitroErr        error
 	route53Err      error
 	truffleErr      error
@@ -46,6 +47,9 @@ func (m mockProber) VPCAndSubnet(context.Context) (string, error) {
 }
 func (m mockProber) SSMAvailable(context.Context) (string, error)     { return "reachable", m.ssmErr }
 func (m mockProber) ReaperConfigured(context.Context) (string, error) { return "enforce", m.reaperErr }
+func (m mockProber) SweepCrossAccountRole(context.Context) (string, error) {
+	return "SpawnSweepCrossAccountRole, policy v1 (current)", m.sweepRoleErr
+}
 func (m mockProber) Route53Available(context.Context) (string, error) {
 	return "12 zones", m.route53Err
 }

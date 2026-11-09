@@ -19,7 +19,9 @@ import (
 
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/orgaccount"
 	"github.com/spore-host/spawn/pkg/sshkey"
+	"github.com/spore-host/spawn/pkg/sweep"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
 )
 
@@ -174,6 +176,60 @@ func (p *awsProber) SporedRolePresent(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("not found (spawn creates it on first launch)")
 	}
 	return "spored-instance-profile", nil
+}
+
+// sweepRoleManagementAccount is a seam over orgaccount for the prober.
+var sweepRoleManagementAccount = func(ctx context.Context, cfg awssdk.Config) (string, error) {
+	return orgaccount.ManagementAccount(ctx, orgaccount.New(cfg))
+}
+
+func (p *awsProber) SweepCrossAccountRole(ctx context.Context) (string, error) {
+	acct, err := p.client.GetAccountID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("could not resolve the account: %w", err)
+	}
+	cfg := p.cfg
+	if cfg.Region == "" {
+		cfg.Region = "us-east-1"
+	}
+	st, err := aws.InspectSweepCrossAccountRole(ctx, aws.NewSweepRoleIAM(cfg))
+	return sweepRoleVerdict(ctx, acct, st, err, func(ctx context.Context) (string, error) {
+		return sweepRoleManagementAccount(ctx, cfg)
+	})
+}
+
+// sweepRoleVerdict is the sweep role check's result from what was found.
+func sweepRoleVerdict(ctx context.Context, acct string, st aws.SweepRoleState, inspectErr error, mgmt aws.ManagementAccountLookup) (string, error) {
+	// The orchestrator's account is not known here (it is the infra
+	// credentials'); the account itself is checked as both ends.
+	refusal := aws.CheckSweepRoleAccounts(ctx, acct, acct, mgmt, func(string) {})
+	if inspectErr != nil {
+		return "", fmt.Errorf("could not read %s (%v); detached sweeps check it again, and create it if it is missing", sweep.CrossAccountRoleName, inspectErr)
+	}
+	switch {
+	case refusal != nil && st.Exists:
+		return "", fmt.Errorf("%w: %s exists in account %s, where spawn never creates it (%v). Delete it with 'spawn sweep teardown'",
+			ErrMustRemove, sweep.CrossAccountRoleName, acct, refusal)
+	case refusal != nil:
+		return "", fmt.Errorf("detached sweeps cannot run in this account, so spawn will not create %s here (%v); "+
+			"use --no-detach, or a compute profile in a member account", sweep.CrossAccountRoleName, refusal)
+	case !st.Exists:
+		return "", fmt.Errorf("%s not created yet: the first detached sweep (or 'spawn sweep setup') creates it", sweep.CrossAccountRoleName)
+	}
+	trust := "trusts " + strings.Join(st.Principals, ", ")
+	mine := aws.SweepRolePolicySchema()
+	switch {
+	case st.Schema > mine:
+		return fmt.Sprintf("%s, policy v%d (written by a newer spawn; this one writes v%d), %s", sweep.CrossAccountRoleName, st.Schema, mine, trust), nil
+	case st.Schema == mine && !st.Legacy:
+		return fmt.Sprintf("%s, policy v%d (current), %s", sweep.CrossAccountRoleName, st.Schema, trust), nil
+	case st.Schema == 0:
+		return "", fmt.Errorf("%s has the policy the setup script wrote, not spawn's v%d; the next detached sweep "+
+			"(or 'spawn sweep setup') updates it", sweep.CrossAccountRoleName, mine)
+	default:
+		return "", fmt.Errorf("%s has policy v%d, older than this spawn's v%d; the next detached sweep (or 'spawn sweep setup') updates it",
+			sweep.CrossAccountRoleName, st.Schema, mine)
+	}
 }
 
 func (p *awsProber) VPCAndSubnet(ctx context.Context) (string, error) {

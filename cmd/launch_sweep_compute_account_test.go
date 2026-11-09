@@ -12,7 +12,6 @@ import (
 
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
-	"github.com/spore-host/spawn/pkg/sweep"
 )
 
 // The keys of the fake profiles computeAccountSweep defines. teamDevKey is the
@@ -71,10 +70,11 @@ func computeAccountSweep(t *testing.T, roleErr error, setup func(home string)) (
 	stubTeamName(t)
 
 	roleKeys, clientKeys = &keyRecorder{}, &keyRecorder{}
-	role := &roleIAMFake{err: roleErr}
+	role := &roleIAMFake{err: roleErr, createErr: errCreateRoleDenied}
+	stubSweepRoleBoundary(t)
 	prevRole := sweepRoleIAM
 	t.Cleanup(func() { sweepRoleIAM = prevRole })
-	sweepRoleIAM = func(cfg awssdk.Config) sweep.RoleGetter { roleKeys.add(t, cfg); return role }
+	sweepRoleIAM = func(cfg awssdk.Config) aws.SweepRoleIAM { roleKeys.add(t, cfg); return role }
 	prevClient := newComputeClient
 	t.Cleanup(func() { newComputeClient = prevClient })
 	newComputeClient = func(ctx context.Context, region string) (*aws.Client, error) {

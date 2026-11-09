@@ -1,0 +1,123 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LaunchAndCancelMembers",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:DescribeInstances",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeSecurityGroups",
+        "ec2:CreateTags",
+        "ec2:TerminateInstances",
+        "ec2:CancelSpotInstanceRequests"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DeleteManagedPlacementGroups",
+      "Effect": "Allow",
+      "Action": "ec2:DeletePlacementGroup",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "PassSpawnInstanceRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::111122223333:role/spored-instance-role",
+        "arn:aws:iam::111122223333:role/spawnd-role",
+        "arn:aws:iam::111122223333:role/spawn-instance-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "DenyPassNestedSpawnRoles",
+      "Effect": "Deny",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::111122223333:role/spawn-instance-nested-*"
+      ]
+    },
+    {
+      "Sid": "EgressProxyCreateManagedGroups",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:*:111122223333:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "EgressProxyCreateGroupsInVPC",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:*:111122223333:vpc/*"
+    },
+    {
+      "Sid": "EgressProxyManageManagedGroupRules",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress"
+      ],
+      "Resource": "arn:aws:ec2:*:111122223333:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "EgressProxyProbeProxies",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:*:111122223333:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/spawn:managed": "true"
+        },
+        "StringLike": {
+          "ssm:resourceTag/spawn:egress-proxy": "vpc-*"
+        }
+      }
+    },
+    {
+      "Sid": "EgressProxyProbeDocument",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ssm:*::document/AWS-RunShellScript"
+    },
+    {
+      "Sid": "EgressProxyProbeResult",
+      "Effect": "Allow",
+      "Action": "ssm:GetCommandInvocation",
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateSpotServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::111122223333:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot",
+      "Condition": {
+        "StringLike": {
+          "iam:AWSServiceName": "spot.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
