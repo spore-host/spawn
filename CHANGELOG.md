@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- The self-hosting spore-bot template (`deployment/cloudformation/spore-bot.yaml`)
+  and `docs/infra-account.md` point to the new [Rotating bot
+  credentials](https://docs.spore.host/guides/rotating-bot-credentials) guide
+  (spore-host/spore-host#611, #868). On a stack, rotate a secret with a stack update that
+  keeps the other parameters, not `update-function-configuration`.
+
 ## [0.162.0] - 2026-11-09
 
 ### Added

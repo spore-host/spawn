@@ -30,6 +30,13 @@ Description: 'spore-bot — Slack/Teams/Discord/SMS chat interface for instance 
 # UsePreviousValue=true (or re-supply it): a parameter omitted from an update
 # resets to its default, which here is empty, and the bot fails closed without
 # it (see docs/infra-account.md, "Known traps").
+#
+# Rotating a secret: change its parameter with a stack update that keeps every
+# other parameter (UsePreviousValue=true), not with
+# `aws lambda update-function-configuration`, which the next stack update
+# reverts. The per-workspace credentials in the workspaces table are rotated
+# separately. Both procedures:
+# https://docs.spore.host/guides/rotating-bot-credentials
 
 Parameters:
   Environment:
