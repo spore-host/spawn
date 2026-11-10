@@ -37,6 +37,9 @@ type fakeSporedIAM struct {
 	errs        map[string]error // operation -> the error it returns
 	// beforeAttach, if set, runs once at the first AttachRolePolicy.
 	beforeAttach func()
+	// attachLag makes AttachRolePolicy answer NoSuchEntity this many more
+	// times for a policy that exists: IAM's eventual consistency.
+	attachLag int
 
 	// The no-window check: once the role grants every action in required,
 	// it must keep granting them after every call.
@@ -44,6 +47,11 @@ type fakeSporedIAM struct {
 	covered  bool
 	gaps     []string
 	checkT   *testing.T
+}
+
+func init() {
+	// The fake is consistent; nothing to wait for.
+	iamConsistencyWait = func(int) {}
 }
 
 func newFakeSporedIAM() *fakeSporedIAM {
@@ -200,6 +208,10 @@ func (f *fakeSporedIAM) AttachRolePolicy(_ context.Context, in *iam.AttachRolePo
 		return nil, err
 	}
 	p, ok := f.managed[arn]
+	if ok && f.attachLag > 0 {
+		f.attachLag--
+		ok = false
+	}
 	if !ok {
 		return nil, &types.NoSuchEntityException{Message: aws.String("Policy " + arn + " does not exist or is not attachable.")}
 	}
@@ -795,5 +807,23 @@ func TestSporedManagedPolicyARNPartition(t *testing.T) {
 	g.Partition = "aws-us-gov"
 	if got := g.managedARN(); got != "arn:aws-us-gov:iam::123456789012:policy/spore-host/spored-policy-v1" || !isSporedManagedPolicyARN(got) {
 		t.Errorf("GovCloud: %s", got)
+	}
+}
+
+// A policy just created is not yet attachable (IAM's eventual consistency):
+// spawn waits for it rather than falling back to inline, which on a full
+// role would fail the launch.
+func TestSporedGrants_NewPolicyNotYetVisibleIsWaitedFor(t *testing.T) {
+	g := sporedGrantKinds(t)[0]
+	f := newFakeSporedIAM()
+	f.attachLag = attachConsistencyTries - 1
+	if err := putSporedGrants(context.Background(), f, "r", g, noWarn(t)); err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(f.attached, []string{g.managedARN()}) || countPrefix(f.calls, "Put ") != 0 {
+		t.Errorf("attached %v, calls %v", f.attached, f.calls)
+	}
+	if n := countPrefix(f.calls, "CreatePolicy "); n != 1 {
+		t.Errorf("CreatePolicy called %d times, want 1", n)
 	}
 }

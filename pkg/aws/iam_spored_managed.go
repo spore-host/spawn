@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -322,13 +323,24 @@ func ensureSporedPolicyAttached(ctx context.Context, api sporedPolicyAPI, role s
 		if onRole {
 			return ""
 		}
-		err := retryIAMWrite(func() error {
-			_, e := api.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
-				RoleName:  aws.String(role),
-				PolicyArn: aws.String(arn),
+		// IAM is eventually consistent: a policy created a moment ago, here or
+		// by a concurrent launch, can be NoSuchEntity to AttachRolePolicy for
+		// a few seconds. Falling back to inline then would fail the very
+		// launch #1573 is for, on a role with no inline room, so wait for it.
+		var err error
+		for try := 0; try < attachConsistencyTries; try++ {
+			err = retryIAMWrite(func() error {
+				_, e := api.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+					RoleName:  aws.String(role),
+					PolicyArn: aws.String(arn),
+				})
+				return e
 			})
-			return e
-		})
+			if !isNoSuchEntity(err) || try == attachConsistencyTries-1 {
+				break
+			}
+			iamConsistencyWait(try)
+		}
 		switch {
 		case err == nil:
 			return ""
@@ -351,6 +363,15 @@ func ensureSporedPolicyAttached(ctx context.Context, api sporedPolicyAPI, role s
 	}
 	return fmt.Sprintf("the managed policy %s, or IAM role %s, disappeared while spawn was attaching it", arn, role)
 }
+
+// attachConsistencyTries bounds the wait for a new policy to be attachable:
+// iamConsistencyWait sleeps 0.5 s, 1 s, 1.5 s, 2 s between the tries, so 5 s
+// in all.
+const attachConsistencyTries = 5
+
+// iamConsistencyWait sleeps before retry try+1 of an IAM call that may be
+// waiting on IAM's eventual consistency. A variable so tests need not wait.
+var iamConsistencyWait = func(try int) { time.Sleep(time.Duration(try+1) * 500 * time.Millisecond) }
 
 // ensureSporedPolicy makes g's managed policy exist with g's document. It
 // returns a reason the managed path is unavailable, or gone when the policy
