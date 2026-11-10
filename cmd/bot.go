@@ -379,30 +379,36 @@ var botWorkspaceCmd = &cobra.Command{
 
 var botWorkspaceAddCmd = &cobra.Command{
 	Use:   "add",
-	Short: "Register a Slack/Teams workspace's bot token and signing secret",
-	Long: `Store the Slack bot token and signing secret for a workspace so the
-spore-bot Lambda can verify incoming slash command requests.
+	Short: "Register a Slack, Teams or Discord workspace's bot credentials",
+	Long: `Store a workspace's bot credentials so the spore-bot Lambda can verify
+incoming requests and reply to them. Credentials are stored encrypted.
 
-Run this once after installing the Slack app in a workspace:
+What each platform needs:
+
+  slack    --bot-token and --signing-secret (the Slack app's signing secret)
+  teams    --bot-token (the Azure Bot client secret). No --signing-secret:
+           spore-bot verifies Teams requests with Bot Framework tokens, and
+           refuses a Teams workspace that carries one. Never pass the bot's
+           App ID; it is public.
+  discord  --public-key (the application's Ed25519 public key)
+
+Run this once after installing the app in a workspace:
 
   spawn notify workspace add \
     --platform slack \
     --workspace-id T03NE3GTY \
     --workspace-name "My Workspace" \
     --bot-token xoxb-... \
-    --signing-secret abc123...`,
+    --signing-secret abc123...
+
+  spawn notify workspace add \
+    --platform teams \
+    --workspace-id <TEAMS_TENANT_ID> \
+    --bot-token <AZURE_BOT_CLIENT_SECRET>`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if botPlatform == "" || botWorkspaceID == "" {
-			return fmt.Errorf("--platform and --workspace-id are required")
-		}
-		// Discord verifies interactions with an Ed25519 application public key, not
-		// a signing secret; Slack/Teams require the signing secret (#2).
-		if botPlatform == "discord" {
-			if botPublicKey == "" {
-				return fmt.Errorf("--public-key is required for discord (the application's Ed25519 public key)")
-			}
-		} else if botSigningSecret == "" {
-			return fmt.Errorf("--signing-secret is required")
+		if err := validateWorkspaceAdd(botPlatform, botWorkspaceID, botSigningSecret, botPublicKey,
+			cmd.Flags().Changed("signing-secret")); err != nil {
+			return err
 		}
 		ctx := context.Background()
 		cfg, err := loadAWSConfig(ctx, "")
@@ -478,6 +484,10 @@ var botWorkspaceListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// On stderr, so --json output stays parseable.
+		for _, warning := range teamsSigningSecretWarnings(wss) {
+			fmt.Fprintln(os.Stderr, warning)
+		}
 		if botJSONOutput || getOutputFormat() == "json" {
 			return writeWorkspacesJSON(os.Stdout, wss)
 		}
@@ -499,6 +509,55 @@ var botWorkspaceListCmd = &cobra.Command{
 		return w.Flush()
 	},
 }
+
+// validateWorkspaceAdd checks `notify workspace add`'s flags before any AWS
+// call. Discord verifies interactions with an Ed25519 application public key;
+// Slack signs requests with the app's signing secret; Teams requests carry a
+// Bot Framework token, so a Teams workspace takes no signing secret at all and
+// one given is refused (bot.ErrTeamsSigningSecret), even an empty one.
+func validateWorkspaceAdd(platform, workspaceID, signingSecret, publicKey string, signingSecretSet bool) error {
+	if platform == "" || workspaceID == "" {
+		return fmt.Errorf("--platform and --workspace-id are required")
+	}
+	switch strings.ToLower(platform) {
+	case "discord":
+		if publicKey == "" {
+			return fmt.Errorf("--public-key is required for discord (the application's Ed25519 public key)")
+		}
+	case bot.PlatformTeams:
+		if signingSecretSet || signingSecret != "" {
+			return fmt.Errorf("--signing-secret: %w", bot.ErrTeamsSigningSecret)
+		}
+	default:
+		if signingSecret == "" {
+			return fmt.Errorf("--signing-secret is required for %s", platform)
+		}
+	}
+	return nil
+}
+
+// teamsSigningSecretWarnings returns one warning per Teams workspace in wss
+// whose stored item still holds a signing secret. spore-bot never reads it,
+// and the value once documented for it (the Azure Bot App ID) is public. It
+// names the workspace and the presence of the attribute, never the value.
+func teamsSigningSecretWarnings(wss []bot.Workspace) []string {
+	var out []string
+	for i := range wss {
+		ws := &wss[i]
+		if !ws.IsTeams() || !ws.HasCredential(botsecret.SigningSecret) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("Warning: Teams workspace %s still stores a signing secret. "+
+			"spore-bot does not use it. Remove it, delete your users' stored Teams conversation "+
+			"references and rotate the Azure Bot client secret, as step 3 of %s describes.",
+			ws.WorkspaceKey, teamsSetupGuideURL))
+	}
+	return out
+}
+
+// teamsSetupGuideURL is the Teams setup guide, whose step 3 says how to remove
+// a stored Teams signing secret.
+const teamsSetupGuideURL = "https://docs.spore.host/guides/teams-setup"
 
 // ── workspace-destroy ─────────────────────────────────────────────────────────
 
@@ -798,8 +857,8 @@ func init() {
 		sub.Flags().StringVar(&botWorkspacesTable, "table", "", "Override DynamoDB workspaces table name")
 	}
 	botWorkspaceAddCmd.Flags().StringVar(&botWorkspaceName, "workspace-name", "", "Human-friendly workspace name")
-	botWorkspaceAddCmd.Flags().StringVar(&botBotToken, "bot-token", "", "Bot token (Slack xoxb-..., or Discord bot token)")
-	botWorkspaceAddCmd.Flags().StringVar(&botSigningSecret, "signing-secret", "", "Slack/Teams signing secret (required for slack/teams)")
+	botWorkspaceAddCmd.Flags().StringVar(&botBotToken, "bot-token", "", "Bot token (Slack xoxb-..., Teams Azure Bot client secret, or Discord bot token)")
+	botWorkspaceAddCmd.Flags().StringVar(&botSigningSecret, "signing-secret", "", "Slack app signing secret (required for slack; refused for teams)")
 	botWorkspaceAddCmd.Flags().StringVar(&botPublicKey, "public-key", "", "Discord application public key (Ed25519, hex; required for discord)")
 	botWorkspaceAddCmd.Flags().StringVar(&botWebhookURL, "webhook-url", "", "Channel webhook URL for notifications (Discord channel webhook, or manual Slack incoming webhook)")
 	botWorkspaceAddCmd.Flags().StringSliceVar(&botAllowedChannels, "allowed-channels", nil, "Restrict commands to specific channel IDs (e.g. C12345,C67890). Empty = all channels.")

@@ -153,10 +153,19 @@ spawn notify workspace
 
 #### `spawn notify workspace add`
 
-Store the Slack bot token and signing secret for a workspace so the
-spore-bot Lambda can verify incoming slash command requests.
+Store a workspace's bot credentials so the spore-bot Lambda can verify
+incoming requests and reply to them. Credentials are stored encrypted.
 
-Run this once after installing the Slack app in a workspace:
+What each platform needs:
+
+  slack    --bot-token and --signing-secret (the Slack app's signing secret)
+  teams    --bot-token (the Azure Bot client secret). No --signing-secret:
+           spore-bot verifies Teams requests with Bot Framework tokens, and
+           refuses a Teams workspace that carries one. Never pass the bot's
+           App ID; it is public.
+  discord  --public-key (the application's Ed25519 public key)
+
+Run this once after installing the app in a workspace:
 
   spawn notify workspace add \
     --platform slack \
@@ -164,6 +173,11 @@ Run this once after installing the Slack app in a workspace:
     --workspace-name "My Workspace" \
     --bot-token xoxb-... \
     --signing-secret abc123...
+
+  spawn notify workspace add \
+    --platform teams \
+    --workspace-id <TEAMS_TENANT_ID> \
+    --bot-token <AZURE_BOT_CLIENT_SECRET>
 
 ```
 spawn notify workspace add [flags]
@@ -174,11 +188,11 @@ spawn notify workspace add [flags]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--allowed-channels` |  | stringSlice |  | Restrict commands to specific channel IDs (e.g. C12345,C67890). Empty = all channels. |
-| `--bot-token` |  | string |  | Bot token (Slack xoxb-..., or Discord bot token) |
+| `--bot-token` |  | string |  | Bot token (Slack xoxb-..., Teams Azure Bot client secret, or Discord bot token) |
 | `--connect-ttl` |  | int |  | Max /spore connect code lifetime in hours (0 = use platform default, typically 24h). Can only lower the platform default. |
 | `--platform` |  | string |  | Chat platform: slack, teams, or discord |
 | `--public-key` |  | string |  | Discord application public key (Ed25519, hex; required for discord) |
-| `--signing-secret` |  | string |  | Slack/Teams signing secret (required for slack/teams) |
+| `--signing-secret` |  | string |  | Slack app signing secret (required for slack; refused for teams) |
 | `--table` |  | string |  | Override DynamoDB workspaces table name |
 | `--webhook-url` |  | string |  | Channel webhook URL for notifications (Discord channel webhook, or manual Slack incoming webhook) |
 | `--workspace-id` |  | string |  | Platform workspace ID |
