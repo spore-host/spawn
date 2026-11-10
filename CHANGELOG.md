@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.163.0] - 2026-11-10
+
 ### Changed
 
 - **Chat-platform integrations (Slack, Teams, Discord) are experimental and
@@ -13670,7 +13672,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.162.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.163.0...HEAD
+[0.163.0]: https://github.com/spore-host/spawn/compare/v0.162.0...v0.163.0
 [0.162.0]: https://github.com/spore-host/spawn/compare/v0.161.0...v0.162.0
 [0.161.0]: https://github.com/spore-host/spawn/compare/v0.160.0...v0.161.0
 [0.160.0]: https://github.com/spore-host/spawn/compare/v0.159.0...v0.160.0
