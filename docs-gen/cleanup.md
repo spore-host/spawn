@@ -45,7 +45,10 @@ runs out; the schedules are read from spawn's infra account (as 'spawn
 schedule' does), and if they cannot be read no role is deleted. The shared spored-instance-role is never touched. IAM is
 global, so this always checks every enabled region whatever --region says, and
 covers every principal's roles. The TTL reaper applies the same rule
-(REAPER_INSTANCE_ROLES).
+(REAPER_INSTANCE_ROLES). It also deletes spawn's spored managed policies
+(/spore-host/spored-*-v&lt;N&gt;) that no role has attached and that are at least 24
+hours old; the reaper detaches them from the roles it deletes but does not
+delete them.
 
 --pool-queues deletes only the SQS queues of pools nobody drained
 (spawn-pool-&lt;run id&gt;) and the task specs their submitters staged in the

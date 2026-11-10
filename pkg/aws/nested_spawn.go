@@ -373,5 +373,5 @@ func (c *Client) SetupNestedSpawnProfile(ctx context.Context) (string, error) {
 		RoleName:         NestedSpawnRoleName(),
 		InlinePolicyJSON: doc,
 		Tags:             map[string]string{"spawn:purpose": "nested-spawn"},
-	}, c.nestedSpawnBaselinePolicyDoc())
+	}, c.nestedSpawnBaselinePolicyDoc(), sporedNestedBaselinePolicyBase)
 }

@@ -31,6 +31,46 @@ func storedPolicy(t *testing.T, ic *iam.Client, role, name string) string {
 	return doc
 }
 
+// storedSporedGrant is the document of spawn's managed policy name, read back
+// from IAM, failing the test unless it is attached to role (#1573: the spored
+// grants are a managed policy, not inline).
+func storedSporedGrant(t *testing.T, ic *iam.Client, role, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	arn := ""
+	p := iam.NewListAttachedRolePoliciesPaginator(ic, &iam.ListAttachedRolePoliciesInput{RoleName: aws.String(role)})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			t.Fatalf("ListAttachedRolePolicies %s: %v", role, err)
+		}
+		for _, a := range page.AttachedPolicies {
+			if aws.ToString(a.PolicyName) == name && isSporedManagedPolicyARN(aws.ToString(a.PolicyArn)) {
+				arn = aws.ToString(a.PolicyArn)
+			}
+		}
+	}
+	if arn == "" {
+		t.Fatalf("%s has no managed policy %s%s attached", role, sporedPolicyPath, name)
+	}
+	pol, err := ic.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(arn)})
+	if err != nil {
+		t.Fatalf("GetPolicy %s: %v", arn, err)
+	}
+	if got := aws.ToString(pol.Policy.Path); got != sporedPolicyPath {
+		t.Errorf("%s is at path %q, want %q", arn, got, sporedPolicyPath)
+	}
+	v, err := ic.GetPolicyVersion(ctx, &iam.GetPolicyVersionInput{PolicyArn: aws.String(arn), VersionId: pol.Policy.DefaultVersionId})
+	if err != nil {
+		t.Fatalf("GetPolicyVersion %s: %v", arn, err)
+	}
+	doc := aws.ToString(v.PolicyVersion.Document)
+	if d, err := url.QueryUnescape(doc); err == nil {
+		doc = d
+	}
+	return doc
+}
+
 func assertBound(t *testing.T, what, doc, account string) {
 	t.Helper()
 	assertNoPlaceholder(t, what, doc)
@@ -66,14 +106,14 @@ func TestEverySporedPolicyIsWrittenBoundToTheAccount(t *testing.T) {
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatalf("SetupSporedIAMRole: %v", err)
 	}
-	assertBound(t, sporedRolePolicyName()+" (SetupSporedIAMRole)", storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()), acct)
+	assertBound(t, sporedRolePolicyName()+" (SetupSporedIAMRole)", storedSporedGrant(t, ic, SporedRoleName, sporedRolePolicyName()), acct)
 
 	// --iam-policy: the inline policy AND the baseline on the generated role.
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-1069", Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatalf("CreateOrGetInstanceProfile: %v", err)
 	}
 	assertNoPlaceholder(t, "spawn-inline-policy (createIAMRole)", storedPolicy(t, ic, "spawn-test-1069", "spawn-inline-policy"))
-	assertBound(t, sporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-1069", sporedBaselinePolicyName()), acct)
+	assertBound(t, sporedBaselinePolicyName(), storedSporedGrant(t, ic, "spawn-test-1069", sporedBaselinePolicyName()), acct)
 
 	// The same role again, with a different policy: the update path.
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-1069", Policies: []string{"s3:ReadWrite"}}); err != nil {
@@ -120,7 +160,7 @@ func TestEnsureDNSInvokeGrantIsWrittenBesideTheBaseline(t *testing.T) {
 	if doc := storedPolicy(t, ic, SporedRoleName, DNSInvokePolicyName(fn)); !strings.Contains(doc, `"Resource":"`+fn+`"`) {
 		t.Errorf("custom grant = %s, want Resource %s", doc, fn)
 	}
-	if doc := storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()); strings.Contains(doc, fn) {
+	if doc := storedSporedGrant(t, ic, SporedRoleName, sporedRolePolicyName()); strings.Contains(doc, fn) {
 		t.Errorf("the custom function reached the shared baseline, where the next launch would overwrite it:\n%s", doc)
 	}
 	if DNSInvokePolicyName(fn) == DNSInvokePolicyName("arn:aws:lambda:eu-west-1:444455556666:function:spawn-dns-updater") {

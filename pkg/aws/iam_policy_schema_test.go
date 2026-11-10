@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -20,23 +19,16 @@ import (
 // #1558: the spored roles are shared by every spawn version that launches in
 // the account. These tests replay the mixed-version sequences against a fake
 // IAM that enforces the inline-policy size cap, and then once against the
-// emulator.
+// emulator. Those calling putVersionedRolePolicy test the versioned inline
+// write, which the spored roles fall back to when they cannot use a managed
+// policy (#1573, iam_spored_managed_test.go) and SpawnSweepCrossAccountRole
+// always uses.
 
 const testAccount = "123456789012"
 
 // inlinePolicyLimit is IAM's cap on a role's inline policies together, in
 // characters, whitespace not counted.
 const inlinePolicyLimit = 10240
-
-func nonSpaceLen(s string) int {
-	n := 0
-	for _, r := range s {
-		if !unicode.IsSpace(r) {
-			n++
-		}
-	}
-	return n
-}
 
 // fakeRolePolicies is one role's inline policies.
 type fakeRolePolicies struct {
@@ -506,9 +498,17 @@ func TestSporedPolicySchemaPinsTheDocuments(t *testing.T) {
 	}
 }
 
-// The state an old CLI leaves after a new one (two spored copies), and the most
-// a schema bump makes while it runs (two again), must fit IAM's cap on every
-// role kind, or the old CLI's own launch fails at PutRolePolicy.
+// The inline cap on every role kind, in both of the ways a role holds the
+// spored grants (#1573).
+//
+// Managed (the normal case): the grants are not inline at all, so what must
+// fit is the role's other policies plus the copy an old CLI then writes,
+// or the old CLI's own launch fails at PutRolePolicy. A schema bump after it
+// writes nothing inline either.
+//
+// Inline (the fallback, when the caller may not create or attach a managed
+// policy): the state an old CLI leaves after a new one (two spored copies),
+// and the most a schema bump makes while it runs (two again), must fit.
 func TestSporedRolesFitTheInlineLimitWhenMixed(t *testing.T) {
 	c := &Client{}
 	baseline := bound(t, c.sporedBaselinePolicyDoc())
@@ -540,15 +540,16 @@ func TestSporedRolesFitTheInlineLimitWhenMixed(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		base    string
-		doc     string
-		others  map[string]string // what else the new CLI leaves on the role
-		oldOnes map[string]string // what an old CLI then writes
+		name        string
+		base        string
+		managedBase string
+		doc         string
+		others      map[string]string // what else the new CLI leaves on the role
+		oldOnes     map[string]string // what an old CLI then writes
 	}{
 		{
 			name: "spored-instance-role, two custom DNS updaters",
-			base: sporedRolePolicyBase, doc: bound(t, sporedDCVRolePolicy),
+			base: sporedRolePolicyBase, managedBase: sporedRolePolicyBase, doc: bound(t, sporedDCVRolePolicy),
 			others: map[string]string{
 				DNSInvokePolicyName("arn:aws:lambda:us-east-1:111122223333:function:a"): dnsGrant("arn:aws:lambda:us-east-1:111122223333:function:a"),
 				DNSInvokePolicyName("arn:aws:lambda:us-east-1:111122223333:function:b"): dnsGrant("arn:aws:lambda:us-east-1:111122223333:function:b"),
@@ -557,13 +558,13 @@ func TestSporedRolesFitTheInlineLimitWhenMixed(t *testing.T) {
 		},
 		{
 			name: "nested-spawn role",
-			base: sporedBaselinePolicyBase, doc: bound(t, c.nestedSpawnBaselinePolicyDoc()),
+			base: sporedBaselinePolicyBase, managedBase: sporedNestedBaselinePolicyBase, doc: bound(t, c.nestedSpawnBaselinePolicyDoc()),
 			others:  map[string]string{"spawn-scoped-policy": bound(t, nestedSpawnPolicyDoc())},
 			oldOnes: map[string]string{sporedBaselinePolicyBase: bound(t, c.nestedSpawnBaselinePolicyDoc())},
 		},
 		{
 			name: "spawn-instance-* with every --iam-policy template",
-			base: sporedBaselinePolicyBase, doc: baseline,
+			base: sporedBaselinePolicyBase, managedBase: sporedBaselinePolicyBase, doc: baseline,
 			others: map[string]string{"spawn-inline-policy": string(newInline)},
 			oldOnes: map[string]string{
 				sporedBaselinePolicyBase: baseline,
@@ -572,29 +573,45 @@ func TestSporedRolesFitTheInlineLimitWhenMixed(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			role := newFakeRole()
-			for n, d := range tc.others {
-				role.policies[n] = d
-			}
-			// new, old, then a schema bump: the fake refuses any write over the cap.
-			if err := putVersionedRolePolicy(ctx, role, "r", tc.base, tc.doc, 1, noWarn(t)); err != nil {
-				t.Fatalf("new CLI: %v", err)
-			}
-			for n, d := range tc.oldOnes {
-				role.oldCLIWrites(t, n, d)
-			}
-			if err := putVersionedRolePolicy(ctx, role, "r", tc.base, tc.doc, 2, noWarn(t)); err != nil {
-				t.Fatalf("schema bump on a mixed role: %v", err)
-			}
-			t.Logf("peak %d of %d characters", role.peak, inlinePolicyLimit)
-		})
+		for _, managed := range []bool{true, false} {
+			mode := map[bool]string{true: "managed", false: "inline fallback"}[managed]
+			t.Run(tc.name+", "+mode, func(t *testing.T) {
+				ctx := context.Background()
+				role := newFakeSporedIAM()
+				for n, d := range tc.others {
+					role.policies[n] = d
+				}
+				g := sporedGrant{InlineBase: tc.base, ManagedBase: tc.managedBase, Doc: tc.doc, Account: testAccount, Schema: 1}
+				warn := noWarn(t)
+				if !managed {
+					for _, v := range []int{1, 2} {
+						role.errs["CreatePolicy "+g.at(v, tc.doc).managedARN()] = accessDenied("iam:CreatePolicy")
+					}
+					warn = func(string) {} // the fallback warns, by design
+				}
+				// new, old, then a schema bump: the fake refuses any write over the cap.
+				if err := putSporedGrants(ctx, role, "r", g, warn); err != nil {
+					t.Fatalf("new CLI: %v", err)
+				}
+				for n, d := range tc.oldOnes {
+					role.oldCLIWrites(t, n, d)
+				}
+				if err := putSporedGrants(ctx, role, "r", g.at(2, tc.doc), warn); err != nil {
+					t.Fatalf("schema bump on a mixed role: %v", err)
+				}
+				if managed && countPrefix(role.calls, "Put "+tc.base+"-v") != 0 {
+					t.Errorf("the managed path wrote inline: %v", role.calls)
+				}
+				t.Logf("peak %d of %d characters", role.peak, inlinePolicyLimit)
+			})
+		}
 	}
 }
 
 // Against the emulator: the policies a real launch writes, an old CLI's write
-// in between, and what is left after each step.
+// in between, and what is left after each step. Since #1573 the spored grants
+// are the managed policy; inline, only what older CLIs wrote, until the next
+// launch removes it.
 func TestSporedRoles_MixedVersionsAgainstIAM(t *testing.T) {
 	env := testutil.SubstrateServer(t)
 	ctx := context.Background()
@@ -604,6 +621,8 @@ func TestSporedRoles_MixedVersionsAgainstIAM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Inline policies by name, and spawn's attached managed ones as
+	// "managed:<name>".
 	roleDocs := func(role string) map[string]string {
 		t.Helper()
 		out, err := ic.ListRolePolicies(ctx, &iam.ListRolePoliciesInput{RoleName: aws.String(role)})
@@ -613,6 +632,15 @@ func TestSporedRoles_MixedVersionsAgainstIAM(t *testing.T) {
 		docs := map[string]string{}
 		for _, n := range out.PolicyNames {
 			docs[n] = storedPolicy(t, ic, role, n)
+		}
+		att, err := ic.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{RoleName: aws.String(role)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range att.AttachedPolicies {
+			if n := aws.ToString(a.PolicyName); isSporedManagedPolicyARN(aws.ToString(a.PolicyArn)) {
+				docs["managed:"+n] = storedSporedGrant(t, ic, role, n)
+			}
 		}
 		return docs
 	}
@@ -629,23 +657,34 @@ func TestSporedRoles_MixedVersionsAgainstIAM(t *testing.T) {
 		}
 	}
 	has := func(docs map[string]string, name string) bool { _, ok := docs[name]; return ok }
+	only := func(docs map[string]string, want ...string) bool {
+		spawn := []string{}
+		for _, k := range keys(docs) {
+			if strings.HasPrefix(k, "managed:") || strings.HasPrefix(k, "spored-") {
+				spawn = append(spawn, k)
+			}
+		}
+		sort.Strings(want)
+		return equalStrings(spawn, want)
+	}
 
-	// spored-instance-role: new, then v0.161.0, then new.
+	// spored-instance-role: new, then v0.161.0, then v0.162.0, then new.
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatal(err)
 	}
 	docs := roleDocs(SporedRoleName)
-	if !has(docs, sporedRolePolicyName()) || has(docs, sporedRolePolicyBase) {
-		t.Fatalf("after a new launch %s carries %v, want %s and not %s", SporedRoleName, keys(docs), sporedRolePolicyName(), sporedRolePolicyBase)
+	if !only(docs, "managed:"+sporedRolePolicyName()) {
+		t.Fatalf("after a new launch %s carries %v, want only the managed %s", SporedRoleName, keys(docs), sporedRolePolicyName())
 	}
 	oldWrite(SporedRoleName, sporedRolePolicyBase, docWithout(t, sporedDCVRolePolicy, spotPrice))
+	oldWrite(SporedRoleName, sporedRolePolicyName(), sporedDCVRolePolicy)
 	if !grantedActions(t, roleDocs(SporedRoleName))[spotPrice] {
-		t.Fatalf("v0.161.0 after the new CLI stripped %s from %s (#1558)", spotPrice, SporedRoleName)
+		t.Fatalf("older CLIs after the new one stripped %s from %s (#1558)", spotPrice, SporedRoleName)
 	}
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if docs := roleDocs(SporedRoleName); has(docs, sporedRolePolicyBase) || !grantedActions(t, docs)[spotPrice] {
+	if docs := roleDocs(SporedRoleName); !only(docs, "managed:"+sporedRolePolicyName()) || !grantedActions(t, docs)[spotPrice] {
 		t.Errorf("after new, old, new %s carries %v", SporedRoleName, keys(docs))
 	}
 
@@ -654,19 +693,65 @@ func TestSporedRoles_MixedVersionsAgainstIAM(t *testing.T) {
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: role, Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatal(err)
 	}
-	oldWrite(role, sporedBaselinePolicyBase, docWithout(t, c.sporedBaselinePolicyDoc(), spotPrice))
-	if _, err := ic.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{RoleName: aws.String(role), PolicyName: aws.String(sporedBaselinePolicyName())}); err != nil {
+	baselineARN := sporedManagedPolicyARN(acct, sporedBaselinePolicyName())
+	if _, err := ic.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{RoleName: aws.String(role), PolicyArn: aws.String(baselineARN)}); err != nil {
 		t.Fatal(err)
 	}
+	oldWrite(role, sporedBaselinePolicyBase, docWithout(t, c.sporedBaselinePolicyDoc(), spotPrice))
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: role, Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatal(err)
 	}
 	docs = roleDocs(role)
-	if has(docs, sporedBaselinePolicyBase) || !has(docs, sporedBaselinePolicyName()) || !grantedActions(t, docs)[spotPrice] {
+	if !only(docs, "managed:"+sporedBaselinePolicyName()) || !grantedActions(t, docs)[spotPrice] {
 		t.Errorf("old then new: %s carries %v", role, keys(docs))
 	}
-	if strings.Contains(docs["spawn-inline-policy"], "ec2:DescribeTags") {
-		t.Error("spawn-inline-policy still carries a copy of the spored grants")
+	if !has(docs, "spawn-inline-policy") || strings.Contains(docs["spawn-inline-policy"], "ec2:DescribeTags") {
+		t.Error("spawn-inline-policy is missing, or still carries a copy of the spored grants")
+	}
+}
+
+// The deleters, against the emulator: deleting a spawn-instance-* role
+// deletes the baseline's managed policy only with the last role that has it,
+// and never spored-instance-role's.
+func TestSporedManagedPolicyIsDeletedWithItsLastRole(t *testing.T) {
+	env := testutil.SubstrateServer(t)
+	ctx := context.Background()
+	c := NewClientFromConfig(env.AWSConfig)
+	ic := env.IAMClient()
+	acct, _, err := c.GetCallerIdentityInfo(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []string{"spawn-instance-a1", "spawn-instance-b2"} {
+		if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: r, Policies: []string{"s3:ReadOnly"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exists := func(name string) bool {
+		t.Helper()
+		_, err := ic.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(sporedManagedPolicyARN(acct, name))})
+		if err != nil && !isNoSuchEntity(err) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+	if err := c.DeleteInstanceProfileAndRole(ctx, "spawn-instance-a1"); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(sporedBaselinePolicyName()) {
+		t.Fatal("the baseline policy was deleted while spawn-instance-b2 still has it attached")
+	}
+	if err := c.DeleteInstanceProfileAndRole(ctx, "spawn-instance-b2"); err != nil {
+		t.Fatal(err)
+	}
+	if exists(sporedBaselinePolicyName()) {
+		t.Error("the baseline policy outlived the last role that had it")
+	}
+	if !exists(sporedRolePolicyName()) {
+		t.Error("spored-instance-role's policy was deleted")
 	}
 }
 

@@ -64,12 +64,18 @@ import (
 //     still needs it, or when taking it away from them is the point.
 //
 // Size. IAM caps a role's inline policies at 10,240 characters together
-// (whitespace not counted). Where a role carries an older versioned policy, the
-// older copies beneath it are deleted before this version is written and the
-// newest one after, so a role never holds more than two spored copies while
-// this runs. A role an old CLI launched on after this one carries two
-// (the old CLI's and this one); TestSporedRolesFitTheInlineLimitWhenMixed
-// holds every role kind to the limit in that state.
+// (whitespace not counted), and the spored roles share that budget with
+// everything else on them. On a lived-in spored-instance-role the inline copy
+// this file describes did not fit (#1573), so the spored roles now carry their
+// grants as a customer-managed policy, named the same way and versioned the
+// same way; see iam_spored_managed.go. The inline write below is what they fall
+// back to when the caller's IAM cannot create or attach one, and what
+// SpawnSweepCrossAccountRole, a role spawn alone writes to, still uses. Where
+// a role carries an older inline version, the older copies beneath it are
+// deleted before this version is written and the newest one after, so a role
+// never holds more than two inline copies while it runs.
+// TestSporedRolesFitTheInlineLimitWhenMixed holds every role kind to the limit
+// in that state.
 
 // sporedPolicySchema is the version of the spored grant documents this CLI
 // writes. Bump it whenever sporedDCVRolePolicy, the spored baseline, or the
@@ -115,16 +121,24 @@ func parseVersionedPolicyName(base, name string) (int, bool) {
 	return v, true
 }
 
-// sporedRolePolicyName is the inline policy this CLI writes to
-// spored-instance-role.
+// sporedRolePolicyName is the policy this CLI gives spored-instance-role: the
+// managed policy's name at sporedPolicyPath, and the inline name it falls back
+// to.
 func sporedRolePolicyName() string {
 	return versionedPolicyName(sporedRolePolicyBase, sporedPolicySchema)
 }
 
-// sporedBaselinePolicyName is the inline policy this CLI writes to every
-// spawn-instance-* and nested-spawn role.
+// sporedBaselinePolicyName is the policy this CLI gives every spawn-instance-*
+// role: the managed policy's name, and the inline name it (and the nested-spawn
+// role, whose managed policy is sporedNestedBaselinePolicyName) falls back to.
 func sporedBaselinePolicyName() string {
 	return versionedPolicyName(sporedBaselinePolicyBase, sporedPolicySchema)
+}
+
+// sporedNestedBaselinePolicyName is the managed policy this CLI attaches to
+// the nested-spawn role.
+func sporedNestedBaselinePolicyName() string {
+	return versionedPolicyName(sporedNestedBaselinePolicyBase, sporedPolicySchema)
 }
 
 // rolePolicyAPI is the part of the IAM client putVersionedRolePolicy uses.
@@ -149,6 +163,15 @@ func warnSporedPolicy(msg string) {
 // it warns that it could not check for a newer one. A failed delete is a
 // warning too: the grants it leaves are a subset of the ones written.
 func putVersionedRolePolicy(ctx context.Context, api rolePolicyAPI, role, base, doc string, schema int, warn func(string)) error {
+	names, err := listRolePolicyNames(ctx, api, role)
+	return writeInlineVersion(ctx, api, role, base, doc, schema, names, err, warn)
+}
+
+// writeInlineVersion is putVersionedRolePolicy with the role's inline policy
+// names already listed (names, or listErr if they could not be). The spored
+// roles reach it only as the fallback of putSporedGrants (#1573), which has
+// already deferred to a newer managed version on the role.
+func writeInlineVersion(ctx context.Context, api rolePolicyAPI, role, base, doc string, schema int, names []string, listErr error, warn func(string)) error {
 	mine := versionedPolicyName(base, schema)
 	put := func() error {
 		err := retryIAMWrite(func() error {
@@ -165,11 +188,10 @@ func putVersionedRolePolicy(ctx context.Context, api rolePolicyAPI, role, base, 
 		return nil
 	}
 
-	names, err := listRolePolicyNames(ctx, api, role)
-	if err != nil {
+	if listErr != nil {
 		warn(fmt.Sprintf("could not list the inline policies of IAM role %s (%v): writing %s without checking for a "+
 			"newer spawn's grants or removing the ones it replaces. Grant iam:ListRolePolicies and "+
-			"iam:DeleteRolePolicy on the role to let spawn keep it tidy (#1558).", role, err, mine))
+			"iam:DeleteRolePolicy on the role to let spawn keep it tidy (#1558).", role, listErr, mine))
 		return put()
 	}
 
@@ -191,10 +213,7 @@ func putVersionedRolePolicy(ctx context.Context, api rolePolicyAPI, role, base, 
 	}
 
 	if newest > schema {
-		warn(fmt.Sprintf("IAM role %s carries %s, written by a newer spawn (policy schema v%d; this spawn writes v%d). "+
-			"Leaving the role's grants as that version set them: they include this version's, so instances "+
-			"launched now get them. Upgrade spawn to stop this warning (#1558).",
-			role, versionedPolicyName(base, newest), newest, schema))
+		warnNewerSchema(warn, role, versionedPolicyName(base, newest), newest, schema)
 		return nil
 	}
 

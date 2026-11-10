@@ -488,14 +488,16 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 		return "", NestedSpawnRoleReservedError("IAM role", config.RoleName,
 			"spawn would create or rewrite its grants, which are fixed so they can be audited")
 	}
-	return c.createOrGetInstanceProfile(ctx, config, c.sporedBaselinePolicyDoc())
+	return c.createOrGetInstanceProfile(ctx, config, c.sporedBaselinePolicyDoc(), sporedBaselinePolicyBase)
 }
 
 // createOrGetInstanceProfile is CreateOrGetInstanceProfile with the baseline
 // document as a parameter: every caller gets the spored baseline except the
 // --nested-spawn role, whose baseline differs in one condition (#39, see
-// nestedSpawnBaselinePolicyDoc).
-func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig, baselineDoc string) (string, error) {
+// nestedSpawnBaselinePolicyDoc). managedBase names the managed policy the
+// baseline is attached as (#1573): one per document, since a managed policy
+// name is per account.
+func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig, baselineDoc, managedBase string) (string, error) {
 	iamClient := iam.NewFromConfig(c.cfg)
 
 	// Generate role name if not provided
@@ -539,7 +541,7 @@ func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 	// PolicyFile path had never received the spawn#406 fix that the other two
 	// policy sources did; this makes the guarantee independent of the branch
 	// taken instead of per-branch, so a future policy source can't reopen it).
-	if err := c.ensureSporedBaselinePolicy(ctx, iamClient, roleName, baselineDoc); err != nil {
+	if err := c.ensureSporedBaselinePolicy(ctx, iamClient, roleName, baselineDoc, managedBase); err != nil {
 		return "", err
 	}
 
@@ -1545,24 +1547,50 @@ func (c *Client) ensureSSMManagedPolicy(ctx context.Context, iamClient *iam.Clie
 	return nil
 }
 
-// ensureSporedBaselinePolicy attaches the spored self-management inline policy
-// to roleName, as the versioned sporedBaselinePolicyName (#1558,
-// putVersionedRolePolicy). Safe to call on every role on every call — new,
-// pre-existing, and any policy source (Policies/PolicyFile/InlinePolicyJSON/
-// managed-policies-only). Without these grants spored cannot read its own
-// instance tags, so TTL, --on-complete and --pre-stop silently never fire
-// (spawn#502 — the PolicyFile path never received the spawn#406 fix that the
-// other two policy sources did, because it was attached per-branch instead of
-// unconditionally here).
+// ensureSporedBaselinePolicy gives roleName the spored self-management
+// grants: attached as the customer-managed policy managedBase-v<schema> where
+// the caller's IAM allows it, written inline as the versioned
+// sporedBaselinePolicyName where it does not (#1573, putSporedGrants; #1558).
+// Safe to call on every role on every call — new, pre-existing, and any policy
+// source (Policies/PolicyFile/InlinePolicyJSON/managed-policies-only).
+// Without these grants spored cannot read its own instance tags, so TTL,
+// --on-complete and --pre-stop silently never fire (spawn#502 — the PolicyFile
+// path never received the spawn#406 fix that the other two policy sources did,
+// because it was attached per-branch instead of unconditionally here).
 //
 // The role is shared by every launch with the same IAM configuration, from any
 // spawn version, which is why the write is versioned rather than an overwrite.
-func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.Client, roleName, baselineDoc string) error {
-	doc, err := c.sporedPolicyDoc(ctx, baselineDoc)
+// It is a managed policy because the role's inline budget is shared with the
+// caller's own policies: --iam-policy-file and the task staging policy are
+// inline, a caller-named --iam-role carries whatever its owner put on it, and
+// IAM caps them all together at 10,240 characters.
+func (c *Client) ensureSporedBaselinePolicy(ctx context.Context, iamClient *iam.Client, roleName, baselineDoc, managedBase string) error {
+	return c.putSporedGrants(ctx, iamClient, roleName, sporedBaselinePolicyBase, managedBase, baselineDoc)
+}
+
+// putSporedGrants binds template to the caller's account and gives it to role
+// (putSporedGrants, #1573).
+func (c *Client) putSporedGrants(ctx context.Context, api sporedPolicyAPI, role, inlineBase, managedBase, template string) error {
+	acct, callerARN, err := c.GetCallerIdentityInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve the account for the spored policy: %w", err)
+	}
+	doc, err := bindPolicyAccount(template, acct)
 	if err != nil {
 		return err
 	}
-	return putVersionedRolePolicy(ctx, iamClient, roleName, sporedBaselinePolicyBase, doc, sporedPolicySchema, warnSporedPolicy)
+	partition := "aws"
+	if parts := strings.SplitN(callerARN, ":", 3); len(parts) == 3 && parts[0] == "arn" && parts[1] != "" {
+		partition = parts[1]
+	}
+	return putSporedGrants(ctx, api, role, sporedGrant{
+		InlineBase:  inlineBase,
+		ManagedBase: managedBase,
+		Doc:         doc,
+		Account:     acct,
+		Partition:   partition,
+		Schema:      sporedPolicySchema,
+	}, warnSporedPolicy)
 }
 
 // SetupSporedIAMRole is the OTHER instance-profile resolution path (see the
@@ -1614,15 +1642,13 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		}
 	}
 
-	// 2. Attach inline policy to role (sporedDCVRolePolicy, defined below),
+	// 2. Give the role spored's grants (sporedDCVRolePolicy, defined below),
 	// bound to this account (#1069). Every launch in the account that names no
 	// IAM shares this role, whatever spawn version it runs, so the policy is
-	// written versioned and never overwrites a newer spawn's grants (#1558).
-	dcvDoc, err := c.sporedPolicyDoc(ctx, sporedDCVRolePolicy)
-	if err != nil {
-		return "", err
-	}
-	if err := putVersionedRolePolicy(ctx, iamClient, roleName, sporedRolePolicyBase, dcvDoc, sporedPolicySchema, warnSporedPolicy); err != nil {
+	// versioned and never overwrites a newer spawn's grants (#1558). It is
+	// attached as a managed policy, not inline, because the role's inline
+	// budget is shared with whatever else the account puts on it (#1573).
+	if err := c.putSporedGrants(ctx, iamClient, roleName, sporedRolePolicyBase, sporedRolePolicyBase, sporedDCVRolePolicy); err != nil {
 		return "", fmt.Errorf("failed to attach policy to role: %w", err)
 	}
 

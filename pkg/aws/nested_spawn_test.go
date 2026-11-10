@@ -214,7 +214,7 @@ func TestNestedSpawnLeavesTheDefaultRoleUnchanged(t *testing.T) {
 	if !jsonEqual(t, grant, want) {
 		t.Errorf("stored nested grant is not the nested policy:\n%s", grant)
 	}
-	baseline := storedPolicy(t, ic, profile, sporedBaselinePolicyName())
+	baseline := storedSporedGrant(t, ic, profile, sporedNestedBaselinePolicyName())
 	wantBase, _ := bindPolicyAccount(c.nestedSpawnBaselinePolicyDoc(), acct)
 	if !jsonEqual(t, baseline, wantBase) {
 		t.Errorf("nested role's baseline is not the tag-on-create variant:\n got  %s\n want %s", baseline, wantBase)
@@ -275,29 +275,6 @@ func jsonEqual(t *testing.T, a, b string) bool {
 		t.Fatalf("not JSON: %v\n%s", err, b)
 	}
 	return reflect.DeepEqual(normalizePolicyJSON(x), normalizePolicyJSON(y))
-}
-
-// normalizePolicyJSON folds a one-element list to its element: IAM treats
-// ["a"] and "a" alike, and the emulator stores the short form.
-func normalizePolicyJSON(v interface{}) interface{} {
-	switch x := v.(type) {
-	case []interface{}:
-		if len(x) == 1 {
-			return normalizePolicyJSON(x[0])
-		}
-		out := make([]interface{}, len(x))
-		for i, e := range x {
-			out[i] = normalizePolicyJSON(e)
-		}
-		return out
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(x))
-		for k, e := range x {
-			out[k] = normalizePolicyJSON(e)
-		}
-		return out
-	}
-	return v
 }
 
 func TestNestedSpawnRoleFromCallerARN(t *testing.T) {

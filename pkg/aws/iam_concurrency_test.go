@@ -46,16 +46,10 @@ func TestCreateOrGetInstanceProfile_PolicyFileGetsSporedBaseline(t *testing.T) {
 
 	iamClient := iam.NewFromConfig(env.AWSConfig)
 	roleName := "spawn-502-policyfile-test"
-	out, err := iamClient.GetRolePolicy(context.Background(), &iam.GetRolePolicyInput{
-		RoleName:   &roleName,
-		PolicyName: strPtr(sporedBaselinePolicyName()),
-	})
-	if err != nil {
-		t.Fatalf("role %q missing spored-baseline-policy entirely (spawn#502 regression): %v", roleName, err)
-	}
+	baseline := storedSporedGrant(t, iamClient, roleName, sporedBaselinePolicyName())
 	for _, want := range []string{"ec2:DescribeTags", "ec2:TerminateInstances"} {
-		if !strings.Contains(*out.PolicyDocument, want) {
-			t.Errorf("spored-baseline-policy on a PolicyFile-created role missing %q:\n%s", want, *out.PolicyDocument)
+		if !strings.Contains(baseline, want) {
+			t.Errorf("the spored baseline on a PolicyFile-created role is missing %q (spawn#502 regression):\n%s", want, baseline)
 		}
 	}
 

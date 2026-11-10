@@ -82,7 +82,10 @@ runs out; the schedules are read from spawn's infra account (as 'spawn
 schedule' does), and if they cannot be read no role is deleted. The shared spored-instance-role is never touched. IAM is
 global, so this always checks every enabled region whatever --region says, and
 covers every principal's roles. The TTL reaper applies the same rule
-(REAPER_INSTANCE_ROLES).
+(REAPER_INSTANCE_ROLES). It also deletes spawn's spored managed policies
+(/spore-host/spored-*-v<N>) that no role has attached and that are at least 24
+hours old; the reaper detaches them from the roles it deletes but does not
+delete them.
 
 --pool-queues deletes only the SQS queues of pools nobody drained
 (spawn-pool-<run id>) and the task specs their submitters staged in the
@@ -158,7 +161,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 				"account): %w", err)
 		}
 		sources := []instancerole.ReferenceSource{instancerole.NewScheduleSource(infraCfg)}
-		return runCleanupInstanceRoles(ctx, cmd, iamc, ec2s, sources, time.Now())
+		return runCleanupInstanceRoles(ctx, cmd, iamc, instancerole.NewPolicyClient(client.Config()), ec2s, sources, time.Now())
 	}
 
 	if cleanupSchedules {
@@ -647,7 +650,12 @@ func printBucketResult(out, errOut io.Writer, res bucketsweep.Result, writes boo
 // is deleted rather than trusted from the preview. sources are the deferred
 // launchers (the schedules, #1378) whose roles are kept; if they cannot be
 // read, nothing is deleted.
-func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc instancerole.API, ec2s map[string]instancerole.EC2Describer, sources []instancerole.ReferenceSource, now time.Time) error {
+//
+// With pol it also deletes spawn's spored managed policies that no role has
+// attached (#1573, instancerole.SweepSporedPolicies), previewed and confirmed
+// with the roles. A caller that cannot list them is told so, and the roles
+// are swept all the same.
+func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc instancerole.API, pol instancerole.PolicyAPI, ec2s map[string]instancerole.EC2Describer, sources []instancerole.ReferenceSource, now time.Time) error {
 	out := cmd.OutOrStdout()
 	inUse, err := instancerole.ProfilesInUse(ctx, ec2s)
 	if err != nil {
@@ -667,72 +675,125 @@ func runCleanupInstanceRoles(ctx context.Context, cmd *cobra.Command, iamc insta
 	scanned, _, would, _ := preview.Count()
 	if scanned == 0 {
 		fmt.Fprintf(out, "No %s* or %s* IAM roles in this account.\n", instancerole.NamePrefix, instancerole.LegacyPoolWorkerPrefix)
-		return nil
-	}
-	fmt.Fprintf(out, "%d %s* or %s* role(s), checked against instances in %d region(s):\n", scanned, instancerole.NamePrefix, instancerole.LegacyPoolWorkerPrefix, len(ec2s))
-	tw := newTableWriter(out)
-	fmt.Fprintf(tw, "  ROLE\tACTION\tCREATED\tLAST USED\tWHY KEPT\n")
-	for _, d := range preview.Decisions {
-		action, why := "keep", d.Reason
-		if d.Err != nil {
-			why = fmt.Sprintf("%s: %v", d.Reason, d.Err)
+	} else {
+		fmt.Fprintf(out, "%d %s* or %s* role(s), checked against instances in %d region(s):\n", scanned, instancerole.NamePrefix, instancerole.LegacyPoolWorkerPrefix, len(ec2s))
+		tw := newTableWriter(out)
+		fmt.Fprintf(tw, "  ROLE\tACTION\tCREATED\tLAST USED\tWHY KEPT\n")
+		for _, d := range preview.Decisions {
+			action, why := "keep", d.Reason
+			if d.Err != nil {
+				why = fmt.Sprintf("%s: %v", d.Reason, d.Err)
+			}
+			if d.Delete {
+				action, why = "delete", ""
+			}
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", d.Name, action, roleDay(d.Created), roleDay(d.LastUsed), why)
 		}
-		if d.Delete {
-			action, why = "delete", ""
-		}
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", d.Name, action, roleDay(d.Created), roleDay(d.LastUsed), why)
+		tw.Flush()
 	}
-	tw.Flush()
 
-	if would == 0 {
+	// The spored managed policies the roles above carry (#1573). After the
+	// roles are deleted a policy only they had is unattached, but it is only
+	// deleted on the next run: IAM's attachment count is read once, here.
+	wouldPol := 0
+	if pol != nil {
+		pols, perr := instancerole.SweepSporedPolicies(ctx, pol, now, false)
+		switch {
+		case perr != nil:
+			fmt.Fprintf(cmd.ErrOrStderr(), "Could not list spawn's spored managed policies at %s, so none is deleted: %v\n", instancerole.SporedPolicyPath, perr)
+			pol = nil
+		case len(pols) > 0:
+			fmt.Fprintf(out, "\n%d spored managed polic(ies) at %s:\n", len(pols), instancerole.SporedPolicyPath)
+			tw := newTableWriter(out)
+			fmt.Fprintf(tw, "  POLICY\tACTION\tCREATED\tATTACHED TO\tWHY KEPT\n")
+			for _, d := range pols {
+				action, why := "keep", d.Reason
+				if d.Delete {
+					action, why = "delete", ""
+					wouldPol++
+				}
+				fmt.Fprintf(tw, "  %s\t%s\t%s\t%d role(s)\t%s\n", d.Name, action, roleDay(d.Created), d.Attachments, why)
+			}
+			tw.Flush()
+		}
+	}
+
+	if would == 0 && wouldPol == 0 {
 		fmt.Fprintln(out, "\nNothing to delete.")
 		return nil
 	}
 	if cleanupDryRun {
-		fmt.Fprintf(out, "\nDry run: %d role(s) and their instance profiles would be deleted. Re-run without --dry-run to delete.\n", would)
+		fmt.Fprintf(out, "\nDry run: %d role(s) and their instance profiles, and %d spored managed polic(ies), would be deleted. Re-run without --dry-run to delete.\n", would, wouldPol)
 		return nil
 	}
-	if !confirmYes(cleanupYes, fmt.Sprintf("Delete %d IAM role(s) and their instance profiles?", would)) {
-		return newAborted("aborted: no IAM role was deleted (re-run with --yes)")
+	if !confirmYes(cleanupYes, fmt.Sprintf("Delete %d IAM role(s) and their instance profiles, and %d spored managed polic(ies)?", would, wouldPol)) {
+		return newAborted("aborted: no IAM role or policy was deleted (re-run with --yes)")
 	}
 
-	// Read the schedules again: one created while the prompt was open must
-	// keep its role.
-	refs, err = instancerole.CollectReferences(ctx, sources...)
-	if err != nil {
-		return fmt.Errorf("no IAM role was deleted: %w", err)
-	}
-	res, err := instancerole.SweepWith(ctx, iamc, inUse, refs, now, true, opts)
-	if err != nil {
-		return err
-	}
 	logPath, logFile := openCleanupLog()
 	if logFile != nil {
 		defer func() { _ = logFile.Close() }()
 	}
-	_, deleted, _, _ := res.Count()
-	failed := 0
-	for _, d := range res.Decisions {
-		switch {
-		case d.Deleted:
-			fmt.Fprintf(out, "  ✓ deleted role and instance profile %s\n", d.Name)
-			writeCleanupLog(logFile, fmt.Sprintf("REMOVED %s\tiam\trole+instance-profile", d.Name))
-		case d.Delete && d.Err != nil:
-			failed++
-			fmt.Fprintf(cmd.ErrOrStderr(), "  ✗ %s: %v\n", d.Name, d.Err)
-			writeCleanupLog(logFile, fmt.Sprintf("FAILED %s\tiam\trole+instance-profile\t%v", d.Name, d.Err))
+	deleted, failed := 0, 0
+	if would > 0 {
+		// Read the schedules again: one created while the prompt was open must
+		// keep its role.
+		refs, err = instancerole.CollectReferences(ctx, sources...)
+		if err != nil {
+			return fmt.Errorf("no IAM role was deleted: %w", err)
+		}
+		res, err := instancerole.SweepWith(ctx, iamc, inUse, refs, now, true, opts)
+		if err != nil {
+			return err
+		}
+		_, deleted, _, _ = res.Count()
+		for _, d := range res.Decisions {
+			switch {
+			case d.Deleted:
+				fmt.Fprintf(out, "  ✓ deleted role and instance profile %s\n", d.Name)
+				writeCleanupLog(logFile, fmt.Sprintf("REMOVED %s\tiam\trole+instance-profile", d.Name))
+			case d.Delete && d.Err != nil:
+				failed++
+				fmt.Fprintf(cmd.ErrOrStderr(), "  ✗ %s: %v\n", d.Name, d.Err)
+				writeCleanupLog(logFile, fmt.Sprintf("FAILED %s\tiam\trole+instance-profile\t%v", d.Name, d.Err))
+			}
+		}
+	}
+	deletedPol, failedPol := 0, 0
+	if wouldPol > 0 && pol != nil {
+		pols, err := instancerole.SweepSporedPolicies(ctx, pol, now, true)
+		if err != nil {
+			return fmt.Errorf("no spored managed policy was deleted: %w", err)
+		}
+		for _, d := range pols {
+			switch {
+			case d.Deleted:
+				deletedPol++
+				fmt.Fprintf(out, "  ✓ deleted managed policy %s\n", d.ARN)
+				writeCleanupLog(logFile, fmt.Sprintf("REMOVED %s\tiam\tpolicy", d.ARN))
+			case d.Delete && d.Err != nil:
+				failedPol++
+				fmt.Fprintf(cmd.ErrOrStderr(), "  ✗ %s: %v\n", d.ARN, d.Err)
+				writeCleanupLog(logFile, fmt.Sprintf("FAILED %s\tiam\tpolicy\t%v", d.ARN, d.Err))
+			}
 		}
 	}
 	fmt.Fprintf(out, "\nDeleted %d role(s)", deleted)
 	if failed > 0 {
 		fmt.Fprintf(out, ", %d failed", failed)
 	}
+	if wouldPol > 0 {
+		fmt.Fprintf(out, " and %d spored managed polic(ies)", deletedPol)
+		if failedPol > 0 {
+			fmt.Fprintf(out, ", %d failed", failedPol)
+		}
+	}
 	if logPath != "" {
 		fmt.Fprintf(out, " — log: %s", logPath)
 	}
 	fmt.Fprintln(out, ".")
-	if failed > 0 {
-		return fmt.Errorf("%d IAM role(s) could not be deleted", failed)
+	if failed > 0 || failedPol > 0 {
+		return fmt.Errorf("%d IAM role(s) and %d managed polic(ies) could not be deleted", failed, failedPol)
 	}
 	return nil
 }
