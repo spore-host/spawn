@@ -256,7 +256,7 @@ func detectReaperCoverage(ctx context.Context, region string, listerFor func(str
 
 func isNoSuchEntity(err error) bool {
 	var nse *iamtypes.NoSuchEntityException
-	return errors.As(err, &nse)
+	return errors.As(err, &nse) || strings.HasPrefix(iamErrorCode(err), "NoSuchEntity")
 }
 
 // ReaperCoverageAdvice is the sentence to show a user whose launch depends on the

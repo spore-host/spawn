@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Launches no longer fail with `LimitExceeded: Maximum policy size of 10240
+  bytes exceeded` on an account whose `spored-instance-role` carries other
+  inline policies (#1573). Since v0.162.0 every launch on the default role in
+  such an account failed before an instance existed. IAM caps a role's inline
+  policies at 10,240 characters together, and v0.162.0 wrote the versioned
+  spored grants (#1558) as a second inline copy beside the legacy one. spawn
+  now attaches the grants as a customer-managed policy instead, which has its
+  own 6,144-character limit and does not count against the role's inline one:
+  `arn:aws:iam::<account>:policy/spore-host/spored-policy-v1` on
+  `spored-instance-role`, `spored-baseline-policy-v1` on `spawn-instance-*`
+  roles (whose inline budget is shared with `--iam-policy-file`, the task
+  staging policy and a caller-named `--iam-role`'s own policies), and
+  `spored-nested-baseline-policy-v1` on the `--nested-spawn` role. One policy
+  per kind serves every role of that kind in the account. #1558's guarantees
+  hold: no released spawn touches these policies, a newer schema on the role
+  (managed or inline) is left alone with a warning, and spawn never rewrites
+  an existing policy. If one exists with a different document, spawn warns,
+  names it, and writes its grants inline beside it. Once the policy is
+  attached, spawn deletes the inline copies it supersedes (`spored-policy`,
+  `spored-baseline-policy`, and the `-v1` inline policies v0.162.0 and
+  v0.163.0 wrote), and detaches and deletes older managed versions. Nothing
+  is deleted before the policy is attached.
+  - Launching now also calls `iam:GetPolicy`, `iam:GetPolicyVersion`,
+    `iam:CreatePolicy` and `iam:DeletePolicy` (on
+    `arn:aws:iam::<account>:policy/spore-host/*`), and
+    `iam:ListAttachedRolePolicies`, `iam:AttachRolePolicy` and
+    `iam:DetachRolePolicy` (on the spawn roles). Without them, spawn warns and
+    writes the grants inline, as v0.163.0 did. If that write then exceeds the
+    inline limit, the error lists every inline policy on the role with its
+    size and the total against 10,240, and names both fixes, instead of the
+    bare 409. That listing uses `iam:GetRolePolicy`.
+  - `spawn cleanup --instance-roles` also deletes spored managed policies at
+    `/spore-host/` that no role has attached and that are at least 24 hours
+    old (`iam:ListPolicies`, `iam:DeletePolicy`). Deleting a role with `spawn
+    cleanup` or `spawn pool drain` deletes its spored policy when no other
+    role still has it attached. The TTL reaper detaches the policy from the
+    roles it deletes but does not delete the policy.
+
 ## [0.163.0] - 2026-11-10
 
 ### Changed

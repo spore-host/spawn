@@ -705,7 +705,15 @@ func (c *Client) deleteRole(ctx context.Context, cfg aws.Config, roleName string
 	// Attached managed policies
 	if ap, err := iamc.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{RoleName: aws.String(roleName)}); err == nil {
 		for _, p := range ap.AttachedPolicies {
-			_, _ = iamc.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{RoleName: aws.String(roleName), PolicyArn: p.PolicyArn})
+			_, err := iamc.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{RoleName: aws.String(roleName), PolicyArn: p.PolicyArn})
+			// A spored managed policy (#1573) is spawn's: delete it once this
+			// was the last role with it attached. IAM refuses while another
+			// role has it (DeleteConflict), which deleteSporedManagedPolicy
+			// counts as keeping it, and `spawn cleanup --instance-roles`
+			// sweeps any it misses.
+			if err == nil && isSporedManagedPolicyARN(aws.ToString(p.PolicyArn)) {
+				_ = deleteSporedManagedPolicy(ctx, iamc, aws.ToString(p.PolicyArn))
+			}
 		}
 	}
 	// Remove from instance profiles

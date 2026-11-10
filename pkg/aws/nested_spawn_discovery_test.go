@@ -48,6 +48,15 @@ var nestedSpawnNotGranted = map[string]string{
 	"iam:ListRolePolicies":         "only reached by the role-setup paths a nested spore skips",
 	"iam:GetRole":                  "only reached by the role-setup paths a nested spore skips",
 	"iam:GetInstanceProfile":       "only reached by the role-setup paths a nested spore skips",
+	// The spored grants as a managed policy (#1573), on the same role-setup
+	// paths.
+	"iam:CreatePolicy":             "IAM write; nested spores never write IAM",
+	"iam:DeletePolicy":             "IAM write; nested spores never write IAM",
+	"iam:DetachRolePolicy":         "IAM write; nested spores never write IAM",
+	"iam:GetPolicy":                "only reached by the role-setup paths a nested spore skips",
+	"iam:GetPolicyVersion":         "only reached by the role-setup paths a nested spore skips",
+	"iam:GetRolePolicy":            "only reached by the role-setup paths a nested spore skips",
+	"iam:ListAttachedRolePolicies": "only reached by the role-setup paths a nested spore skips",
 	// Not part of a plain child launch.
 	"fsx:CreateFileSystem":               "--fsx-create: ~$174/month minimum; create filesystems from a workstation",
 	"fsx:DeleteFileSystem":               "--fsx-create teardown; see fsx:CreateFileSystem",

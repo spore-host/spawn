@@ -116,7 +116,7 @@ func runRolesCleanup(t *testing.T, iamc *cleanupRoleIAM, dryRun bool) (string, e
 		"us-east-1":    cleanupRoleEC2{},
 		"eu-central-1": cleanupRoleEC2{profiles: []string{"spawn-instance-busy"}},
 	}
-	err := runCleanupInstanceRoles(context.Background(), c, iamc, ec2s, []instancerole.ReferenceSource{noScheduleRefs{}}, cleanupNow)
+	err := runCleanupInstanceRoles(context.Background(), c, iamc, nil, ec2s, []instancerole.ReferenceSource{noScheduleRefs{}}, cleanupNow)
 	return out.String(), err
 }
 
@@ -196,4 +196,64 @@ func (noScheduleRefs) Describe() string { return "schedules (none)" }
 
 func (noScheduleRefs) ProfileReferences(context.Context) (map[string][]string, error) {
 	return map[string][]string{}, nil
+}
+
+// cleanupPolicyIAM is the account's spored managed policies for the
+// --instance-roles policy sweep (#1573).
+type cleanupPolicyIAM struct {
+	policies []iamtypes.Policy
+	deleted  []string
+}
+
+func (f *cleanupPolicyIAM) ListPolicies(context.Context, *iam.ListPoliciesInput, ...func(*iam.Options)) (*iam.ListPoliciesOutput, error) {
+	return &iam.ListPoliciesOutput{Policies: f.policies}, nil
+}
+
+func (f *cleanupPolicyIAM) DeletePolicy(_ context.Context, in *iam.DeletePolicyInput, _ ...func(*iam.Options)) (*iam.DeletePolicyOutput, error) {
+	f.deleted = append(f.deleted, awssdk.ToString(in.PolicyArn))
+	return &iam.DeletePolicyOutput{}, nil
+}
+
+// `spawn cleanup --instance-roles` also deletes spawn's unattached spored
+// managed policies (#1573), previewed with the roles; --dry-run deletes none.
+func TestCleanupInstanceRolesDeletesUnattachedSporedPolicies(t *testing.T) {
+	pol := func(name string, attached int32) iamtypes.Policy {
+		return iamtypes.Policy{
+			Arn: awssdk.String("arn:aws:iam::111122223333:policy/spore-host/" + name), Path: awssdk.String("/spore-host/"),
+			PolicyName: awssdk.String(name), AttachmentCount: awssdk.Int32(attached),
+			CreateDate: awssdk.Time(cleanupNow.Add(-72 * time.Hour)),
+		}
+	}
+	run := func(dryRun bool) (*cleanupPolicyIAM, string) {
+		t.Helper()
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
+		savedDry, savedYes := cleanupDryRun, cleanupYes
+		t.Cleanup(func() { cleanupDryRun, cleanupYes = savedDry, savedYes })
+		cleanupDryRun, cleanupYes = dryRun, true
+		p := &cleanupPolicyIAM{policies: []iamtypes.Policy{pol("spored-baseline-policy-v1", 0), pol("spored-policy-v1", 1)}}
+		var out bytes.Buffer
+		c := &cobra.Command{}
+		c.SetOut(&out)
+		c.SetErr(&out)
+		if err := runCleanupInstanceRoles(context.Background(), c, &cleanupRoleIAM{}, p,
+			map[string]instancerole.EC2Describer{"us-east-1": cleanupRoleEC2{}},
+			[]instancerole.ReferenceSource{noScheduleRefs{}}, cleanupNow); err != nil {
+			t.Fatal(err)
+		}
+		return p, out.String()
+	}
+
+	dry, out := run(true)
+	if len(dry.deleted) != 0 {
+		t.Errorf("--dry-run deleted %v", dry.deleted)
+	}
+	if !strings.Contains(out, "0 role(s) and their instance profiles, and 1 spored managed polic(ies), would be deleted") {
+		t.Errorf("the preview does not count the policy:\n%s", out)
+	}
+	real, out := run(false)
+	if want := []string{"arn:aws:iam::111122223333:policy/spore-host/spored-baseline-policy-v1"}; strings.Join(real.deleted, "|") != strings.Join(want, "|") {
+		t.Errorf("deleted %v, want %v\n%s", real.deleted, want, out)
+	}
 }

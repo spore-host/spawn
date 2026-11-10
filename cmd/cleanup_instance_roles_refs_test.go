@@ -24,7 +24,7 @@ func runScenarioRolesCleanup(t *testing.T, s *instanceroletest.Scenario, dryRun 
 	c := &cobra.Command{}
 	c.SetOut(&out)
 	c.SetErr(&out)
-	err := runCleanupInstanceRoles(context.Background(), c, s.IAM, s.EC2Clients(),
+	err := runCleanupInstanceRoles(context.Background(), c, s.IAM, nil, s.EC2Clients(),
 		[]instancerole.ReferenceSource{s.Source()}, s.Now)
 	return out.String(), err
 }

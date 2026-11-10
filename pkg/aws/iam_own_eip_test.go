@@ -102,11 +102,11 @@ func TestTheOwnElasticIPStatementsReachIAM(t *testing.T) {
 	if _, err := c.SetupSporedIAMRole(ctx); err != nil {
 		t.Fatalf("SetupSporedIAMRole: %v", err)
 	}
-	ownEIPStatementsIn(t, "stored "+sporedRolePolicyName(), storedPolicy(t, ic, SporedRoleName, sporedRolePolicyName()))
+	ownEIPStatementsIn(t, "stored "+sporedRolePolicyName(), storedSporedGrant(t, ic, SporedRoleName, sporedRolePolicyName()))
 	if _, err := c.CreateOrGetInstanceProfile(ctx, IAMRoleConfig{RoleName: "spawn-test-661", Policies: []string{"s3:ReadOnly"}}); err != nil {
 		t.Fatalf("CreateOrGetInstanceProfile: %v", err)
 	}
-	ownEIPStatementsIn(t, "stored "+sporedBaselinePolicyName(), storedPolicy(t, ic, "spawn-test-661", sporedBaselinePolicyName()))
+	ownEIPStatementsIn(t, "stored "+sporedBaselinePolicyName(), storedSporedGrant(t, ic, "spawn-test-661", sporedBaselinePolicyName()))
 }
 
 // ---- a small evaluator, for the "can it release what it does not own" half ----
