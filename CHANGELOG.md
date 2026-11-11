@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.163.2] - 2026-11-11
+
 ### Security
 
 - Build and test with Go 1.26.11 / 1.27.4: GO-2026-6859 (net/http: an HTTP/1 server crash from a `MaxBytesReader` header race), published 2026-11-11.
@@ -13718,7 +13720,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.163.1...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.163.2...HEAD
+[0.163.2]: https://github.com/spore-host/spawn/compare/v0.163.1...v0.163.2
 [0.163.1]: https://github.com/spore-host/spawn/compare/v0.163.0...v0.163.1
 [0.163.0]: https://github.com/spore-host/spawn/compare/v0.162.0...v0.163.0
 [0.162.0]: https://github.com/spore-host/spawn/compare/v0.161.0...v0.162.0
