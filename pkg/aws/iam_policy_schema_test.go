@@ -473,9 +473,9 @@ func TestParseVersionedPolicyName(t *testing.T) {
 // bumped (the bump is what lets the change reach roles an older CLI shares),
 // and the pins below are updated to the new documents.
 func TestSporedPolicySchemaPinsTheDocuments(t *testing.T) {
-	const pinnedSchema = 2
+	const pinnedSchema = 3
 	pins := map[string]string{
-		"sporedDCVRolePolicy (spored-policy)":            "227926143670c37ecf4a3bdcb23262d4cfa455162e0c1dc957ee88c780aa63c9",
+		"sporedDCVRolePolicy (spored-policy)":            "853f81444f2687748fe3a81622328405127a6a456d0f83fa1902951eac4c7c63",
 		"spored baseline (spored-baseline-policy)":       "46fd6e493f4b1449474bf2beda016347e11387e7c0866e5cb5faa71807a88d21",
 		"nested-spawn baseline (spored-baseline-policy)": "7a183ec73eb1e0c6910317655e48518ce553a7990dab7811e3a435d6505f3b23",
 	}

@@ -193,31 +193,29 @@ func TestAFailedLookupIsNotCached(t *testing.T) {
 	}
 }
 
-// Enforcement must be a flip, and the default must be the deployable one.
+// Enforcement is the default, and audit the explicit exception.
 //
-// Not style: update-function-code leaves environment variables untouched and
-// --environment replaces the whole map, so an unset variable is the normal outcome
-// of a deploy. If the default were enforce, redeploying this function would take
-// the four live hosts in the unregistered account off the air.
-func TestAuthzModeDefaultsToAudit(t *testing.T) {
+// update-function-code leaves environment variables untouched and --environment
+// replaces the whole map, so an unset variable is the normal outcome of a
+// deploy. With the check guarding record ownership, an unset variable must
+// therefore enforce: losing it must fail closed, not reopen every account's
+// records to every principal in it. Only the exact word "audit" turns it off, so
+// a plausible guess ("false", "0", "off") does not.
+func TestAuthzModeDefaultsToEnforce(t *testing.T) {
 	t.Setenv("DNS_AUTHZ_MODE", "")
-	if authzEnforced() {
-		t.Error("enforcement is on with DNS_AUTHZ_MODE unset")
+	if !authzEnforced() {
+		t.Error("enforcement is off with DNS_AUTHZ_MODE unset")
 	}
-	for _, v := range []string{"enforce", "Enforce", " ENFORCE "} {
-		t.Setenv("DNS_AUTHZ_MODE", v)
-		if !authzEnforced() {
-			t.Errorf("DNS_AUTHZ_MODE=%q did not enable enforcement", v)
-		}
-	}
-	// Anything else is audit — notably not "true"/"1", which would be a plausible
-	// guess by someone setting it from a deploy script and would silently not
-	// enforce. Keep the two names the only accepted spellings and say so.
-	for _, v := range []string{"true", "1", "on", "strict", "audit"} {
+	for _, v := range []string{"audit", "Audit", " AUDIT "} {
 		t.Setenv("DNS_AUTHZ_MODE", v)
 		if authzEnforced() {
-			t.Errorf("DNS_AUTHZ_MODE=%q enabled enforcement; only %q should",
-				v, authzModeEnforce)
+			t.Errorf("DNS_AUTHZ_MODE=%q did not switch to audit", v)
+		}
+	}
+	for _, v := range []string{"enforce", "true", "1", "on", "strict", "false", "0", "off"} {
+		t.Setenv("DNS_AUTHZ_MODE", v)
+		if !authzEnforced() {
+			t.Errorf("DNS_AUTHZ_MODE=%q turned enforcement off; only %q should", v, authzModeAudit)
 		}
 	}
 }
@@ -279,7 +277,7 @@ func TestHandlerEnforcesAndAuditsTheCallerDecision(t *testing.T) {
 	})
 
 	t.Run("audit allows the unentitled caller through", func(t *testing.T) {
-		t.Setenv("DNS_AUTHZ_MODE", "")
+		t.Setenv("DNS_AUTHZ_MODE", authzModeAudit)
 		resp, err := handler(context.Background(), req("111122223333"))
 		if err != nil {
 			t.Fatal(err)

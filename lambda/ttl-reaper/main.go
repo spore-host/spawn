@@ -1912,8 +1912,13 @@ func dnsRecordsToDelete(c candidate, domain string) []dnsRecord {
 	if c.dnsName == "" || c.accountBase36 == "" || domain == "" {
 		return nil
 	}
+	canonical := fmt.Sprintf("%s.%s.%s", c.dnsName, c.accountBase36, domain)
 	recs := []dnsRecord{
-		{fqdn: fmt.Sprintf("%s.%s.%s", c.dnsName, c.accountBase36, domain), rrType: r53types.RRTypeA},
+		{fqdn: canonical, rrType: r53types.RRTypeA},
+		// The record's ownership marker (lambda/dns-updater ownership.go), which
+		// the updater deletes with the record and so must the reaper. Absent
+		// for a record written before ownership, which deleteRecord skips.
+		{fqdn: dns.OwnerName(canonical), rrType: r53types.RRTypeTxt},
 	}
 	if c.accountName != "" {
 		recs = append(recs, dnsRecord{

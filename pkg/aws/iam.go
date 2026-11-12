@@ -1678,8 +1678,10 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 // the two cannot diverge on it again.
 //
 // Kept in sync with sporedSelfManagementStatements (the standard spored
-// baseline): the same self-management grants PLUS the DCV-only S3 reads
-// (dcv-license, spawn-certs). spawn#282 reconciled the two — this role previously
+// baseline): the same self-management grants PLUS the DCV-only S3 read
+// (dcv-license). The wildcard TLS key (spawn-certs) is no longer readable here
+// but Denied: app launches read it with their own role (app_role.go).
+// spawn#282 reconciled the two — this role previously
 // granted ec2:CreateTags on "*" UNCONDITIONED (the #174 tag-then-terminate class)
 // and lacked the FSx-mount (#221) and lambda:InvokeFunctionUrl (#173 DNS-sign)
 // grants, so a DCV instance couldn't mount ephemeral FSx and, after the #173
@@ -1850,11 +1852,7 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
       ],
       "Resource": "*"
     },
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::spawn-certs-*/*"
-    },
+    %s,
     {
       "Effect": "Allow",
       "Action": ["s3:GetObject"],
@@ -1891,7 +1889,7 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
     %s,
     %s
   ]
-}`, sporedInstanceScopeStatementsJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedLaunchConfigReadStatementJSON(), sporedSelfTerminateStatementJSON(), sporedOwnElasticIPStatementsJSON())
+}`, sporedInstanceScopeStatementsJSON(), spawnconfig.DefaultDNSFunctionARN, sporedTLSKeyDenyJSON(), sporedHybridRegistryStatementJSON(), sporedLaunchConfigReadStatementJSON(), sporedSelfTerminateStatementJSON(), sporedOwnElasticIPStatementsJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It

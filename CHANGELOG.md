@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `spawn task run` task's role may write the results bucket only under the
   results prefix (`tasks/` by default, or the spec's `results_prefix`), not
   the whole bucket.
+- The DNS updater now checks that the calling instance owns the record it
+  changes or deletes, not only the account. Ownership is held in the zone
+  (`_spore-instance.<record>`), claimed by the first instance to register a
+  free name and taken over only once the owner's lease has gone stale. A
+  record from before this change can be claimed or deleted only from the
+  address it points at. A caller that is not one of spawn's instance roles
+  (`spawn dns register`/`delete` from a workstation) may change only records
+  no instance owns. The updater now enforces by default; `DNS_AUTHZ_MODE=audit`
+  is the explicit opt-out.
+- `spawn app launch` instances use their own role, `spawn-instance-app`, the
+  only one that may read the account's wildcard TLS key.
+  `spored-instance-role` now Denies that read (spored grant schema 3).
 
 ## [0.163.2] - 2026-11-11
 
