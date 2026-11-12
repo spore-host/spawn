@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/catalog"
 	"github.com/spore-host/spawn/internal/shellmin"
+	"github.com/spore-host/spawn/pkg/accesstoken"
 	spawnclient "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/launcher"
 	"github.com/spore-host/spawn/pkg/platform"
@@ -175,7 +176,7 @@ func applyWebFlags(entry *catalog.AppEntry, webPort int, healthPath string) (str
 // not the app, so the hint is the URL.
 func appReconnectHint(isWeb bool, instanceID string) string {
 	if isWeb {
-		return "   Reconnect: open the URL above\n\n"
+		return fmt.Sprintf("   Reconnect: open the URL above until it expires (12h); for a fresh one: spawn app url %s\n\n", instanceID)
 	}
 	return fmt.Sprintf("   Reconnect: spawn connect %s\n\n", instanceID)
 }
@@ -555,14 +556,16 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 14. Poll for spawn:ready-url written by spored. For a DCV app/desktop this is
-	// the DCV token handshake; for a web app it's the port-probe + TLS-proxy
-	// handshake (#590). Ready = an auth token (DCV) or ready-status "ready" (web).
+	// 14. Poll for readiness written by spored. For a DCV app/desktop this is
+	// the DCV session handshake; for a web app it's the port-probe + TLS-proxy
+	// handshake (#590). Ready = ready-status "ready". spored publishes no token:
+	// once ready, this side mints one and registers its hash over SSM
+	// (pkg/accesstoken), and builds the URL itself.
 	dnsName := sessionName // spored will register a DNS name; fall back to IP
 	authToken := ""
-	readyURL := "" // spawn:ready-url verbatim (web: carries ?spore_token=)
 	ready := false
 	isWeb := kind == catalog.KindWeb
+	var scan dcvScanResult
 	if entry.DCVEnabled || isWeb {
 		if isWeb {
 			fmt.Fprintf(os.Stderr, "Waiting for the web app")
@@ -586,23 +589,15 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
-			scan := scanDCVReady(instances, result.InstanceID)
+			scan = scanDCVReady(instances, result.InstanceID)
 			if scan.dnsName != "" {
 				dnsName = scan.dnsName
 			}
 			lastStatus = scan.status
-			if scan.token != "" {
-				authToken = scan.token
-			}
 			if scan.host != "" {
 				host = scan.host
 			}
-			if scan.url != "" {
-				readyURL = scan.url
-			}
-			// Ready: DCV writes an auth token; web writes ready-status "ready"
-			// (its ready-url carries no token — the app owns its own auth).
-			if authToken != "" || scan.status == dcvStatusReady {
+			if scan.ready() {
 				ready = true
 				fmt.Fprintf(os.Stderr, " ready\n")
 				break
@@ -623,16 +618,22 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-
-	// 15w. Web app: no DCV session HTML — the app serves its own UI. Print/open the
-	// ready-url (https://<fqdn>/ via the spored TLS proxy) directly.
+	tokenKind := accesstoken.KindDCV
 	if isWeb {
-		// Prefer the ready-url spored wrote (carries the ?spore_token= access
-		// token); fall back to a bare URL if the tag wasn't read.
-		webURL := readyURL
-		if webURL == "" {
-			webURL = "https://" + host + "/"
+		tokenKind = accesstoken.KindWeb
+	}
+	if ready {
+		t, err := sessionToken(ctx, clientShellRunner(client), region, result.InstanceID, scan, tokenKind, accesstoken.DefaultTTL, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Could not register a session access token: %v\n   Retry with: spawn app url %s\n", err, result.InstanceID)
 		}
+		authToken = t
+	}
+
+	// 15w. Web app: no DCV session HTML — the app serves its own UI. Print/open
+	// the URL (https://<fqdn>/ via the spored TLS proxy) directly.
+	if isWeb {
+		webURL := sessionURL(accesstoken.KindWeb, host, authToken, "")
 		fmt.Fprintf(os.Stdout, "\n✅  %s is ready\n", entry.Name)
 		fmt.Fprintf(os.Stdout, "   URL:       %s\n", webURL)
 		fmt.Fprintf(os.Stdout, "   Instance:  %s\n", result.InstanceID)
@@ -1029,9 +1030,11 @@ func getSessionsDir() (string, error) {
 		return "", fmt.Errorf("get home directory: %w", err)
 	}
 	dir := filepath.Join(homeDir, ".spawn", "sessions")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// 0700: session files carry access tokens.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create sessions directory: %w", err)
 	}
+	_ = os.Chmod(dir, 0o700) // best-effort, for a directory an older spawn made 0755
 	return dir, nil
 }
 
@@ -1090,7 +1093,7 @@ func writeSessionHTML(instanceID, sessionName, dnsName, publicIP, appName, appDe
 	}
 
 	path := filepath.Join(dir, fmt.Sprintf("%s-%s.html", appName, shortID))
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) // carries the session token
 	if err != nil {
 		return "", fmt.Errorf("create session file: %w", err)
 	}
@@ -1112,7 +1115,7 @@ type sessionHTMLData struct {
 	Host         string
 	DCVPort      int
 	LaunchedAt   string
-	AuthToken    string // spawn:ready-token from EC2 tag; empty until #289 is implemented
+	AuthToken    string // session access token this spawn registered (pkg/accesstoken); "" when none
 }
 
 // openBrowser opens a file or URL in the default browser.

@@ -3,8 +3,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -24,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/libs/i18n"
+	"github.com/spore-host/spawn/pkg/accesstoken"
 	"github.com/spore-host/spawn/pkg/costmodel"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/plugin"
@@ -103,9 +102,13 @@ type Agent struct {
 	// (#1090). Touched only by the monitor loop.
 	idleStateWarned bool
 
-	// DCV auth token verifier (embedded HTTP server for seamless browser auth)
-	dcvTokens          map[string]string // token → username
-	dcvTokensMu        sync.Mutex
+	// accessTokens holds the hashes of the tokens that open this instance's DCV
+	// session and web proxy. Clients register them over SSM (`spored
+	// access-token add`); the tokens themselves are never published anywhere
+	// account-readable (pkg/accesstoken). nil means accesstoken.NewStore().
+	accessTokens *accesstoken.Store
+	// legacyReadyCleared: clearStaleReadyTags has run (once per start).
+	legacyReadyCleared bool
 	dcvReadyURLWritten bool
 	ttlWarned          bool // send ttl_warning notification only once
 
@@ -119,9 +122,8 @@ type Agent struct {
 
 	// Web-UI app readiness state (#590). For AppMode=="web": probe the app's HTTP
 	// port, start a TLS reverse proxy on :443 (once), write spawn:ready-url.
-	webProxyStarted bool   // the :443 TLS reverse proxy is up (start once)
-	webReadyDone    bool   // web ready-url written OR a terminal failure recorded (stop retrying)
-	webToken        string // access token gating the :443 proxy (empty when WebAuth=none); generated once
+	webProxyStarted bool // the :443 TLS reverse proxy is up (start once)
+	webReadyDone    bool // web ready-url written OR a terminal failure recorded (stop retrying)
 
 	// The written spawn:ready-url's host, and how to build it for another, so
 	// refreshReadyURL can follow a public IP that changed on a resume (#1019).
@@ -724,9 +726,10 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	a.maybeMountPendingFSx(ctx)
 
 	// 0a1. Drive the DCV readiness handshake (verifier already up; this does one
-	// session-check + token + ready-url tag write per tick until it succeeds or
-	// hits a terminal failure). Loop-driven so a transient failure recovers
+	// session-check + ready-url tag write per tick until it succeeds or hits a
+	// terminal failure), after deleting any token tag an older spored left. Loop-driven so a transient failure recovers
 	// (spawn#282 phase 2). No-op on non-DCV instances.
+	a.clearStaleReadyTags(ctx)
 	a.maybeSetupDCVAuth(ctx)
 
 	// 0a2. Drive the web-UI readiness handshake for AppMode=="web" (#590): probe
@@ -737,6 +740,7 @@ func (a *Agent) checkAndAct(ctx context.Context) {
 	// 0a3. Keep spawn:ready-url on the instance's current address: one written
 	// with the public IP goes stale when a resume changes it (#1019).
 	a.refreshReadyURL(ctx)
+	a.pruneAccessTokens()
 
 	// 0a'. Re-measure the cost footprint every footprintMeasureTicks ticks, off
 	// this goroutine (#51).
@@ -1160,25 +1164,35 @@ func (a *Agent) ComputeStart() time.Time { return a.computeFrom() }
 
 // ── DCV auth token verifier ───────────────────────────────────────────────────
 
-// startDCVAuthVerifier starts a tiny HTTP server on 127.0.0.1:8444 that verifies
-// one-time auth tokens for NICE DCV. DCV calls this endpoint when a browser connects
-// with ?authToken=<token> in the URL. The protocol is specified by AWS DCV:
-// POST body: sessionId=<id>&authenticationToken=<token>&clientAddress=<ip>
-// Response XML: <auth result="yes"><username>ec2-user</username></auth>
-func (a *Agent) startDCVAuthVerifier(ctx context.Context) {
-	a.dcvTokens = make(map[string]string)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+// dcvUsername is the account a verified DCV token logs in as.
+const dcvUsername = "ec2-user"
+
+// tokenStore is the agent's access-token store.
+func (a *Agent) tokenStore() *accesstoken.Store {
+	if a.accessTokens == nil {
+		a.accessTokens = accesstoken.NewStore()
+	}
+	return a.accessTokens
+}
+
+// dcvAuthHandler is DCV's external authenticator (auth-token-verifier in
+// dcv.conf). DCV calls it when a browser connects with ?authToken=<token>:
+// POST body sessionId=<id>&authenticationToken=<token>&clientAddress=<ip>,
+// answered with <auth result="yes"><username>ec2-user</username></auth>.
+//
+// A token is accepted only if a client registered its hash for KindDCV and it
+// has not expired, and only for this instance's own session. It stays valid
+// until it expires, so the DCV client's own reconnects keep working.
+func dcvAuthHandler(store *accesstoken.Store, sessionID string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		token := r.FormValue("authenticationToken")
-		a.dcvTokensMu.Lock()
-		username, ok := a.dcvTokens[token]
-		// Token is kept valid for the session lifetime so reconnects work.
-		// spored generates a new token if it restarts (new spawn:ready-url tag).
-		a.dcvTokensMu.Unlock()
+		ok := false
+		if sessionID == "" || r.FormValue("sessionId") == sessionID {
+			ok, _ = store.Verify(accesstoken.KindDCV, r.FormValue("authenticationToken"))
+		}
 		w.Header().Set("Content-Type", "text/xml")
 		type authResp struct {
 			XMLName  xml.Name `xml:"auth"`
@@ -1188,12 +1202,17 @@ func (a *Agent) startDCVAuthVerifier(ctx context.Context) {
 		}
 		var resp authResp
 		if ok {
-			resp = authResp{Result: "yes", Username: username}
+			resp = authResp{Result: "yes", Username: dcvUsername}
 		} else {
 			resp = authResp{Result: "no", Message: "invalid or expired token"}
 		}
 		_ = xml.NewEncoder(w).Encode(resp)
 	})
+}
+
+// startDCVAuthVerifier serves dcvAuthHandler on 127.0.0.1:8444.
+func (a *Agent) startDCVAuthVerifier(ctx context.Context) {
+	mux := dcvAuthHandler(a.tokenStore(), a.config.DCVSessionID)
 	srv := &http.Server{Addr: "127.0.0.1:8444", Handler: mux}
 	go func() { _ = srv.ListenAndServe() }()
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
@@ -1237,8 +1256,8 @@ const dcvGraceTimeout = 8 * time.Minute
 
 // maybeSetupDCVAuth drives the DCV readiness handshake from the monitor loop
 // (spawn#282 phase 2): it starts the :8444 token verifier once, then on each tick
-// does ONE session check and, when the session is present, issues the token and
-// writes spawn:ready-url/ready-token/ready-status. Loop-driven (not a one-shot
+// does ONE session check and, when the session is present, writes
+// spawn:ready-url/ready-status/ready-auth (no token: see pkg/accesstoken). Loop-driven (not a one-shot
 // goroutine) so a transient failure — slow dcvserver, a momentary
 // ec2:CreateTags throttle — recovers on the next tick instead of being permanent
 // (the old fire-once bug). This also collapses the CLI-vs-spored timer race:
@@ -1275,36 +1294,76 @@ func (a *Agent) maybeSetupDCVAuth(ctx context.Context) {
 		return
 	}
 
-	// Session is present — issue the one-time token.
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		log.Printf("DCV: failed to generate token: %v", err)
-		return // retry next tick
-	}
-	token := hex.EncodeToString(b)
-	a.dcvTokensMu.Lock()
-	a.dcvTokens[token] = "ec2-user"
-	a.dcvTokensMu.Unlock()
-
-	// Ready URL — DNS FQDN when available, else public IP.
+	// Session is present. Publish readiness only: the URL carries no token.
+	// A client mints its own token and registers its hash over SSM
+	// (pkg/accesstoken), so nothing account-readable can open the session.
 	host := a.readyHost()
-	readyURL := buildReadyURL(host, token, sessionID)
-
-	// spawn:ready-status carries the machine-readable enum ("ready"); the friendly
-	// app label lives in spawn:app-name, which the CLI reads for display.
 	a.writeReadyTags(ctx, map[string]string{
-		"spawn:ready-url":    readyURL,
-		"spawn:ready-token":  token,
+		"spawn:ready-url":    accesstoken.DCVURL(host, "", sessionID),
 		"spawn:ready-status": string(dcvReady),
+		readyAuthTag:         readyAuthToken,
 	})
 	if a.dcvReadyURLWritten {
 		log.Printf("DCV: spawn:ready-url written (session %s, host %s)", sessionID, host)
 		a.dcvAuthDone = true
-		// The token stays valid for the session's lifetime (see the verifier),
-		// so a rewrite for a new host keeps it (#1019).
-		a.noteReadyURL(host, func(h string) string { return buildReadyURL(h, token, sessionID) })
+		a.noteReadyURL(host, func(h string) string { return accesstoken.DCVURL(h, "", sessionID) })
 	}
 	// If the tag write failed (writeReadyTags didn't latch), retry next tick.
+}
+
+// readyAuthTag says how a client opens the session: readyAuthToken means
+// "register an access token over SSM" (`spored access-token add`),
+// readyAuthNone that the web proxy is ungated. Its presence also tells a client
+// that this spored never publishes a token, as spored before it did in
+// legacyReadyTokenTag.
+const (
+	readyAuthTag   = "spawn:ready-auth"
+	readyAuthToken = "token"
+	readyAuthNone  = "none"
+)
+
+// legacyReadyTokenTag is where spored used to publish the session token, in
+// clear, for anyone with ec2:DescribeTags in the account. Nothing writes it now;
+// clearStaleReadyTags deletes it from an instance an older spored ran on.
+const legacyReadyTokenTag = "spawn:ready-token"
+
+// clearStaleReadyTags deletes, once per start and before this start's
+// handshake reports anything, the readiness tags a previous start left: the
+// token an older spored published in legacyReadyTokenTag, the ready-url that
+// embedded the same token, and a ready-status/ready-auth that describe a
+// session this start has not yet confirmed (so a client waking a stopped
+// instance waits for this start's "ready" instead of acting on the last one).
+// Only on an instance that reports readiness (DCV or web), the only kind that
+// ever had them. Retried on the next tick if the delete fails; a key this start
+// has already written is never deleted.
+func (a *Agent) clearStaleReadyTags(ctx context.Context) {
+	if a.legacyReadyCleared || a.identity.Provider != "ec2" {
+		return
+	}
+	if a.config.DCVSessionID == "" && a.config.AppMode != "web" {
+		a.legacyReadyCleared = true
+		return
+	}
+	keys := []string{legacyReadyTokenTag}
+	if !a.dcvReadyURLWritten && !a.dcvAuthDone && !a.webReadyDone {
+		keys = append(keys, "spawn:ready-url", "spawn:ready-status", readyAuthTag)
+	}
+	if err := a.tagger.deleteTags(ctx, a.identity.InstanceID, keys); err != nil {
+		log.Printf("Warning: could not delete stale readiness tags: %v (retrying next tick)", err)
+		return
+	}
+	a.legacyReadyCleared = true
+}
+
+// pruneAccessTokens drops expired token hashes. Cheap: the directory holds one
+// file per connect. Only on an instance with a session to open.
+func (a *Agent) pruneAccessTokens() {
+	if a.config.DCVSessionID == "" && a.config.AppMode != "web" {
+		return
+	}
+	if _, err := a.tokenStore().Prune(); err != nil {
+		log.Printf("Warning: could not prune expired access tokens: %v", err)
+	}
 }
 
 // writeReadyTags writes spawn:ready-* tags to the instance. The run-once guard

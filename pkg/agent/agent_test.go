@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spore-host/spawn/pkg/accesstoken"
 	"github.com/spore-host/spawn/pkg/provider"
 )
 
@@ -144,6 +145,7 @@ func newTestAgent(t *testing.T, cfg *provider.Config) *Agent {
 		lastActivityTime: time.Now(),
 		dcv:              execDCVRunner{}, // real exec; writeFakeDCV puts a fake `dcv` on PATH
 		tagger:           &fakeTagPutter{},
+		accessTokens:     &accesstoken.Store{Dir: filepath.Join(t.TempDir(), "access-tokens")},
 	}
 	return a
 }
@@ -553,9 +555,8 @@ func TestDCVIdleSource_ActiveClients(t *testing.T) {
 func dcvAuthAgent(t *testing.T, runner dcvRunner, tagger tagPutter) *Agent {
 	t.Helper()
 	a := newTestAgent(t, &provider.Config{DCVSessionID: "console"})
-	a.identity.Provider = "ec2"       // maybeSetupDCVAuth no-ops on non-EC2
-	a.dcvVerifierStarted = true       // skip the real 127.0.0.1:8444 bind
-	a.dcvTokens = map[string]string{} // normally created by startDCVAuthVerifier
+	a.identity.Provider = "ec2" // maybeSetupDCVAuth no-ops on non-EC2
+	a.dcvVerifierStarted = true // skip the real 127.0.0.1:8444 bind
 	a.dcv = runner
 	a.tagger = tagger
 	return a
@@ -563,7 +564,7 @@ func dcvAuthAgent(t *testing.T, runner dcvRunner, tagger tagPutter) *Agent {
 
 // TestMaybeSetupDCVAuth_RetriesThenReady is the spawn#282 monitor-loop-retry
 // regression: a transient "session not present yet" must NOT latch dcvAuthDone
-// (so the next tick retries), and once the session appears the ready-url/token is
+// (so the next tick retries), and once the session appears the ready-url is
 // written and the handshake stops. The old fire-once goroutine made the transient
 // failure permanent.
 func TestMaybeSetupDCVAuth_RetriesThenReady(t *testing.T) {
@@ -590,9 +591,10 @@ func TestMaybeSetupDCVAuth_RetriesThenReady(t *testing.T) {
 	if got := tagger.tags["spawn:ready-status"]; got != string(dcvReady) {
 		t.Errorf("spawn:ready-status = %q, want %q", got, dcvReady)
 	}
-	if tagger.tags["spawn:ready-url"] == "" || tagger.tags["spawn:ready-token"] == "" {
-		t.Errorf("ready write missing url/token: %+v", tagger.tags)
+	if tagger.tags["spawn:ready-url"] == "" || tagger.tags[readyAuthTag] != readyAuthToken {
+		t.Errorf("ready write missing url/auth: %+v", tagger.tags)
 	}
+	assertNoTokenPublished(t, tagger)
 }
 
 // TestMaybeSetupDCVAuth_TerminalStops asserts a terminal status (dcv not

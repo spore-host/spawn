@@ -6,18 +6,18 @@ import (
 )
 
 func TestExtractReadyFromTags(t *testing.T) {
-	t.Run("ready with token + FQDN host", func(t *testing.T) {
+	t.Run("current spored: ready, token-free, FQDN host", func(t *testing.T) {
 		tags := map[string]string{
 			"spawn:ready-status": "ready",
-			"spawn:ready-url":    "https://box.5k0zfnmq.spore.host:8443/?authToken=deadbeef#console",
-			"spawn:ready-token":  "deadbeef",
+			"spawn:ready-url":    "https://box.5k0zfnmq.spore.host:8443/#console",
+			"spawn:ready-auth":   "token",
 		}
-		url, token, host, status := extractReadyFromTags(tags)
-		if status != "ready" {
-			t.Errorf("status = %q", status)
+		url, legacy, host, status, auth := extractReadyFromTags(tags)
+		if status != "ready" || auth != "token" {
+			t.Errorf("status = %q auth = %q", status, auth)
 		}
-		if token != "deadbeef" {
-			t.Errorf("token = %q, want deadbeef", token)
+		if legacy != "" {
+			t.Errorf("legacy token = %q, want none from a current spored", legacy)
 		}
 		if host != "box.5k0zfnmq.spore.host" {
 			t.Errorf("host = %q, want the FQDN", host)
@@ -27,36 +27,75 @@ func TestExtractReadyFromTags(t *testing.T) {
 		}
 	})
 
+	// A current spored never publishes a token, so a token-shaped value next
+	// to spawn:ready-auth (planted, or left over) must not be picked up.
+	t.Run("current spored: a stray token tag is ignored", func(t *testing.T) {
+		tags := map[string]string{
+			"spawn:ready-status": "ready",
+			"spawn:ready-url":    "https://box/?authToken=planted#console",
+			"spawn:ready-token":  "planted",
+			"spawn:ready-auth":   "token",
+		}
+		if _, legacy, _, _, _ := extractReadyFromTags(tags); legacy != "" {
+			t.Errorf("legacy token = %q, want it ignored when spawn:ready-auth is set", legacy)
+		}
+	})
+
+	t.Run("older spored: token from the tag", func(t *testing.T) {
+		tags := map[string]string{
+			"spawn:ready-status": "ready",
+			"spawn:ready-url":    "https://box.5k0zfnmq.spore.host:8443/?authToken=deadbeef#console",
+			"spawn:ready-token":  "deadbeef",
+		}
+		_, legacy, host, _, auth := extractReadyFromTags(tags)
+		if legacy != "deadbeef" || auth != "" {
+			t.Errorf("legacy = %q auth = %q, want deadbeef and none", legacy, auth)
+		}
+		if host != "box.5k0zfnmq.spore.host" {
+			t.Errorf("host = %q", host)
+		}
+	})
+
+	t.Run("older spored: web token from the url", func(t *testing.T) {
+		tags := map[string]string{
+			"spawn:ready-status": "ready",
+			"spawn:ready-url":    "https://box.5k0zfnmq.spore.host/?spore_token=cafe",
+		}
+		if _, legacy, _, _, _ := extractReadyFromTags(tags); legacy != "cafe" {
+			t.Errorf("legacy = %q, want cafe", legacy)
+		}
+	})
+
 	t.Run("terminal failure: status only, no url/token", func(t *testing.T) {
 		tags := map[string]string{"spawn:ready-status": "session-never-created"}
-		url, token, host, status := extractReadyFromTags(tags)
+		url, legacy, host, status, _ := extractReadyFromTags(tags)
 		if status != "session-never-created" {
 			t.Errorf("status = %q", status)
 		}
-		if url != "" || token != "" || host != "" {
-			t.Errorf("expected empty url/token/host, got url=%q token=%q host=%q", url, token, host)
+		if url != "" || legacy != "" || host != "" {
+			t.Errorf("expected empty url/token/host, got url=%q token=%q host=%q", url, legacy, host)
 		}
 	})
 
 	t.Run("empty tags", func(t *testing.T) {
-		_, token, _, status := extractReadyFromTags(map[string]string{})
-		if token != "" || status != "" {
-			t.Errorf("empty: token=%q status=%q", token, status)
+		_, legacy, _, status, _ := extractReadyFromTags(map[string]string{})
+		if legacy != "" || status != "" {
+			t.Errorf("empty: token=%q status=%q", legacy, status)
 		}
 	})
 
 	t.Run("web ready-url (no token, port-less host)", func(t *testing.T) {
-		// A web app's ready-url is https://<fqdn>/ — no :8443, no authToken (#590).
 		tags := map[string]string{
 			"spawn:ready-status": "ready",
 			"spawn:ready-url":    "https://box.5k0zfnmq.spore.host/",
+			"spawn:ready-auth":   "none",
 		}
-		_, token, host, status := extractReadyFromTags(tags)
-		if status != "ready" {
-			t.Errorf("status = %q", status)
+		_, legacy, host, status, auth := extractReadyFromTags(tags)
+		if status != "ready" || auth != "none" {
+			t.Errorf("status = %q auth = %q", status, auth)
 		}
-		if token != "" {
-			t.Errorf("web ready-url should have no token, got %q", token)
+		if legacy != "" {
+			t.Errorf("web ready-url should have no token, got %q", legacy)
 		}
 		if host != "box.5k0zfnmq.spore.host" {
 			t.Errorf("host = %q, want the FQDN (parsed up to the trailing slash)", host)

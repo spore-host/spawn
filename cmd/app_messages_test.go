@@ -120,8 +120,13 @@ func TestAppReconnectHint(t *testing.T) {
 	if !strings.Contains(dcv, "spawn connect i-0abc") || strings.Contains(dcv, "app launch") {
 		t.Errorf("DCV reconnect hint = %q, want spawn connect <id>", dcv)
 	}
-	if web := appReconnectHint(true, "i-0abc"); strings.Contains(web, "spawn ") {
+	web := appReconnectHint(true, "i-0abc")
+	if strings.Contains(web, "spawn connect") || strings.Contains(web, "app launch") {
 		t.Errorf("web reconnect hint = %q; spawn connect opens a shell there, not the app", web)
+	}
+	// The link expires (pkg/accesstoken), so the hint names how to get another.
+	if !strings.Contains(web, "spawn app url i-0abc") {
+		t.Errorf("web reconnect hint = %q, want spawn app url <id>", web)
 	}
 }
 

@@ -25,24 +25,33 @@ const (
 	webStatusProxyFailed   = "web-proxy-failed"   // terminal: TLS reverse proxy couldn't start
 )
 
-// extractReadyFromTags pulls the DCV handshake outcome out of an instance's tags:
-// the ready URL, the auth token (parsed from the URL's authToken= query param),
-// the host embedded in the URL (FQDN, may differ from the raw IP), and the
-// spawn:ready-status. Pure, so the CLI's tag-parse is unit-tested without EC2
-// (spawn#282). Any field is "" when absent.
-func extractReadyFromTags(tags map[string]string) (url, token, host, status string) {
+// extractReadyFromTags pulls the readiness handshake outcome out of an
+// instance's tags: the ready URL, the host embedded in it (FQDN, may differ
+// from the raw IP), spawn:ready-status and spawn:ready-auth. Pure, so the CLI's
+// tag-parse is unit-tested without EC2 (spawn#282). Any field is "" when absent.
+//
+// legacyToken is set only for an instance whose spored predates access-token
+// registration (no spawn:ready-auth): that spored published the session token
+// in spawn:ready-token and inside the ready-url. A current spored publishes no
+// token anywhere, so nothing is read from those for it.
+func extractReadyFromTags(tags map[string]string) (url, legacyToken, host, status, auth string) {
 	status = tags["spawn:ready-status"]
+	auth = tags[readyAuthTag]
 	url = tags["spawn:ready-url"]
-	if url == "" {
-		return url, "", "", status
-	}
-	// authToken= query param — stop at & or # or end.
-	if idx := strings.Index(url, "authToken="); idx >= 0 {
-		raw := url[idx+len("authToken="):]
-		if end := strings.IndexAny(raw, "&#"); end >= 0 {
-			raw = raw[:end]
+	if auth == "" {
+		legacyToken = tags[legacyReadyTokenTag]
+		for _, param := range []string{"authToken=", "spore_token="} {
+			if legacyToken != "" {
+				break
+			}
+			if idx := strings.Index(url, param); idx >= 0 {
+				raw := url[idx+len(param):]
+				if end := strings.IndexAny(raw, "&#"); end >= 0 {
+					raw = raw[:end]
+				}
+				legacyToken = raw
+			}
 		}
-		token = raw
 	}
 	// Host between https:// and the first ':' (port) or '/' (path). Handles both
 	// the DCV ready-url (https://host:8443/...) and the web ready-url (https://host/).
@@ -54,20 +63,27 @@ func extractReadyFromTags(tags map[string]string) (url, token, host, status stri
 			host = rest
 		}
 	}
-	return url, token, host, status
+	return url, legacyToken, host, status, auth
 }
 
-// dcvScanResult is one poll pass's reading of the target instance's DCV tags.
+// dcvScanResult is one poll pass's reading of the target instance's readiness tags.
 type dcvScanResult struct {
-	url     string // spawn:ready-url verbatim (web: carries the ?spore_token=); "" until ready
-	token   string // spawn:ready-token (auth token); "" until ready
-	host    string // FQDN from the ready-url, if present
-	dnsName string // spawn:dns-name, if spored registered one
-	status  string // spawn:ready-status (drives terminal/keep-polling)
+	url         string // spawn:ready-url verbatim; token-free from a current spored
+	legacyToken string // the token an older spored published (see extractReadyFromTags)
+	host        string // FQDN from the ready-url, if present
+	dnsName     string // spawn:dns-name, if spored registered one
+	status      string // spawn:ready-status (drives terminal/keep-polling)
+	auth        string // spawn:ready-auth: "token", "none", or "" (older spored)
+}
+
+// ready reports whether the session is up: a current spored says so in
+// ready-status; an older DCV one only by publishing its token.
+func (r dcvScanResult) ready() bool {
+	return r.status == dcvStatusReady || r.legacyToken != ""
 }
 
 // scanDCVReady finds the target instance in a ListInstances result and reads its
-// DCV handshake tags. Extracted from the app-launch poll loop so the tag
+// readiness tags. Extracted from the app-launch poll loop so the tag
 // round-trip is exercisable against the Substrate emulator without a real GPU
 // instance (spawn#282 phase 3). Returns a zero result if the instance isn't present.
 func scanDCVReady(instances []spawnclient.InstanceInfo, instanceID string) dcvScanResult {
@@ -75,13 +91,14 @@ func scanDCVReady(instances []spawnclient.InstanceInfo, instanceID string) dcvSc
 		if inst.InstanceID != instanceID {
 			continue
 		}
-		url, token, host, status := extractReadyFromTags(inst.Tags)
+		url, legacy, host, status, auth := extractReadyFromTags(inst.Tags)
 		return dcvScanResult{
-			url:     url,
-			token:   token,
-			host:    host,
-			dnsName: inst.Tags["spawn:dns-name"],
-			status:  status,
+			url:         url,
+			legacyToken: legacy,
+			host:        host,
+			dnsName:     inst.Tags["spawn:dns-name"],
+			status:      status,
+			auth:        auth,
 		}
 	}
 	return dcvScanResult{}

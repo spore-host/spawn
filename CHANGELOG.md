@@ -74,6 +74,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `organizations:DescribeOrganization`, rather than warning and creating it. It
   also checks the orchestrator account's own organization, with the infra
   credentials (#1583).
+- DCV and web-app session tokens are no longer published in EC2 tags. spored
+  now reports only that a session is ready (`spawn:ready-status`,
+  `spawn:ready-auth`, and a token-free `spawn:ready-url`); `spawn app launch`
+  and `spawn connect` mint a token locally and register only its SHA-256 on the
+  instance over SSM (`spored access-token add`). Each token expires (12 hours by
+  default) and is checked on every request, including the web proxy's cookie,
+  and a stop/start clears them all. New `spawn app url <instance>` prints a
+  fresh link, from any machine that can run SSM commands on the instance. On
+  start, spored deletes the `spawn:ready-token` tag and the token-bearing
+  `spawn:ready-url` an older spored left, and dashboard-api no longer returns
+  either. Session files under `~/.spawn/sessions` are now `0600`.
 
 ## [0.163.2] - 2026-11-11
 

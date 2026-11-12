@@ -25,8 +25,12 @@ worked example — see the full tutorial and a copyable pattern in the
 
 spawn runs your container on an ephemeral instance, publishes its port on
 localhost, and fronts it with **spored's `:443` TLS reverse proxy**, which gates
-access with a one-time token (`https://<host>/?spore_token=…` → a
-`Secure; HttpOnly` cookie). The token *is* the access control, so:
+access with an expiring token (`https://<host>/?spore_token=…` → a
+`Secure; HttpOnly` cookie that expires with it). spawn mints the token on your
+machine and registers only its SHA-256 on the instance over SSM, so it is never
+stored in AWS; each link lasts 12 hours, and `spawn app url <instance>` prints a
+fresh one, from any machine whose credentials can run SSM commands on the
+instance. The token *is* the access control, so:
 
 1. **Bind `0.0.0.0`, not localhost** — the published port must be reachable.
 2. **Run auth-less** — the proxy token already gates it (`--web-arg` /the image's

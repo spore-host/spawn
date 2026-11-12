@@ -66,3 +66,23 @@ List all streamable applications in the catalog
 spawn app list
 ```
 
+### `spawn app url`
+
+Print a fresh link to a running app's DCV session or web UI.
+
+Each run mints a new access token on this machine and registers only its
+SHA-256 on the instance over SSM; the token itself is never stored in AWS.
+The link expires after --ttl (default 12h). Run it again for a new one, from
+any machine whose credentials can run SSM commands on the instance.
+
+```
+spawn app url <instance> [flags]
+```
+
+**Flags:**
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--open` |  | bool |  | Open the link in the browser |
+| `--ttl` |  | duration | `12h0m0s` | How long the link stays valid (at most 168h) |
+

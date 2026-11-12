@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/spore-host/spawn/pkg/accesstoken"
 	"github.com/spore-host/spawn/pkg/plugin"
 	"github.com/spore-host/spawn/pkg/pluginruntime"
 	"github.com/spore-host/spawn/pkg/provider"
@@ -60,8 +61,8 @@ func readyURLHost(t *testing.T, raw string) string {
 }
 
 // 1a. A DCV ready-url built from the public IP (no DNS name) follows the IP
-// across a resume, on the monitor tick, with the same token, which the
-// verifier still accepts.
+// across a resume, on the monitor tick, and a token registered before the
+// resume still opens the session.
 func TestResumeRewritesDCVReadyURLWithTheNewIP(t *testing.T) {
 	ctx := context.Background()
 	tagger := &fakeTagPutter{}
@@ -74,7 +75,7 @@ func TestResumeRewritesDCVReadyURLWithTheNewIP(t *testing.T) {
 	if h := readyURLHost(t, before); h != "1.2.3.4" {
 		t.Fatalf("setup: ready-url host %q, want the boot IP 1.2.3.4", h)
 	}
-	token := tagger.tags["spawn:ready-token"]
+	token := registerTestToken(t, a, accesstoken.KindDCV)
 
 	resume()
 	a.checkAndAct(ctx)
@@ -84,14 +85,12 @@ func TestResumeRewritesDCVReadyURLWithTheNewIP(t *testing.T) {
 		t.Fatalf("ready-url after the resume = %q, want host %s", after, resumedIP)
 	}
 	if want := strings.Replace(before, "1.2.3.4", resumedIP, 1); after != want {
-		t.Errorf("ready-url after the resume = %q, want %q (same token and session)", after, want)
+		t.Errorf("ready-url after the resume = %q, want %q (same session)", after, want)
 	}
-	if tagger.tags["spawn:ready-token"] != token {
-		t.Errorf("spawn:ready-token changed across the resume")
+	if ok, _ := a.tokenStore().Verify(accesstoken.KindDCV, token); !ok {
+		t.Error("the verifier no longer accepts a token registered before the resume")
 	}
-	if _, ok := a.dcvTokens[token]; !ok {
-		t.Error("the verifier no longer accepts the token the rewritten URL carries")
-	}
+	assertNoTokenPublished(t, tagger)
 
 	// Nothing changes on the next tick: no rewrite loop.
 	n := tagger.calls
@@ -101,7 +100,7 @@ func TestResumeRewritesDCVReadyURLWithTheNewIP(t *testing.T) {
 	}
 }
 
-// 1b. The same for a web app's ready-url: the proxy's access token is kept.
+// 1b. The same for a web app's ready-url.
 func TestResumeRewritesWebReadyURLWithTheNewIP(t *testing.T) {
 	ctx := context.Background()
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})) // the web app spored probes; it answers 200 with no body
@@ -130,9 +129,10 @@ func TestResumeRewritesWebReadyURLWithTheNewIP(t *testing.T) {
 	resume()
 	a.checkAndAct(ctx)
 
-	if want := buildWebReadyURL(resumedIP, a.webToken); tagger.tags["spawn:ready-url"] != want {
+	if want := accesstoken.WebURL(resumedIP, ""); tagger.tags["spawn:ready-url"] != want {
 		t.Errorf("ready-url after the resume = %q, want %q", tagger.tags["spawn:ready-url"], want)
 	}
+	assertNoTokenPublished(t, tagger)
 }
 
 // 1c. With a DNS name the URL names the FQDN, which DNS keeps current: no
