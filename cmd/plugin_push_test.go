@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -10,12 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/pushseal"
 )
 
 // #855: `spawn plugin install` reached spored's loopback push API only over
@@ -32,6 +35,7 @@ type ssmSandbox struct {
 	dir     string
 	rw      *strings.Replacer
 	scripts []string
+	outputs []string
 }
 
 func newSSMSandbox(t *testing.T, sporedURL string) *ssmSandbox {
@@ -61,6 +65,7 @@ func (sb *ssmSandbox) run(_ context.Context, _, _, script string) (*aws.SSMRunRe
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+	sb.outputs = append(sb.outputs, stdout.String(), stderr.String())
 	res := &aws.SSMRunResult{Status: "Success", Stdout: stdout.String(), Stderr: stderr.String()}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -71,23 +76,74 @@ func (sb *ssmSandbox) run(_ context.Context, _, _, script string) (*aws.SSMRunRe
 	return res, nil
 }
 
-// recordingSpored is a push API that records what it received.
+// recordingSpored is a push API that records what it received: behind the
+// same sealed-delivery front spored has (pkg/pushseal), so method, path and
+// body are what the push API's routes saw, and auth is the bearer token on the
+// request that reached spored. legacy drops the sealed front, as a spored
+// before it.
 type recordingSpored struct {
 	method, path, auth string
 	body               []byte
 	status             int
 	answer             string
+	legacy             bool
 }
 
 func (r *recordingSpored) server(t *testing.T) *httptest.Server {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		r.method, r.path, r.auth = req.Method, req.URL.Path, req.Header.Get("Authorization")
+	routes := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if r.legacy && (req.URL.Path == pushseal.KeyPath || req.URL.Path == pushseal.SealedPath) {
+			http.NotFound(w, req)
+			return
+		}
+		r.method, r.path = req.Method, req.URL.Path
 		r.body, _ = io.ReadAll(req.Body)
 		w.WriteHeader(r.status)
 		_, _ = io.WriteString(w, r.answer) // nosemgrep
+	})
+	var front http.Handler = pushseal.NewServer(routes)
+	if r.legacy {
+		front = routes
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.auth = req.Header.Get("Authorization")
+		front.ServeHTTP(w, req)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// sandboxRecord is every script sent over SSM and every output it gave back:
+// what SSM's command history would keep, plus whatever the base64 staged in
+// those scripts decodes to (a body is split across commands, so the runs are
+// decoded joined, from every starting point).
+func (sb *ssmSandbox) record() string {
+	rec := strings.Join(sb.scripts, "\n") + "\n" + strings.Join(sb.outputs, "\n")
+	runs := regexp.MustCompile(`[A-Za-z0-9+/]{8,}={0,2}`).FindAllString(strings.Join(sb.scripts, "\n"), -1)
+	var decoded []string
+	for i := range runs {
+		joined := ""
+		for _, r := range runs[i:] {
+			joined += r
+			if b, err := base64.StdEncoding.DecodeString(joined); err == nil {
+				decoded = append(decoded, string(b))
+			}
+		}
+	}
+	return rec + "\n" + strings.Join(decoded, "\n")
+}
+
+// assertNotRecorded fails if any of secrets, or its base64, is in what SSM
+// would keep.
+func assertNotRecorded(t *testing.T, sb *ssmSandbox, secrets ...string) {
+	t.Helper()
+	rec := sb.record()
+	for _, sec := range secrets {
+		for _, form := range []string{sec, base64.StdEncoding.EncodeToString([]byte(sec))} {
+			if strings.Contains(rec, form) {
+				t.Errorf("%q is in what SSM records (as %q)", sec, form)
+			}
+		}
+	}
 }
 
 func testSpec(t *testing.T, extra int) *plugin.PluginSpec {
@@ -155,8 +211,38 @@ func TestPluginInstallOnAKeylessInstanceGoesOverSSMWithTheSamePayload(t *testing
 			if left, _ := filepath.Glob(filepath.Join(sb.dir, "spawn-push-*")); len(left) != 0 {
 				t.Errorf("staging files left on the instance: %v", left)
 			}
+			// The pushed secret, the config and the spec travel sealed.
+			assertNotRecorded(t, sb, "s3cr3t", `"k":"v"`, "echo hi")
 		})
 	}
+}
+
+// A status answer echoes the plugin's config and pushed values: it comes back
+// sealed too.
+func TestPluginStatusOverSSMKeepsTheAnswerOutOfSSMHistory(t *testing.T) {
+	spored := &recordingSpored{status: http.StatusOK, answer: `{"name":"demo","status":"running","config":{"password":"hunter2"},"pushed":{"reg_token":"AAAtoken"}}`}
+	sb := newSSMSandbox(t, spored.server(t).URL)
+	push := ssmPush{region: "r", instanceID: "i", run: sb.run}
+	st, err := remotePluginStatus(context.Background(), push, "i", "demo")
+	if err != nil || st.Status != plugin.StatusRunning || st.Config["password"] != "hunter2" {
+		t.Fatalf("status over SSM = %+v, %v", st, err)
+	}
+	assertNotRecorded(t, sb, "hunter2", "AAAtoken")
+}
+
+// A spored without the sealed endpoint is refused: nothing is sent in clear.
+func TestPluginInstallOverSSMRefusesASporedWithoutSealing(t *testing.T) {
+	spored := &recordingSpored{status: http.StatusAccepted, answer: `{}`, legacy: true}
+	sb := newSSMSandbox(t, spored.server(t).URL)
+	push := ssmPush{region: "r", instanceID: "i-old", run: sb.run}
+	err := remotePluginInstall(context.Background(), push, testSpec(t, 0), map[string]string{"k": "v"}, map[string]string{"secret": "s3cr3t"}, nil)
+	if !errors.Is(err, errSealUnsupported) || !strings.Contains(err.Error(), "upgrade-spored i-old") {
+		t.Fatalf("err = %v, want errSealUnsupported naming spawn upgrade-spored", err)
+	}
+	if spored.path != "" {
+		t.Errorf("the push API received %s %s from a spawn that should have refused", spored.method, spored.path)
+	}
+	assertNotRecorded(t, sb, "s3cr3t", `"k":"v"`)
 }
 
 func TestPluginPushOverSSMReportsTheAnswer(t *testing.T) {

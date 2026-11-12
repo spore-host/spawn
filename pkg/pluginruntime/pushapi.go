@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/pushseal"
 )
 
 // pluginNameRe matches valid plugin names: alphanumeric, dash, underscore; 1–64 chars.
@@ -37,6 +38,7 @@ type PushAPIServer struct {
 	token   string
 	server  *http.Server
 	baseCtx context.Context // lifecycle ctx for async installs; set in Start
+	sealed  *pushseal.Server
 }
 
 // NewPushAPIServer creates and initialises the push API server.
@@ -51,11 +53,22 @@ func NewPushAPIServer(rt *Runtime) (*PushAPIServer, error) {
 
 	s.server = &http.Server{
 		Addr:         pushAPIAddr,
-		Handler:      s.authMiddleware(s.routes()),
+		Handler:      s.authMiddleware(s.handler()),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
 	return s, nil
+}
+
+// handler is the push API with sealed delivery in front of its routes,
+// unauthenticated (wrap it in authMiddleware). A call that reaches spored over
+// SSM, whose command history keeps parameters and output, arrives and leaves
+// sealed (pkg/pushseal); over SSH it uses the routes directly.
+func (s *PushAPIServer) handler() http.Handler {
+	if s.sealed == nil {
+		s.sealed = pushseal.NewServer(s.routes())
+	}
+	return s.sealed
 }
 
 // routes returns the push API's handler, unauthenticated (wrap it in

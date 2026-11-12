@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/spore-host/spawn/pkg/plugin"
+	"github.com/spore-host/spawn/pkg/pushseal"
 )
 
 // newTestServer creates a PushAPIServer backed by an in-memory store and
@@ -276,5 +279,52 @@ func TestRuntime_RemoveNotInstalled_IsErrNotInstalled(t *testing.T) {
 	corruptPlugin(t, dir, "broken")
 	if err := rt.Remove(context.Background(), "broken"); err == nil || errors.Is(err, plugin.ErrNotInstalled) {
 		t.Errorf("Remove(broken) = %v, want a failure that is not ErrNotInstalled", err)
+	}
+}
+
+// Over SSM a call arrives sealed (pkg/pushseal). The sealed endpoints are
+// behind the same bearer token as the rest, and a sealed install reaches the
+// same handler as a plain one.
+func TestPushAPI_SealedCall(t *testing.T) {
+	s, _ := newTestServer(t)
+	srv := httptest.NewServer(s.authMiddleware(s.handler()))
+	t.Cleanup(srv.Close)
+
+	get := func(path, auth string) (int, []byte) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+	if code, _ := get(pushseal.KeyPath, ""); code != http.StatusUnauthorized {
+		t.Errorf("seal key without the token: %d, want 401", code)
+	}
+	code, offer := get(pushseal.KeyPath, "Bearer test-token")
+	if code != http.StatusOK {
+		t.Fatalf("seal key: %d", code)
+	}
+	seedPlugin(t, s.rt, "demo", plugin.StatusRunning)
+	env, open, err := pushseal.Seal(offer, http.MethodGet, "/v1/plugins/demo/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+pushseal.SealedPath, bytes.NewReader(env))
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	st, body, err := open(reply)
+	if err != nil || st != http.StatusOK || !strings.Contains(string(body), `"name":"demo"`) {
+		t.Errorf("sealed status = %d %s %v", st, body, err)
 	}
 }

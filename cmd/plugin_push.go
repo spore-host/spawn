@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/pushseal"
 	"github.com/spore-host/spawn/pkg/security"
 )
 
@@ -26,7 +27,8 @@ import (
 // or — for an instance with no SSH path (keyless, SSM-only, no public IP) — by
 // running curl on the instance over SSM SendCommand, the machinery `spawn
 // extend` uses for the same reason (#1113). The token never leaves the
-// instance on the SSM path (#855).
+// instance on the SSM path (#855), and the request and answer travel sealed
+// there (pkg/pushseal), since SSM's command history keeps both.
 
 // pluginTransportFor is the transport plugin commands use; a var so tests can
 // substitute a recording one.
@@ -205,7 +207,44 @@ func truncateForError(s string) string {
 	return s
 }
 
+// errSealUnsupported: the instance's spored has no sealed endpoint, so a call
+// over SSM would put the request and the answer in SSM's command history in
+// clear.
+var errSealUnsupported = errors.New("the instance's spored predates encrypted plugin delivery over SSM")
+
+// call makes one push-API call sealed end to end (pkg/pushseal): SSM's command
+// history keeps every command's text and output, and plugin config, pushed
+// values and the status answers that echo them carry secrets. Two SendCommand
+// round trips, a key fetch and the sealed call; the history holds only a
+// public key and ciphertext. It refuses rather than falls back to clear text
+// on a spored without the sealed endpoint.
 func (s ssmPush) call(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	code, offer, err := s.rawCall(ctx, http.MethodGet, pushseal.KeyPath, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if code == http.StatusNotFound {
+		return 0, nil, fmt.Errorf("%w; plugin config and pushed values would be stored in clear in SSM command history, so spawn will not send them over SSM. Upgrade it (spawn upgrade-spored %s), or reach it over SSH", errSealUnsupported, s.instanceID)
+	}
+	if code != http.StatusOK {
+		return 0, nil, fmt.Errorf("push API seal key: HTTP %d: %s", code, truncateForError(string(offer)))
+	}
+	env, open, err := pushseal.Seal(offer, method, path, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	code, reply, err := s.rawCall(ctx, http.MethodPost, pushseal.SealedPath, env)
+	if err != nil {
+		return 0, nil, err
+	}
+	if code != http.StatusOK {
+		return 0, nil, fmt.Errorf("push API sealed call: HTTP %d: %s", code, truncateForError(string(reply)))
+	}
+	return open(reply)
+}
+
+// rawCall runs one loopback request on the instance over SSM, as is.
+func (s ssmPush) rawCall(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
 	nonce := randomNonce
 	if s.nonce != nil {
 		nonce = s.nonce
