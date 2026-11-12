@@ -206,6 +206,10 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		if externalID != "" {
 			return fmt.Errorf("--external-id is only meaningful with --role-arn; without it spawn uses the %s role's own ExternalId", botCrossAccountRoleName)
 		}
+		// The account boundary, before any IAM call (#1582).
+		if err := checkCrossAccountTrust(ctx, cfg, accountID, botPrincipal, botCrossAccountRoleName); err != nil {
+			return err
+		}
 		fmt.Printf("No --role-arn provided — ensuring %s role exists in account %s...\n",
 			botCrossAccountRoleName, accountID)
 		roleARN, externalID, err = bot.EnsureCrossAccountRole(ctx, iam.NewFromConfig(cfg),

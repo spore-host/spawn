@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 
 	"github.com/spore-host/spawn/pkg/sweep"
+	"github.com/spore-host/spawn/pkg/trustboundary"
 )
 
 // SpawnSweepCrossAccountRole, provisioned by spawn (#1537).
@@ -264,15 +265,9 @@ func SweepCrossAccountTrustDocument(orchestratorAccount string) (string, error) 
 
 // --- the account boundary ---------------------------------------------------
 
-// forbiddenTrustAccounts are accounts no SpawnSweepCrossAccountRole may be
-// created in or trust, whatever the credentials allow. Hardcoded on purpose:
-// a configurable deny is one a profile can switch off.
-var forbiddenTrustAccounts = map[string]string{
-	"942542972736": "an Amazon-internal account and the management account of AWS Organization " +
-		"o-pygqyjjoym. No spore.host account may be trusted into it or out of it, and an ExternalId " +
-		"or tag-gated least privilege does not change that: a trust created there once was " +
-		"detected and force-denied in 12 minutes",
-}
+// The forbidden accounts and the management-account rule live in
+// pkg/trustboundary, shared with every other path that writes cross-account
+// trust (`spawn onboard`, `spawn notify register`; #1582).
 
 // sharedInfraAccount is spore.host's shared control-plane account. It runs
 // the orchestrator and launches no sweep members, so a sweep role there means
@@ -283,11 +278,16 @@ const sharedInfraAccount = "966362334030"
 type SweepRoleRefusedError struct {
 	Account string
 	Why     string
+	err     error
 }
 
 func (e *SweepRoleRefusedError) Error() string {
-	return fmt.Sprintf("refusing to create or trust %s with account %s: it is %s", sweep.CrossAccountRoleName, e.Account, e.Why)
+	return fmt.Sprintf("refusing to create or trust %s with account %s: %s", sweep.CrossAccountRoleName, e.Account, e.Why)
 }
+
+// Unwrap is the trustboundary refusal it came from, when there is one, so
+// errors.Is(err, trustboundary.ErrOrganizationUnknown) works.
+func (e *SweepRoleRefusedError) Unwrap() error { return e.err }
 
 // ManagementAccountLookup returns the management account of the AWS
 // Organization the caller's account belongs to, "" with no error when it
@@ -296,38 +296,38 @@ type ManagementAccountLookup func(ctx context.Context) (string, error)
 
 // CheckSweepRoleAccounts refuses SpawnSweepCrossAccountRole in computeAccount
 // trusting the orchestrator in orchestratorAccount when either account is a
-// forbidden one, or is the management account of computeAccount's
-// Organization (a trust into or out of a management account reaches the whole
-// organization). When the Organization cannot be read, it warns and allows:
-// the hardcoded accounts are refused whatever Organizations says.
+// forbidden one, the shared control-plane account (as the compute end), or the
+// management account of computeAccount's Organization. It fails closed: when
+// mgmt cannot read the Organization, the role is refused (#1583). warn is
+// unused and kept for the signature. CheckSweepRoleTrust also checks the
+// orchestrator account's own Organization.
 func CheckSweepRoleAccounts(ctx context.Context, computeAccount, orchestratorAccount string, mgmt ManagementAccountLookup, warn func(string)) error {
-	for _, a := range []string{computeAccount, orchestratorAccount} {
-		if why, bad := forbiddenTrustAccounts[a]; bad {
-			return &SweepRoleRefusedError{Account: a, Why: why}
-		}
-	}
+	_ = warn
+	return CheckSweepRoleTrust(ctx, computeAccount, orchestratorAccount, mgmt, nil)
+}
+
+// CheckSweepRoleTrust is CheckSweepRoleAccounts with a lookup for each end:
+// computeMgmt with the compute account's credentials, orchestratorMgmt with
+// the orchestrator account's (the infra credentials). Either may be nil, which
+// skips that Organization; every error from one refuses (#1583).
+func CheckSweepRoleTrust(ctx context.Context, computeAccount, orchestratorAccount string, computeMgmt, orchestratorMgmt ManagementAccountLookup) error {
 	if computeAccount == sharedInfraAccount {
+		if why, bad := trustboundary.Forbidden(computeAccount); bad {
+			return &SweepRoleRefusedError{Account: computeAccount, Why: why}
+		}
 		return &SweepRoleRefusedError{Account: computeAccount, Why: "spore.host's shared control-plane account, " +
 			"which runs the sweep orchestrator and launches no sweep members: the compute credentials are " +
 			"aimed at the wrong account"}
 	}
-	if mgmt == nil {
-		return nil
+	err := trustboundary.Check(ctx,
+		trustboundary.Side{What: "the compute account", Account: computeAccount, Mgmt: trustboundary.ManagementLookup(computeMgmt)},
+		trustboundary.Side{What: "the sweep orchestrator's account", Account: orchestratorAccount, Mgmt: trustboundary.ManagementLookup(orchestratorMgmt)},
+	)
+	var refused *trustboundary.RefusedError
+	if errors.As(err, &refused) {
+		return &SweepRoleRefusedError{Account: refused.Account, Why: refused.Why, err: refused}
 	}
-	m, err := mgmt(ctx)
-	if err != nil {
-		warn(fmt.Sprintf("could not tell whether account %s is an AWS Organizations management account (%v); "+
-			"spawn never puts %s in one, and checks again on every detached sweep", computeAccount, err, sweep.CrossAccountRoleName))
-		return nil
-	}
-	for _, a := range []string{computeAccount, orchestratorAccount} {
-		if m != "" && a == m {
-			return &SweepRoleRefusedError{Account: a, Why: "the management account of its AWS Organization. " +
-				"A trust into or out of a management account reaches every account in the organization, " +
-				"so spawn never creates one; launch detached sweeps from a member account"}
-		}
-	}
-	return nil
+	return err
 }
 
 // --- provisioning -------------------------------------------------------------
@@ -383,8 +383,8 @@ func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeA
 	// Belt and braces: CheckSweepRoleAccounts is the caller's, and this is the
 	// one function that creates the trust.
 	for _, a := range []string{computeAccount, orchestratorAccount} {
-		if why, bad := forbiddenTrustAccounts[a]; bad {
-			return out, &SweepRoleRefusedError{Account: a, Why: why}
+		if why, bad := trustboundary.Forbidden(a); bad {
+			return out, &SweepRoleRefusedError{Account: a, Why: "it is " + why}
 		}
 	}
 	trust, err := SweepCrossAccountTrustDocument(orchestratorAccount)

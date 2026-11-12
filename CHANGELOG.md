@@ -63,6 +63,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching the live portal role and the BYOA CloudFormation template
   (spore-host#694). An explicit `Deny` stops it writing the ownership tags
   (`spawn:managed`, …) onto an existing instance.
+- `spawn onboard` and `spawn notify register` now refuse, before any IAM call,
+  to create a cross-account role in or trusting account 942542972736 or an AWS
+  Organizations management account (#1582). The check is shared with the sweep
+  role (`pkg/trustboundary`). `ttl-reaper-cross-account-role.yaml` and
+  `bot-cross-account-role.yaml` carry a CloudFormation rule refusing
+  942542972736, and CI fails any cross-account template without one.
+- The sweep role's management-account check now fails closed: when AWS
+  Organizations cannot be read, spawn refuses to create the role and names
+  `organizations:DescribeOrganization`, rather than warning and creating it. It
+  also checks the orchestrator account's own organization, with the infra
+  credentials (#1583).
 
 ## [0.163.2] - 2026-11-11
 

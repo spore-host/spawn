@@ -24,6 +24,7 @@ import (
 	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/sweep"
 	"github.com/spore-host/spawn/pkg/testutil"
+	"github.com/spore-host/spawn/pkg/trustboundary"
 )
 
 // #1537: spawn provisions SpawnSweepCrossAccountRole. These tests drive the
@@ -227,8 +228,9 @@ func TestSweepRoleRefusesTheForbiddenAccount(t *testing.T) {
 }
 
 // Any Organizations management account is refused, as the compute account or
-// as the orchestrator's; a member account, an account in no organization and
-// an organization that cannot be read are not (the last with a warning).
+// as the orchestrator's; so is an organization that cannot be read (#1583:
+// this used to warn and allow). A member account and an account in no
+// organization are not.
 func TestSweepRoleRefusesAManagementAccount(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -241,7 +243,7 @@ func TestSweepRoleRefusesAManagementAccount(t *testing.T) {
 		{"orchestrator is the management account", sweepOrchestrator, nil, sweepOrchestrator, 0},
 		{"member of another's organization", "777788889999", nil, "", 0},
 		{"no organization", "", nil, "", 0},
-		{"organization unreadable", "", errors.New("AccessDeniedException: not authorized"), "", 1},
+		{"organization unreadable", "", errors.New("AccessDeniedException: not authorized"), sweepCompute, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -256,6 +258,9 @@ func TestSweepRoleRefusesAManagementAccount(t *testing.T) {
 				var refused *SweepRoleRefusedError
 				if !errors.As(err, &refused) || refused.Account != c.refused || !strings.Contains(err.Error(), "management account") {
 					t.Fatalf("err = %v, want a management-account refusal of %s", err, c.refused)
+				}
+				if unknown := errors.Is(err, trustboundary.ErrOrganizationUnknown); unknown != (c.err != nil) {
+					t.Errorf("errors.Is(err, ErrOrganizationUnknown) = %v, want %v", unknown, c.err != nil)
 				}
 			}
 			if len(w) != c.warns {
@@ -797,5 +802,27 @@ func TestSweepRole_AgainstIAM(t *testing.T) {
 	}
 	if _, err := ic.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(sweep.CrossAccountRoleName)}); !isNoSuchEntity(err) {
 		t.Errorf("the role is still there after teardown: %v", err)
+	}
+}
+
+// The orchestrator account's own organization is checked too, with its own
+// lookup (#1583): it used to be compared only with the compute account's
+// organization, so a management account on the infra side was never seen.
+func TestSweepRoleChecksTheOrchestratorsOrganization(t *testing.T) {
+	member := func(context.Context) (string, error) { return "", nil }
+	for name, c := range map[string]struct {
+		orch    ManagementAccountLookup
+		refused bool
+	}{
+		"orchestrator manages its organization": {func(context.Context) (string, error) { return sweepOrchestrator, nil }, true},
+		"orchestrator organization unreadable":  {func(context.Context) (string, error) { return "", errors.New("throttled") }, true},
+		"orchestrator is a member":              {func(context.Context) (string, error) { return "777788889999", nil }, false},
+		"orchestrator in no organization":       {member, false},
+	} {
+		err := CheckSweepRoleTrust(t.Context(), sweepCompute, sweepOrchestrator, member, c.orch)
+		var refused *SweepRoleRefusedError
+		if got := errors.As(err, &refused); got != c.refused {
+			t.Errorf("%s: err = %v, want refused=%v", name, err, c.refused)
+		}
 	}
 }

@@ -90,6 +90,25 @@ Parameters:
       in lambda/ttl-reaper/template.yaml). The forwarder role may put events on
       this one bus only.
 
+# The account boundary (spawn#1582). TestCrossAccountTemplatesRefuseTheForbiddenAccount
+# fails CI for any template whose role trusts another account without this rule.
+Rules:
+  NotTheForbiddenAccount:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref 'AWS::AccountId', '942542972736']]
+        AssertDescription: >-
+          This template creates a role another account can assume, and must
+          never be deployed in 942542972736: an Amazon-internal account and the
+          management account of its AWS Organization, which no spore.host
+          account may be trusted into or out of (spawn#1582). Deploy it in a
+          member account. A management account of any other organization is
+          refused by spawn's CLI paths, which can ask AWS Organizations; this
+          rule cannot, so do not deploy it in one either.
+      - Assert: !Not [!Equals [!Ref ReaperAccountId, '942542972736']]
+        AssertDescription: >-
+          ReaperAccountId must never be 942542972736: no spore.host role may
+          trust it (spawn#1582).
+
 Conditions:
   InstanceEventsEnabled: !Equals [!Ref InstanceEvents, 'on']
 
