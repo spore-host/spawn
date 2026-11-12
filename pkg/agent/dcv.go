@@ -115,13 +115,6 @@ func classifyDCVStatus(dcvInstalled bool, listErr error, listOutput, sessionID s
 	return dcvWaiting
 }
 
-// buildReadyURL constructs the DCV browser connect URL: the auth token rides the
-// query string and the session id the URL hash, per AWS's external-auth spec.
-// Pure (extracted from setupDCVAuth) so it's unit-tested.
-func buildReadyURL(host, token, sessionID string) string {
-	return fmt.Sprintf("https://%s:8443/?authToken=%s#%s", host, token, sessionID)
-}
-
 // parseDCVConnections extracts the connected-client count from
 // `dcv describe-session --json` output. Pure; returns an error the caller maps
 // to its "DCV not ready" signal (distinct from a real 0-connections idle).

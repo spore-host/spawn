@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
+	"github.com/spore-host/spawn/pkg/accesstoken"
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/sshkey"
@@ -721,13 +722,17 @@ func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceI
 		return err
 	}
 
-	// Wait for spored to write a fresh spawn:ready-url (new token after restart)
+	// Wait for this start's spored to report the session ready (it clears the
+	// last start's readiness tags when it comes up), then register a fresh
+	// access token over SSM (pkg/accesstoken).
 	fmt.Fprintf(os.Stderr, "Waiting for DCV session")
 	// scanDCVReady (cmd/dcv.go:73) rather than a hand-rolled tag parse (#752).
 	// This duplicated extractReadyFromTags by hand and so lacked the
 	// terminal-failure detection cmd/app.go has — meaning a NAMED failure spun
 	// to the generic five-minute timeout instead of reporting its cause (#282).
+	var scan dcvScanResult
 	var readyURL, authToken, lastStatus string
+	ready := false
 	for i := 0; i < 60; i++ {
 		// select rather than a bare sleep, so a cancelled context ends the poll
 		// instead of being ignored for five minutes.
@@ -742,15 +747,10 @@ func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceI
 		if err != nil {
 			continue
 		}
-		scan := scanDCVReady(instances, instance.InstanceID)
+		scan = scanDCVReady(instances, instance.InstanceID)
 		lastStatus = scan.status
-		if scan.token != "" {
-			authToken = scan.token
-		}
-		if scan.url != "" {
-			readyURL = scan.url
-		}
-		if authToken != "" {
+		if scan.ready() {
+			ready = true
 			fmt.Fprintf(os.Stderr, " ready\n")
 			break
 		}
@@ -760,11 +760,20 @@ func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceI
 			break
 		}
 	}
-	if authToken == "" {
+	if !ready {
 		if dcvStatusTerminal(lastStatus) {
 			fmt.Fprintf(os.Stderr, "   %s\n", dcvFailureMessage(lastStatus, instance.InstanceID))
 		} else {
 			fmt.Fprintf(os.Stderr, " (timed out)\n")
+		}
+	} else {
+		t, err := sessionToken(ctx, clientShellRunner(client), instance.Region, instance.InstanceID, scan, accesstoken.KindDCV, accesstoken.DefaultTTL, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Could not register a session access token: %v\n", err)
+		}
+		authToken = t
+		if scan.host != "" {
+			readyURL = sessionURL(accesstoken.KindDCV, scan.host, authToken, instance.Tags["spawn:dcv-session-id"])
 		}
 	}
 
@@ -803,7 +812,7 @@ func connectDCV(ctx context.Context, client *aws.Client, instance *aws.InstanceI
 	if host == "" {
 		return fmt.Errorf("instance has no public IP or DNS name")
 	}
-	return openBrowser(fmt.Sprintf("https://%s:8443", host))
+	return openBrowser(sessionURL(accesstoken.KindDCV, host, authToken, instance.Tags["spawn:dcv-session-id"]))
 }
 
 // dcvFallbackHost is the host connectDCV opens when it has neither a session
@@ -855,7 +864,12 @@ func updateSessionHTMLToken(path, token string, instance *aws.InstanceInfo) erro
 		return fmt.Errorf("AUTH_TOKEN end not found")
 	}
 	content = content[:start] + token + content[start+end:]
-	return os.WriteFile(path, []byte(content), 0644)
+	// 0600: the file carries a session token. Chmod too, for a file an older
+	// spawn created world-readable.
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // focusDCVTab tries to bring an existing browser tab containing instanceID to

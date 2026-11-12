@@ -80,7 +80,8 @@ var tagWriteSites = map[string]tagWriteSite{
 // notWrittenMentions are keys spored's code spells in a shape the scan cannot
 // place that are not writes. Only a mention is excused, never a write.
 var notWrittenMentions = map[string]string{
-	"spawn:config": "spored reads it to load the launch config object (pkg/provider launchConfigLoader) and never writes it",
+	"spawn:config":      "spored reads it to load the launch config object (pkg/provider launchConfigLoader) and never writes it",
+	"spawn:ready-token": "spored only DELETES it (pkg/agent clearStaleReadyTags): an older spored published the session token there",
 }
 
 func inSporedDirs(declID string) bool {

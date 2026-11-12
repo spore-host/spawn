@@ -50,14 +50,6 @@ func TestDCVStatusTerminal(t *testing.T) {
 	}
 }
 
-func TestBuildReadyURL(t *testing.T) {
-	got := buildReadyURL("box.5k0zfnmq.spore.host", "abc123", "console")
-	want := "https://box.5k0zfnmq.spore.host:8443/?authToken=abc123#console"
-	if got != want {
-		t.Errorf("buildReadyURL = %q, want %q", got, want)
-	}
-}
-
 func TestParseDCVConnections(t *testing.T) {
 	n, err := parseDCVConnections([]byte(`{"num-of-connections":3,"id":"console"}`))
 	if err != nil || n != 3 {

@@ -42,7 +42,7 @@ func seedInstance(t *testing.T, ec2Client *ec2.Client, tags map[string]string) s
 
 // TestAppLaunchPoll_ReadyOnSuccess is the spawn#282 Tier-0 round-trip: spored
 // writes spawn:ready-* tags, the CLI's poll path reads them back via the real
-// ListInstances + scanDCVReady, and recovers the token/host. This is the exact
+// ListInstances + scanDCVReady, and recovers readiness, auth mode and host. This is the exact
 // branch that previously surfaced only the generic timeout — now exercised
 // off-instance against the Substrate emulator.
 func TestAppLaunchPoll_ReadyOnSuccess(t *testing.T) {
@@ -51,11 +51,10 @@ func TestAppLaunchPoll_ReadyOnSuccess(t *testing.T) {
 	ec2Client := ec2.NewFromConfig(env.AWSConfig)
 	client := spawnclient.NewClientFromConfig(env.AWSConfig)
 
-	const token = "abc123def456"
 	instID := seedInstance(t, ec2Client, map[string]string{
 		"spawn:ready-status": dcvStatusReady,
-		"spawn:ready-token":  token,
-		"spawn:ready-url":    "https://host.123.spore.host:8443/?authToken=" + token + "#console",
+		"spawn:ready-auth":   readyAuthToken,
+		"spawn:ready-url":    "https://host.123.spore.host:8443/#console",
 		"spawn:dns-name":     "host.123.spore.host",
 	})
 
@@ -68,8 +67,8 @@ func TestAppLaunchPoll_ReadyOnSuccess(t *testing.T) {
 	if scan.status != dcvStatusReady {
 		t.Errorf("status = %q, want %q", scan.status, dcvStatusReady)
 	}
-	if scan.token != token {
-		t.Errorf("token = %q, want %q", scan.token, token)
+	if !scan.ready() || scan.auth != readyAuthToken {
+		t.Errorf("ready = %v auth = %q, want ready and %q", scan.ready(), scan.auth, readyAuthToken)
 	}
 	if scan.host != "host.123.spore.host" {
 		t.Errorf("host = %q, want host.123.spore.host", scan.host)
@@ -99,8 +98,8 @@ func TestAppLaunchPoll_NamedReasonOnFailure(t *testing.T) {
 	}
 	scan := scanDCVReady(instances, instID)
 
-	if scan.token != "" {
-		t.Errorf("token = %q, want empty on a failure status", scan.token)
+	if scan.ready() {
+		t.Error("a failure status must not read as ready")
 	}
 	if !dcvStatusTerminal(scan.status) {
 		t.Fatalf("status %q must be terminal so the poll loop breaks early", scan.status)

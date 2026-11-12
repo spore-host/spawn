@@ -131,6 +131,7 @@ var externallyWrittenTags = map[string]string{
 	// them); costmodel.MeasuredFromTags reads them as the fallback to
 	// spawn:cost-footprint.
 	"spawn:ebs-hourly-cost":    "written by spored before #1428, read for instances running it",
+	"spawn:ready-token":        "written by spored before session tokens moved off tags (pkg/accesstoken); read only for an instance still running one, and deleted by a current spored at start",
 	"spawn:public-ipv4-count":  "written by spored before #1428, read for instances running it",
 	"spawn:elastic-ipv4-count": "written by spored before #1428, read for instances running it",
 }

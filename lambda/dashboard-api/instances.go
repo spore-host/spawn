@@ -259,9 +259,10 @@ func convertReservationsToInstances(reservations []types.Reservation, region, ac
 				info.DNSName = getFullDNSName(dnsName, accountBase36)
 			}
 
-			// Copy all tags
+			// Copy the tags, less the ones an older spored put a session
+			// token in (withheldTags).
 			for _, tag := range instance.Tags {
-				if tag.Key != nil && tag.Value != nil {
+				if tag.Key != nil && tag.Value != nil && !withheldTag(*tag.Key) {
 					info.Tags[*tag.Key] = *tag.Value
 				}
 			}
@@ -389,4 +390,14 @@ func isEC2Denied(err error) bool {
 func terminateDeniedMessage(instanceID string) string {
 	return fmt.Sprintf("Terminating from the dashboard is not available for this account yet (spawn#1349). "+
 		"Terminate it from the CLI: spawn terminate %s", instanceID)
+}
+
+// withheldTag reports whether a tag is left out of the API response. spored
+// before session tokens moved off tags (pkg/accesstoken) published the DCV or
+// web-app session token in spawn:ready-token and inside spawn:ready-url; an
+// instance still running one keeps them until it restarts. A current spored's
+// ready-url carries no token, but it is withheld too: the dashboard does not
+// open sessions, and an old one is indistinguishable without parsing it.
+func withheldTag(key string) bool {
+	return key == "spawn:ready-token" || key == "spawn:ready-url"
 }

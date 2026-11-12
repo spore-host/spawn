@@ -59,7 +59,7 @@ func version() string { return buildinfo.Version(Version) }
 // no subcommand, is the lifecycle daemon (systemd ExecStart=/usr/local/bin/spored).
 // Subcommand names, flags, and exit codes are load-bearing: spawn shells out to
 // `spored status --check-complete`, `spored config get/set/list`, `spored reload`,
-// and `spored complete --status/--message`, and the user-data bootstrap runs the
+// `spored access-token add`, and `spored complete --status/--message`, and the user-data bootstrap runs the
 // bare binary as the daemon — all must keep working unchanged.
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
@@ -93,6 +93,8 @@ func newRootCmd() *cobra.Command {
 		newProvenanceCmd(),
 		// The managed egress proxy for --no-public-ip bootstraps (#1515).
 		newEgressProxyCmd(),
+		// Session access tokens, registered by hash over SSM (pkg/accesstoken).
+		newAccessTokenCmd(),
 		// Explicit `version` subcommand preserves the historical contract
 		// (`spored version` → "spored version X"); cobra's --version flag alone
 		// would break callers that parse it: `spawn upgrade-spored`
