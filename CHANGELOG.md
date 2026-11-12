@@ -85,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start, spored deletes the `spawn:ready-token` tag and the token-bearing
   `spawn:ready-url` an older spored left, and dashboard-api no longer returns
   either. Session files under `~/.spawn/sessions` are now `0600`.
+- `spawn plugin` calls that reach an instance over SSM (no public IP, or SSH
+  unavailable) are now encrypted end to end, so plugin config, pushed values
+  and the status answers that echo them are no longer kept in clear in SSM
+  command history. Each call uses a single-use key held only in spored's
+  memory (HPKE, ML-KEM-768 + X25519). Against an instance whose spored predates
+  this, spawn refuses the SSM path and says to run `spawn upgrade-spored` or
+  use SSH. The SSH path is unchanged.
 
 ## [0.163.2] - 2026-11-11
 
