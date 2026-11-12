@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.164.0] - 2026-11-12
+
 ### Security
 
 - The spored instance roles may now stop, terminate and tag only their own
@@ -13816,7 +13818,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.163.2...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.164.0...HEAD
+[0.164.0]: https://github.com/spore-host/spawn/compare/v0.163.2...v0.164.0
 [0.163.2]: https://github.com/spore-host/spawn/compare/v0.163.1...v0.163.2
 [0.163.1]: https://github.com/spore-host/spawn/compare/v0.163.0...v0.163.1
 [0.163.0]: https://github.com/spore-host/spawn/compare/v0.162.0...v0.163.0
