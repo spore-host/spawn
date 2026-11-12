@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `--nested-spawn` head may now run SSM commands on, start, stop, terminate
   and retag only the children it launched (tagged `spawn:nested-parent` with
   its own `aws:userid` at launch), and may pass only `spored-instance-role`
-  and its own role to them, not the `spawn-instance-*` family. The nested role
+  and its own role to them, not the `spawn-instance-*` family. It may set
+  `spawn:nested-parent` and the other keys no instance may write only when
+  creating a resource, never on an existing one, itself included. The nested role
   gets a new name, so heads launched by this release use a new role; old
   nested roles are reaped as before once unused.
 - A `spawn task run` task's role may write the results bucket only under the

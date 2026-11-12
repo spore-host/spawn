@@ -162,12 +162,16 @@ func TestNestedSpawnBaselineDiffersOnlyAtTagOnCreate(t *testing.T) {
 			t.Errorf("statement %d (%s) differs and is not a tag Deny", i, d.Sid)
 			continue
 		}
-		if !reflect.DeepEqual(n.Condition["Null"], map[string]interface{}{"ec2:CreateAction": "true"}) {
-			t.Errorf("the nested Deny's added condition is %v, want Null ec2:CreateAction=true", n.Condition["Null"])
+		want := map[string]interface{}{"ec2:CreateAction": []interface{}{"RunInstances", "ImportKeyPair", "Create*Group"}}
+		if !reflect.DeepEqual(n.Condition["StringNotLike"], want) {
+			t.Errorf("the nested Deny's added condition is %v, want StringNotLike %v", n.Condition["StringNotLike"], want)
 		}
-		delete(n.Condition, "Null")
+		if _, null := n.Condition["Null"]; null {
+			t.Error("the nested Deny still exempts on Null ec2:CreateAction, which does not hold for a direct CreateTags")
+		}
+		delete(n.Condition, "StringNotLike")
 		if !reflect.DeepEqual(d, n) {
-			t.Errorf("the nested Deny differs beyond the Null condition:\n default %+v\n nested  %+v", d, n)
+			t.Errorf("the nested Deny differs beyond the tag-on-create condition:\n default %+v\n nested  %+v", d, n)
 		}
 	}
 	if diffs != 2 {

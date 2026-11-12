@@ -477,7 +477,7 @@ func TestSporedPolicySchemaPinsTheDocuments(t *testing.T) {
 	pins := map[string]string{
 		"sporedDCVRolePolicy (spored-policy)":            "227926143670c37ecf4a3bdcb23262d4cfa455162e0c1dc957ee88c780aa63c9",
 		"spored baseline (spored-baseline-policy)":       "46fd6e493f4b1449474bf2beda016347e11387e7c0866e5cb5faa71807a88d21",
-		"nested-spawn baseline (spored-baseline-policy)": "8dcbd3c1ffe5364e8c26471729ebe2739a166e131e8daa22e70f46d79aa7c548",
+		"nested-spawn baseline (spored-baseline-policy)": "7a183ec73eb1e0c6910317655e48518ce553a7990dab7811e3a435d6505f3b23",
 	}
 	docs := map[string]string{
 		"sporedDCVRolePolicy (spored-policy)":            sporedDCVRolePolicy,

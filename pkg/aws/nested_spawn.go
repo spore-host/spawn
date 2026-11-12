@@ -190,12 +190,7 @@ func nestedSpawnStatements() []interface{} {
 			"Resource": "*",
 			"Condition": map[string]interface{}{
 				"StringEquals": map[string]interface{}{
-					"ec2:CreateAction": []interface{}{
-						"RunInstances",
-						"ImportKeyPair",
-						"CreateSecurityGroup",
-						"CreatePlacementGroup",
-					},
+					"ec2:CreateAction":                  nestedTagOnCreateActions(),
 					"aws:RequestTag/" + spawnManagedTag: "true",
 				},
 			},
@@ -309,6 +304,26 @@ func nestedSpawnStatements() []interface{} {
 	}
 }
 
+// nestedTagOnCreateActions are the creates a nested head tags at creation:
+// the only evaluations of ec2:CreateTags its tag Denies spare.
+func nestedTagOnCreateActions() []interface{} {
+	return []interface{}{"RunInstances", "ImportKeyPair", "CreateSecurityGroup", "CreatePlacementGroup"}
+}
+
+// notOneOfTheCreates is the condition that a CreateTags evaluation is not the
+// tag-on-create half of one of nestedTagOnCreateActions, under
+// StringNotLike ("Create*Group" is CreateSecurityGroup and
+// CreatePlacementGroup; the short form keeps the nested role inside its inline
+// budget, TestSporedRolesFitTheInlineLimitWhenMixed). A negated operator is
+// true when ec2:CreateAction is absent and when it holds any other value, so
+// a direct CreateTags is refused whatever IAM puts in that key for it. A Null
+// test was not enough: a live check showed the head writing an ownership tag
+// on its own instance and on a child, which means a direct CreateTags carries
+// ec2:CreateAction too.
+func notOneOfTheCreates() map[string]interface{} {
+	return map[string]interface{}{"ec2:CreateAction": []interface{}{"RunInstances", "ImportKeyPair", "Create*Group"}}
+}
+
 // nestedSelfRolePlaceholder stands for the nested role's own name in the
 // grant document. The name is a hash of the document, so the document cannot
 // carry it literally: NestedSpawnRoleName hashes the document with this
@@ -375,11 +390,15 @@ func NestedSpawnRoleFromCallerARN(arn string) (string, bool) {
 // tagging anything but itself and its own children. IAM evaluates the tags of
 // a RunInstances request as ec2:CreateTags too, so unchanged they would refuse
 // every child launch: a child must be created carrying exactly those keys, and
-// is not yet anyone's child. ec2:CreateAction is present only in that
-// create-time evaluation, so requiring it to be absent keeps both Denies whole
-// for every existing resource. Only the nested role gets this variant; the
-// default baseline is unchanged. The stop/terminate Deny is left as it is: it
-// never sees a create.
+// is not yet anyone's child. So both Denies gain the condition that the
+// evaluation is not one of the creates the head tags at creation
+// (notOneOfTheCreates), which keeps them whole for every existing resource,
+// the head itself and its children included. It was Null ec2:CreateAction,
+// which a live check showed does not refuse a direct CreateTags of an
+// ownership key from the head (DryRunOperation on its own instance and on a
+// child): the exemption must name the creates, not test the key's absence.
+// Only the nested role gets this variant; the default baseline is unchanged.
+// The stop/terminate Deny is left as it is: it never sees a create.
 func (c *Client) nestedSpawnBaselinePolicyDoc() string {
 	statements := c.sporedSelfManagementStatements()
 	for i, st := range statements {
@@ -397,7 +416,8 @@ func (c *Client) nestedSpawnBaselinePolicyDoc() string {
 				cond[k] = v
 			}
 		}
-		cond["Null"] = map[string]interface{}{"ec2:CreateAction": "true"}
+		// Another operator, so ANDed with what is there.
+		cond["StringNotLike"] = notOneOfTheCreates()
 		cp["Condition"] = cond
 		statements[i] = cp
 	}

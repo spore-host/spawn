@@ -8,7 +8,7 @@ import (
 )
 
 // A small IAM evaluator for the instance-scope gates: Allow/Deny with
-// StringEquals, StringNotEquals, ForAnyValue:StringEquals and Null, policy
+// StringEquals, StringNotEquals, StringNotLike, ForAnyValue:StringEquals and Null, policy
 // variables resolved from the request context, and "*" globs in Action and
 // Resource. Explicit Deny beats Allow; no Allow is an implicit deny. It covers
 // exactly the forms these documents use, so the gates below fail when a
@@ -102,6 +102,14 @@ func scopeCondHolds(cond map[string]interface{}, ctx map[string][]string, t *tes
 			case "StringNotEquals":
 				if present && in(have[0]) {
 					return false
+				}
+			case "StringNotLike":
+				if present {
+					for _, w := range wants {
+						if scopeGlob(w, have[0]) {
+							return false
+						}
+					}
 				}
 			case "ForAnyValue:StringEquals":
 				any := false
@@ -347,5 +355,52 @@ func TestNestedSpawnPolicyNamesItsOwnRole(t *testing.T) {
 	}
 	if strings.Contains(doc, "spawn-instance-*") {
 		t.Errorf("the nested grant document still reaches the spawn-instance-* family")
+	}
+}
+
+// A nested head may not rewrite who owns an instance, on its children or on
+// itself: NestedParentTagKey would hand the instance to another head, and the
+// other ownership keys to another user or out of the reaper's scope. Only the
+// creates it tags at creation may set them. A direct CreateTags is refused
+// whether IAM leaves ec2:CreateAction out of its context or fills it with
+// "CreateTags": a live check showed the Null-based exemption this replaced did
+// not refuse it.
+func TestNestedHeadCannotRewriteOwnershipTags(t *testing.T) {
+	c := &Client{}
+	docs := []string{bound(t, c.nestedSpawnBaselinePolicyDoc()), bound(t, nestedSpawnPolicyDoc())}
+	child := map[string]string{"spawn:managed": "true", NestedParentTagKey: selfUserID}
+	for _, key := range []string{NestedParentTagKey, "spawn:managed", "spawn:iam-user", "spawn:config", "spawn:launch-time", "spawn:pre-stop"} {
+		for _, target := range []struct {
+			name, arn string
+			tags      map[string]string
+		}{{"its own child", scopeChildARN, child}, {"itself", scopeSelfARN, managedTags}} {
+			for _, createAction := range []string{"", "CreateTags"} {
+				extra := tagKeys("spawn:ttl-deadline", key)
+				if createAction != "" {
+					extra["ec2:CreateAction"] = []string{createAction}
+				}
+				for _, action := range []string{"ec2:CreateTags", "ec2:DeleteTags"} {
+					if got := scopeEval(t, docs, instanceReq(action, target.arn, target.tags, extra)); got != explicitDeny {
+						t.Errorf("%s of %s on %s (ec2:CreateAction %q): %v, want explicit deny", action, key, target.name, createAction, got)
+					}
+				}
+			}
+		}
+	}
+	// The creates still tag: a child at RunInstances, a group at creation.
+	for _, create := range []string{"RunInstances", "CreateSecurityGroup", "CreatePlacementGroup", "ImportKeyPair"} {
+		req := instanceReq("ec2:CreateTags", scopeChildARN, nil, map[string][]string{
+			"ec2:CreateAction":             {create},
+			"aws:RequestTag/spawn:managed": {"true"},
+			"aws:TagKeys":                  {"spawn:managed", "spawn:launch-time", NestedParentTagKey},
+		})
+		if got := scopeEval(t, docs, req); got != allowed {
+			t.Errorf("tag-on-create for %s: %v, want allow", create, got)
+		}
+	}
+	// And an ordinary key on its own child still writes (`spawn extend`).
+	if got := scopeEval(t, docs, instanceReq("ec2:CreateTags", scopeChildARN, child,
+		map[string][]string{"aws:TagKeys": {"spawn:ttl-deadline"}, "ec2:CreateAction": {"CreateTags"}})); got != allowed {
+		t.Errorf("extending its own child: %v, want allow", got)
 	}
 }
