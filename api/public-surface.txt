@@ -80,6 +80,13 @@ field AttachVolumeSpec.MountPoint string
 field AttachVolumeSpec.ReadOnly bool
 field AttachVolumeSpec.SizeGiB int32
 field AttachVolumeSpec.SnapshotID string
+field BoundaryMissingError.Account string
+field BoundaryMissingError.Cause error
+field BoundaryOutcome.ARN string
+field BoundaryOutcome.Created bool
+field BoundaryOutcome.Pruned int
+field BoundaryOutcome.Unchanged bool
+field BoundaryOutcome.Updated bool
 field BuildSnapshotInput.Description string
 field BuildSnapshotInput.Encrypted bool
 field BuildSnapshotInput.KMSKeyARN string
@@ -491,6 +498,8 @@ field ZoneOfferings.Launchable []string
 field ZoneOfferings.Offered []string
 func (*AccessDeniedError) Error() string
 func (*AccessDeniedError) Unwrap() error
+func (*BoundaryMissingError) Error() string
+func (*BoundaryMissingError) Unwrap() error
 func (*Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*MountSnapshotResult, error)
 func (*Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotInput, image io.Reader) (*BuildSnapshotResult, error)
 func (*Client) CheckAMIHealth(ctx context.Context, ami AMIInfo, region string) (*AMIHealthCheck, error)
@@ -673,6 +682,7 @@ func EFANetworkInterfacesWithSecondaryType(subnetID string, securityGroupIDs []s
 func EgressProxyEnv(addr, region string) (string, error)
 func EgressProxyNoProxy(region string) []string
 func EgressProxyURL(addr string) (string, error)
+func EnsureSpawnInstanceBoundary(ctx context.Context, api BoundaryAdminAPI, account string, warn func(string)) (BoundaryOutcome, error)
 func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeAccount, orchestratorAccount string, warn func(string)) (SweepRoleOutcome, error)
 func EvaluatePortIngress(groups []types.SecurityGroup, port int32) PortIngress
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
@@ -705,6 +715,7 @@ func NestedSpawnRoleFromCallerARN(arn string) (string, bool)
 func NestedSpawnRoleName() string
 func NestedSpawnRoleReservedError(source, role, why string) error
 func NestedSpawnTTLError() error
+func NewBoundaryAdminIAM(cfg aws.Config) BoundaryAdminAPI
 func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
 func NewClientWithRegion(ctx context.Context, region string) (*Client, error)
@@ -731,12 +742,21 @@ func SweepTrustMatches(trust, principal string) bool
 func TeardownSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM) (bool, error)
 func UserDataSize(encoded string) (decoded, encodedLen int)
 func ValidatePolicyNames(policies []string, allowFullAccess bool) error
+method BoundaryAdminAPI.CreatePolicy (ctx context.Context, in *iam.CreatePolicyInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyOutput, error)
+method BoundaryAdminAPI.CreatePolicyVersion (ctx context.Context, in *iam.CreatePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyVersionOutput, error)
+method BoundaryAdminAPI.DeletePolicyVersion (ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
+method BoundaryAdminAPI.GetPolicy (ctx context.Context, in *iam.GetPolicyInput, optFns ...func(*iam.Options)) (*iam.GetPolicyOutput, error)
+method BoundaryAdminAPI.GetPolicyVersion (ctx context.Context, in *iam.GetPolicyVersionInput, optFns ...func(*iam.Options)) (*iam.GetPolicyVersionOutput, error)
+method BoundaryAdminAPI.ListPolicyVersions (ctx context.Context, in *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
 method SpotPriceAPI.DescribeInstances (ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 method SpotPriceAPI.DescribeSpotPriceHistory (ctx context.Context, in *ec2.DescribeSpotPriceHistoryInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSpotPriceHistoryOutput, error)
+method SweepRoleIAM.CreatePolicy (ctx context.Context, in *iam.CreatePolicyInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyOutput, error)
 method SweepRoleIAM.CreateRole (ctx context.Context, in *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error)
 method SweepRoleIAM.DeleteRole (ctx context.Context, in *iam.DeleteRoleInput, optFns ...func(*iam.Options)) (*iam.DeleteRoleOutput, error)
 method SweepRoleIAM.DetachRolePolicy (ctx context.Context, in *iam.DetachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DetachRolePolicyOutput, error)
+method SweepRoleIAM.GetPolicy (ctx context.Context, in *iam.GetPolicyInput, optFns ...func(*iam.Options)) (*iam.GetPolicyOutput, error)
 method SweepRoleIAM.GetRole (ctx context.Context, in *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error)
+method SweepRoleIAM.PutRolePermissionsBoundary (ctx context.Context, in *iam.PutRolePermissionsBoundaryInput, optFns ...func(*iam.Options)) (*iam.PutRolePermissionsBoundaryOutput, error)
 method SweepRoleIAM.UpdateAssumeRolePolicy (ctx context.Context, in *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error)
 method SweepRoleIAM.embeds iam.ListAttachedRolePoliciesAPIClient
 type AMIHealthCheck struct
@@ -744,6 +764,9 @@ type AMIInfo struct
 type AMIWaitOptions struct
 type AccessDeniedError struct
 type AttachVolumeSpec struct
+type BoundaryAdminAPI interface
+type BoundaryMissingError struct
+type BoundaryOutcome struct
 type BuildSnapshotInput struct
 type BuildSnapshotResult struct
 type CapacityBlockOffering struct

@@ -65,11 +65,22 @@ func IsSporedPolicyName(name string) bool {
 	return false
 }
 
+// BoundaryPolicyName is the spawn-instance permissions boundary's name at
+// SporedPolicyPath (pkg/aws.spawnInstanceBoundaryName; a test holds the two
+// equal). It is swept here too: it is deleted once no role still uses it as a
+// boundary.
+const BoundaryPolicyName = "spawn-instance-boundary"
+
+// KeepBoundaryInUse is the reason the boundary policy is kept.
+const KeepBoundaryInUse = "set as the permissions boundary of a role"
+
 // PolicyAPI is the IAM slice SweepSporedPolicies uses. *iam.Client satisfies
 // it.
 type PolicyAPI interface {
 	iam.ListPoliciesAPIClient
 	DeletePolicy(ctx context.Context, in *iam.DeletePolicyInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyOutput, error)
+	ListPolicyVersions(ctx context.Context, in *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
+	DeletePolicyVersion(ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
 }
 
 // NewPolicyClient is the IAM client for SweepSporedPolicies, from cfg.
@@ -108,7 +119,8 @@ func SweepSporedPolicies(ctx context.Context, api PolicyAPI, now time.Time, reap
 		}
 		for _, pol := range page.Policies {
 			name := aws.ToString(pol.PolicyName)
-			if aws.ToString(pol.Path) != SporedPolicyPath || !IsSporedPolicyName(name) {
+			isBoundary := name == BoundaryPolicyName
+			if aws.ToString(pol.Path) != SporedPolicyPath || (!IsSporedPolicyName(name) && !isBoundary) {
 				continue
 			}
 			d := PolicyDecision{
@@ -117,22 +129,51 @@ func SweepSporedPolicies(ctx context.Context, api PolicyAPI, now time.Time, reap
 				Created:     aws.ToTime(pol.CreateDate),
 				Attachments: aws.ToInt32(pol.AttachmentCount),
 			}
+			// The boundary's use is as a permissions boundary, counted by
+			// PermissionsBoundaryUsageCount, not by AttachmentCount: a role
+			// holds it as its boundary, not attached. It is kept while any role
+			// still does.
+			inUse := d.Attachments
+			if isBoundary {
+				inUse += aws.ToInt32(pol.PermissionsBoundaryUsageCount)
+			}
 			switch {
-			case d.Attachments > 0:
-				d.Reason = KeepPolicyAttached
+			case inUse > 0:
+				d.Attachments = inUse
+				if isBoundary {
+					d.Reason = KeepBoundaryInUse
+				} else {
+					d.Reason = KeepPolicyAttached
+				}
 			case d.Created.IsZero() || now.Sub(d.Created) < Grace:
 				d.Reason = KeepPolicyYoung
 			default:
 				d.Delete = true
 			}
 			if d.Delete && reap {
+				if isBoundary {
+					// DeletePolicy refuses a policy with non-default versions,
+					// so remove those first (an admin's `spawn setup-account`
+					// may have bumped the boundary's schema in place).
+					if err := deleteNonDefaultVersions(ctx, api, pol.Arn); err != nil {
+						d.Err = err
+						out = append(out, d)
+						continue
+					}
+				}
 				_, err := api.DeletePolicy(ctx, &iam.DeletePolicyInput{PolicyArn: pol.Arn})
 				switch {
 				case err == nil || isNoSuchEntity(err):
 					d.Deleted = true
 				case isDeleteConflict(err):
-					// Attached since it was listed: kept, which is right.
-					d.Delete, d.Reason = false, KeepPolicyAttached
+					// Used since it was listed (attached, or set as a boundary):
+					// kept, which is right.
+					d.Delete = false
+					if isBoundary {
+						d.Reason = KeepBoundaryInUse
+					} else {
+						d.Reason = KeepPolicyAttached
+					}
 				default:
 					d.Err = err
 				}
@@ -142,6 +183,28 @@ func SweepSporedPolicies(ctx context.Context, api PolicyAPI, now time.Time, reap
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// deleteNonDefaultVersions removes every non-default version of a managed
+// policy so that DeletePolicy (which deletes the default version) can delete
+// it. Already gone is success.
+func deleteNonDefaultVersions(ctx context.Context, api PolicyAPI, arn *string) error {
+	lv, err := api.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{PolicyArn: arn})
+	if err != nil {
+		if isNoSuchEntity(err) {
+			return nil
+		}
+		return fmt.Errorf("list versions of %s: %w", aws.ToString(arn), err)
+	}
+	for _, v := range lv.Versions {
+		if v.IsDefaultVersion {
+			continue
+		}
+		if _, err := api.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{PolicyArn: arn, VersionId: v.VersionId}); err != nil && !isNoSuchEntity(err) {
+			return fmt.Errorf("delete version %s of %s: %w", aws.ToString(v.VersionId), aws.ToString(arn), err)
+		}
+	}
+	return nil
 }
 
 func isDeleteConflict(err error) bool {

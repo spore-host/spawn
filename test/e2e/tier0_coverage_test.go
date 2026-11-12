@@ -61,6 +61,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"slurm":           "Tier 3: real Slurm submit/cluster",
 		"burst":           "Tier 3: cross-account burst needs real dev-account identity",
 		"onboard":         "Tier 2/3: real IAM CreateRole + SigV4 phone-home POST to the AuthType:AWS_IAM Function URL; role-creation + verified-caller flow needs a real account (validate/signing logic unit-tested)",
+		"setup-account":   "Tier 1/2: provisions the spawn-instance permissions boundary with CreatePolicy/CreatePolicyVersion, which needs admin IAM on a real account; the boundary document, versioning, five-version cap and the launch-time create/retrofit are unit-tested in pkg/aws (iam_boundary_test.go) and the command in cmd/setup_account_test.go",
 		"dns":             "Tier 2: Route53 + live instance public IP",
 		"fsx":             "Tier 2/3: FSx lifecycle against a real filesystem",
 		"capacity-block":  "Tier 1/3: real DescribeCapacityBlockOfferings; purchase is a non-refundable write never run in CI (typed-gate logic unit-tested in cmd)",

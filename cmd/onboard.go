@@ -374,17 +374,27 @@ func putPortalOnboardPolicies(ctx context.Context, client onboardIAMAPI, account
 	//     match and the statement becomes a silent implicit DENY. That trap is
 	//     #665, and deployment/cloudformation/ttl-reaper-cross-account-role.yaml
 	//     documents it at length.
+	//
+	//  3. Stop/Start/Terminate are removed, matching the live portal role and
+	//     the BYOA template (spore-host#694, and the umbrella's
+	//     deployment/cloudformation/portal-onboarding-role.yaml). The live role
+	//     dropped them; this onboard path still granted them tag-gated, so an
+	//     onboarded account's portal role was wider than the role the portal
+	//     actually uses. They return under the scoped policy of #686, not as a
+	//     tag-gated statement here. A DenyOwnershipTagsAfterCreate matches the
+	//     template so this role cannot write the keys that decide ownership onto
+	//     an existing instance, which is what keeps the tag-gated StartSession
+	//     a real scope.
 	launchPolicy := `{
 		"Version": "2012-10-17",
 		"Statement": [
-			{"Effect":"Allow","Action":["ec2:RunInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeImages","ec2:DescribeSubnets","ec2:DescribeSecurityGroups","ec2:DescribeVpcs","ec2:DescribeKeyPairs"],"Resource":"*"},
-			{"Effect":"Allow","Action":["ec2:CreateTags"],"Resource":"*","Condition":{"StringEquals":{"ec2:CreateAction":"RunInstances"}}},
-			{"Effect":"Allow","Action":["ec2:CreateTags","ec2:DeleteTags"],"Resource":"*","Condition":{"StringEquals":{"ec2:ResourceTag/spawn:managed":"true"}}},
-			{"Effect":"Allow","Action":["ec2:TerminateInstances","ec2:StopInstances","ec2:StartInstances","ec2:CancelSpotInstanceRequests"],"Resource":"*","Condition":{"StringEquals":{"aws:ResourceTag/spawn:managed":"true"}}},
-			{"Effect":"Allow","Action":["ec2:DescribeSpotPriceHistory","servicequotas:GetServiceQuota","servicequotas:ListServiceQuotas","pricing:GetProducts"],"Resource":"*"},
-			{"Effect":"Allow","Action":["ssm:StartSession"],"Resource":"arn:aws:ec2:*:*:instance/*","Condition":{"StringEquals":{"ssm:resourceTag/spawn:managed":"true"}}},
-			{"Effect":"Allow","Action":["ssm:StartSession"],"Resource":"arn:aws:ssm:*::document/SSM-SessionManagerRunShell"},
-			{"Effect":"Allow","Action":["ssm:TerminateSession","ssm:ResumeSession"],"Resource":"arn:aws:ssm:*:*:session/*"}
+			{"Sid":"RunAndInspect","Effect":"Allow","Action":["ec2:RunInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeImages","ec2:DescribeSubnets","ec2:DescribeSecurityGroups","ec2:DescribeVpcs","ec2:DescribeKeyPairs"],"Resource":"*"},
+			{"Sid":"TagOnLaunch","Effect":"Allow","Action":["ec2:CreateTags"],"Resource":"*","Condition":{"StringEquals":{"ec2:CreateAction":"RunInstances"}}},
+			{"Sid":"DenyOwnershipTagsAfterCreate","Effect":"Deny","Action":["ec2:CreateTags","ec2:DeleteTags"],"Resource":"*","Condition":{"Null":{"ec2:CreateAction":"true"},"ForAnyValue:StringEquals":{"aws:TagKeys":["spawn:managed","spawn:root","spawn:created-by","spawn:iam-user","spawn:account-id","spawn:launch-time","spawn:config","spawn:nested-parent","spawn:pre-stop","spawn:pre-stop-timeout","spawn:local-username","spawn:instance-id","spawn:instance-arn"]}}},
+			{"Sid":"ReadSpotAndQuotas","Effect":"Allow","Action":["ec2:DescribeSpotPriceHistory","servicequotas:GetServiceQuota","servicequotas:ListServiceQuotas","pricing:GetProducts"],"Resource":"*"},
+			{"Sid":"SSMSessionOnManagedInstances","Effect":"Allow","Action":["ssm:StartSession"],"Resource":"arn:aws:ec2:*:*:instance/*","Condition":{"StringEquals":{"ssm:resourceTag/spawn:managed":"true"}}},
+			{"Sid":"SSMSessionDocument","Effect":"Allow","Action":["ssm:StartSession"],"Resource":"arn:aws:ssm:*::document/SSM-SessionManagerRunShell"},
+			{"Sid":"SSMSessionManage","Effect":"Allow","Action":["ssm:TerminateSession","ssm:ResumeSession"],"Resource":"arn:aws:ssm:*:*:session/*"}
 		]
 	}`
 	if _, err := client.PutRolePolicy(ctx, &iam.PutRolePolicyInput{

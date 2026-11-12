@@ -506,6 +506,19 @@ func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 		roleName = c.generateRoleName(config)
 	}
 
+	// The spawn-instance permissions boundary caps every role spawn creates
+	// (iam_boundary.go). It must exist before CreateRole can reference it and
+	// before any policy is written to an existing role, so ensure it first. A
+	// non-admin whose account has no boundary gets a BoundaryMissingError
+	// naming `spawn setup-account`.
+	accountID, err := c.GetAccountID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve the account for the permissions boundary: %w", err)
+	}
+	if err := ensureBoundaryForLaunch(ctx, iamClient, accountID, warnSporedPolicy); err != nil {
+		return "", err
+	}
+
 	// Check if role exists
 	roleExists, err := c.roleExists(ctx, iamClient, roleName)
 	if err != nil {
@@ -513,15 +526,24 @@ func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 	}
 
 	if !roleExists {
-		// Create new role
+		// Create new role (createIAMRole sets the boundary at CreateRole).
 		if err := c.createIAMRole(ctx, iamClient, roleName, config); err != nil {
 			return "", fmt.Errorf("failed to create IAM role: %w", err)
 		}
-	} else if len(config.Policies) > 0 || config.PolicyFile != "" || config.InlinePolicyJSON != "" {
-		// Role exists but caller specified policies — update the inline policy so that
-		// re-using a cached role (same hash) still picks up any new policy additions.
-		if err := c.updateInlinePolicy(ctx, iamClient, roleName, config); err != nil {
-			return "", fmt.Errorf("failed to update IAM role policy: %w", err)
+	} else {
+		// Role exists: retrofit the boundary BEFORE any policy write, so the
+		// role is never left with weaker containment while this launch updates
+		// it. A role created before the boundary existed is moved onto it here.
+		if err := ensureRoleBoundary(ctx, iamClient, roleName, accountID); err != nil {
+			return "", err
+		}
+		if len(config.Policies) > 0 || config.PolicyFile != "" || config.InlinePolicyJSON != "" {
+			// Caller specified policies — update the inline policy so that
+			// re-using a cached role (same hash) still picks up any new policy
+			// additions.
+			if err := c.updateInlinePolicy(ctx, iamClient, roleName, config); err != nil {
+				return "", fmt.Errorf("failed to update IAM role policy: %w", err)
+			}
 		}
 	}
 
@@ -729,7 +751,12 @@ func (c *Client) createIAMRole(ctx context.Context, iamClient *iam.Client, roleN
 			RoleName:                 aws.String(roleName),
 			AssumeRolePolicyDocument: aws.String(string(trustPolicyJSON)),
 			Description:              aws.String("Created by spawn for EC2 instance access"),
-			Tags:                     c.buildIAMTags(config.Tags),
+			// Capped at creation: the role never exists without the boundary,
+			// so there is no window in which it holds policies uncapped
+			// (iam_boundary.go). createOrGetInstanceProfile makes the boundary
+			// exist first.
+			PermissionsBoundary: aws.String(spawnInstanceBoundaryARN(accountID)),
+			Tags:                c.buildIAMTags(config.Tags),
 		})
 		return e
 	})
@@ -1566,8 +1593,19 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	roleCreated := false
 	profileCreated := false
 
+	// The spawn-instance permissions boundary caps this role too
+	// (iam_boundary.go). It must exist before CreateRole references it and
+	// before any policy write to an existing role.
+	accountID, err := c.GetAccountID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve the account for the permissions boundary: %w", err)
+	}
+	if err := ensureBoundaryForLaunch(ctx, iamClient, accountID, warnSporedPolicy); err != nil {
+		return "", err
+	}
+
 	// 1. Check if role exists, create if not
-	_, err := iamClient.GetRole(ctx, &iam.GetRoleInput{
+	_, err = iamClient.GetRole(ctx, &iam.GetRoleInput{
 		RoleName: aws.String(roleName),
 	})
 
@@ -1585,6 +1623,8 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 				RoleName:                 aws.String(roleName),
 				AssumeRolePolicyDocument: aws.String(sporedTrustPolicy),
 				Description:              aws.String("IAM role for spored daemon on EC2 instances"),
+				// Capped at creation (iam_boundary.go).
+				PermissionsBoundary: aws.String(spawnInstanceBoundaryARN(accountID)),
 				Tags: []types.Tag{
 					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
 				},
@@ -1593,6 +1633,13 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		})
 		if err != nil && !contains(err.Error(), "EntityAlreadyExists") {
 			return "", fmt.Errorf("failed to create IAM role: %w", err)
+		}
+	} else {
+		// Role exists: retrofit the boundary before the policy writes below, so
+		// the shared spored role is never left uncapped while a launch updates
+		// it.
+		if err := ensureRoleBoundary(ctx, iamClient, roleName, accountID); err != nil {
+			return "", err
 		}
 	}
 

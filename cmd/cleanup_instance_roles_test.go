@@ -214,6 +214,14 @@ func (f *cleanupPolicyIAM) DeletePolicy(_ context.Context, in *iam.DeletePolicyI
 	return &iam.DeletePolicyOutput{}, nil
 }
 
+func (f *cleanupPolicyIAM) ListPolicyVersions(context.Context, *iam.ListPolicyVersionsInput, ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error) {
+	return &iam.ListPolicyVersionsOutput{}, nil
+}
+
+func (f *cleanupPolicyIAM) DeletePolicyVersion(context.Context, *iam.DeletePolicyVersionInput, ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error) {
+	return &iam.DeletePolicyVersionOutput{}, nil
+}
+
 // `spawn cleanup --instance-roles` also deletes spawn's unattached spored
 // managed policies (#1573), previewed with the roles; --dry-run deletes none.
 func TestCleanupInstanceRolesDeletesUnattachedSporedPolicies(t *testing.T) {

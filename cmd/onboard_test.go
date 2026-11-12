@@ -118,16 +118,15 @@ func TestOnboardPolicyConditionsEveryInstanceMutatingAction(t *testing.T) {
 
 	// RunInstances is create-only: there is no existing resource to condition on,
 	// and the tag it applies is covered by the ec2:CreateAction grant below.
+	// Stop/Start/Terminate and CancelSpotInstanceRequests were removed from
+	// this role to match the live portal role and the BYOA template
+	// (spore-host#694); they return under the scoped policy of #686, not here.
+	// So the only instance-reaching actions left to condition are the tag
+	// writes and the SSM session.
 	mustBeConditioned := map[string]bool{
-		"ec2:CreateTags":         true,
-		"ec2:DeleteTags":         true,
-		"ec2:TerminateInstances": true,
-		"ec2:StopInstances":      true,
-		"ec2:StartInstances":     true,
-		"ssm:StartSession":       true,
-		// #922: cancelling a persistent Spot request strands its stopped
-		// instance, so it is as instance-affecting as StopInstances.
-		"ec2:CancelSpotInstanceRequests": true,
+		"ec2:CreateTags":   true,
+		"ec2:DeleteTags":   true,
+		"ssm:StartSession": true,
 	}
 
 	seen := map[string]bool{}
