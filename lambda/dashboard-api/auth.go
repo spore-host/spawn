@@ -51,6 +51,8 @@ func portalRoleAllowList() []string {
 // portalAccountFromARN returns the verified account id if userARN is an assumed
 // -role ARN for one of the trusted portal roles, else ("", false). This is the
 // federated-portal identity path: the scope key becomes the account itself.
+// It is reached only after authorizeAccount has accepted the verified account,
+// so the role name is honoured only in an onboarded or allow-listed account.
 func portalAccountFromARN(userARN string) (string, bool) {
 	m := assumedRoleARNRe.FindStringSubmatch(userARN)
 	if m == nil {
@@ -124,14 +126,20 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 
 	// If cached, update last access and return
 	if cached != nil {
-		// Update last access asynchronously (don't block on this)
-		go updateLastAccess(context.Background(), cfg, userID)
-
 		// Use cached CLI IAM ARN if available, fallback to AWS account ID
 		cliIamArn := cached.CliIamArn
 		if cliIamArn == "" {
 			cliIamArn = cached.AWSAccountID
 		}
+
+		// A cache row proves only that this Lambda once wrote one, which it did
+		// for any caller before entitlement existed: check the account anyway.
+		if err := authorizeAccounts(ctx, cfg, request.RequestContext.Identity.AccountID, accountOfScope(cliIamArn)); err != nil {
+			return "", "", "", nil, err
+		}
+
+		// Update last access asynchronously (don't block on this)
+		go updateLastAccess(context.Background(), cfg, userID)
 
 		return userID, cliIamArn, cached.AccountBase36, nil, nil
 	}
@@ -175,6 +183,11 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 			log.Printf("identity not linked for email %s: %v", email, err)
 			return "", "", "", nil, fmt.Errorf("identity not linked: link your CLI IAM user via 'spawn auth link'")
 		}
+	}
+
+	// Entitlement before anything is written for this caller.
+	if err := authorizeAccounts(ctx, cfg, request.RequestContext.Identity.AccountID, accountOfScope(cliIamArn)); err != nil {
+		return "", "", "", nil, err
 	}
 
 	// Create cache entry
@@ -255,6 +268,13 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 	accountID := *identity.Account
 	accountBase36 := intToBase36(accountID)
 
+	// Authenticated is not entitled: the verified account must be onboarded or
+	// allow-listed (entitlement.go) before any route, cache row or portal-role
+	// shortcut. Fails closed, and a refused caller gets no provider.
+	if err := authorizeAccount(ctx, cfg, accountID); err != nil {
+		return "", "", "", nil, err
+	}
+
 	// Federated portal identity: a caller assuming a trusted portal launch role
 	// (Globus→STS) is scoped by its own VERIFIED account — no Cognito email or CLI
 	// link required (the no-paste BYOA model). We don't cache these: the assumed
@@ -272,13 +292,17 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 	}
 
 	if cached != nil {
-		go updateLastAccess(context.Background(), cfg, userID)
-
 		// Use cached CLI IAM ARN if available, fallback to AWS account ID
 		cliIamArn := cached.CliIamArn
 		if cliIamArn == "" {
 			cliIamArn = cached.AWSAccountID
 		}
+		// The scope a cache row names must be entitled too.
+		if err := authorizeAccounts(ctx, cfg, accountOfScope(cliIamArn)); err != nil {
+			return "", "", "", nil, err
+		}
+
+		go updateLastAccess(context.Background(), cfg, userID)
 
 		return userID, cliIamArn, cached.AccountBase36, callerCreds, nil
 	}
@@ -307,6 +331,12 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 			log.Printf("identity not linked for email %s: %v", email, err)
 			return "", "", "", callerCreds, fmt.Errorf("identity not linked: link your CLI IAM user via 'spawn auth link'")
 		}
+	}
+
+	// A web identity's linked CLI ARN is the scope: its account must be
+	// entitled as well as the caller's.
+	if err := authorizeAccounts(ctx, cfg, accountOfScope(cliIamArn)); err != nil {
+		return "", "", "", nil, err
 	}
 
 	// Create cache entry

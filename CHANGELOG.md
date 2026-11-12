@@ -92,6 +92,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory (HPKE, ML-KEM-768 + X25519). Against an instance whose spored predates
   this, spawn refuses the SSM path and says to run `spawn upgrade-spored` or
   use SSH. The SSH path is unchanged.
+- dashboard-api now serves authenticated routes only to callers whose AWS
+  account is onboarded in `spore-portal-accounts` (and not offboarded) or
+  listed in the function's new `DASHBOARD_ALLOWED_ACCOUNTS`. That covers teams,
+  instances, sweeps and `POST /api/strata/resolve`, and it applies to the
+  `spore-portal-launch` role as well. Other callers get 403, before any
+  user-account row is written. It fails closed: an unreadable registry answers
+  503, and an empty allow list plus an empty registry refuses everyone, so set
+  `DASHBOARD_ALLOWED_ACCOUNTS` before deploying. The role script grants
+  `dynamodb:GetItem` on the registry and `kms:Decrypt` on its key, through
+  DynamoDB only.
 
 ## [0.163.2] - 2026-11-11
 

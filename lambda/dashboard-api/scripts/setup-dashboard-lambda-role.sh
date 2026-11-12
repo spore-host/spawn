@@ -93,6 +93,9 @@ WATCHES_TABLE="${LAGOTTO_WATCHES_TABLE:-lagotto-watches}"
 HISTORY_TABLE="${LAGOTTO_HISTORY_TABLE:-lagotto-match-history}"
 WORKSPACES_TABLE="${SPORE_BOT_WORKSPACES_TABLE:-spore-bot-workspaces}"
 STRATA_BUCKET="${STRATA_REGISTRY_BUCKET:-strata-registry}"
+# The portal account registry dashboard-api checks every caller's account
+# against (entitlement.go). Same override as the function reads.
+PORTAL_ACCOUNTS_TABLE="${DASHBOARD_ACCOUNTS_TABLE:-spore-portal-accounts}"
 # A dashboard sweep cancel invokes the orchestrator, which terminates the
 # members (#1349). Same override as the dashboard-api function reads.
 ORCHESTRATOR_FUNCTION="${SPAWN_ORCHESTRATOR_FUNCTION_NAME:-spawn-sweep-orchestrator}"
@@ -114,6 +117,12 @@ POLICY_DOCUMENT=$(cat <<EOF
       "Effect": "Allow",
       "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan"],
       "Resource": ["${T}/${USER_ACCOUNTS_TABLE}", "${T}/${USER_ACCOUNTS_TABLE}/index/email-index"]
+    },
+    {
+      "Sid": "PortalAccountRegistryRead",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem"],
+      "Resource": ["${T}/${PORTAL_ACCOUNTS_TABLE}"]
     },
     {
       "Sid": "Sweeps",
@@ -241,6 +250,45 @@ EOF
 else
     echo -e "  ${YELLOW}!${NC} No SLACK_SECRETS_ARN (env or spawn-dashboard-api config): no Slack secret grant."
     echo "    Re-run with SLACK_SECRETS_ARN=<arn> once the secret exists."
+fi
+
+# The portal account registry is encrypted with a customer-managed KMS key,
+# and DynamoDB decrypts with the caller's permissions, so the entitlement
+# GetItem above needs kms:Decrypt on that key, through DynamoDB, for that table
+# only. The key is read from the table, not configured; with an AWS-owned key
+# (no KMSMasterKeyArn) no grant is needed. Deleted with the role, or by hand:
+# aws iam delete-role-policy --role-name $ROLE_NAME --policy-name ${POLICY_NAME}PortalRegistryKMS
+REGISTRY_KEY_ARN=$(aws dynamodb describe-table --profile "$PROFILE" --region "$REGION" \
+    --table-name "$PORTAL_ACCOUNTS_TABLE" \
+    --query 'Table.SSEDescription.KMSMasterKeyArn' --output text 2>/dev/null || echo "") # swallow-ok: the table may not exist in a fork; reported below
+[ "$REGISTRY_KEY_ARN" = "None" ] && REGISTRY_KEY_ARN=""
+if [ -n "$REGISTRY_KEY_ARN" ]; then
+    REGISTRY_KMS_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PortalRegistryDecrypt",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt"],
+      "Resource": "${REGISTRY_KEY_ARN}",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "dynamodb.${REGION}.amazonaws.com",
+          "kms:EncryptionContext:aws:dynamodb:tableName": "${PORTAL_ACCOUNTS_TABLE}"
+        }
+      }
+    }
+  ]
+}
+EOF
+)
+    aws iam put-role-policy --profile "$PROFILE" --role-name "$ROLE_NAME" \
+        --policy-name "${POLICY_NAME}PortalRegistryKMS" --policy-document "$REGISTRY_KMS_POLICY"
+    echo -e "  ${GREEN}✓${NC} Portal registry key grant written: $REGISTRY_KEY_ARN"
+else
+    echo -e "  ${YELLOW}!${NC} $PORTAL_ACCOUNTS_TABLE has no customer-managed key (or does not exist): no KMS grant."
+    echo "    dashboard-api then entitles only DASHBOARD_ALLOWED_ACCOUNTS; a registry it cannot read answers 503."
 fi
 
 # PostToConnection on the dashboard's WebSocket API (dashboard-websocket-processor).

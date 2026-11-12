@@ -59,7 +59,7 @@ code and it determines what breaks when a schedule is disabled.
 
 | function | source | notes |
 |---|---|---|
-| `spawn-dashboard-api` | `lambda/dashboard-api/` | the dashboard's REST backend. Its Slack endpoints (`/api/slack/*`) are experimental and answer 404 unless the function's environment sets `SPAWN_EXPERIMENTAL_CHAT=1`; the hosted function must not set it for 1.0 (spore-host#611) |
+| `spawn-dashboard-api` | `lambda/dashboard-api/` | the dashboard's REST backend. Its Slack endpoints (`/api/slack/*`) are experimental and answer 404 unless the function's environment sets `SPAWN_EXPERIMENTAL_CHAT=1`; the hosted function must not set it for 1.0 (spore-host#611). Every authenticated route requires the caller's account to be in `spore-portal-accounts` (not `offboarded`) or in `DASHBOARD_ALLOWED_ACCOUNTS` (comma-separated IDs); there is no audit mode, so an unset list and an empty registry refuse everyone (`DASHBOARD_ACCOUNTS_TABLE` overrides the table) |
 | `spawn-dashboard-websocket` | `lambda/dashboard-websocket/` | WebSocket connect/disconnect |
 
 `spore-bot` used to be listed here. It is not API Gateway-fronted — Slack, Teams,
@@ -201,7 +201,7 @@ belong to adjacent projects.
 | `spawn-alerts`, `spawn-alert-history` | **nothing, since #783 removed the alerts path.** Still deployed and empty; the template that creates them stays because two of its four tables are live. Their removal belongs to the control-plane reaping in #653 |
 | `spawn-cost-history` | `cost-history-collector` |
 | `spawn-teams`, `spawn-team-memberships` | team sharing (#137) |
-| `spore-portal-accounts` | the reaper's `ACCOUNTS_TABLE` — the portal registry it reads (read-only `Scan`) for the expiry verdict. It does **not** decide which accounts are scanned; `REAPER_ROLE_ARNS` (plus `REAPER_SCAN_SELF`) does |
+| `spore-portal-accounts` | the reaper's `ACCOUNTS_TABLE` — the portal registry it reads (read-only `Scan`) for the expiry verdict. It does **not** decide which accounts are scanned; `REAPER_ROLE_ARNS` (plus `REAPER_SCAN_SELF`) does. Also dashboard-api's entitlement source (`GetItem` of `accountId`/`status`, `lambda/dashboard-api/entitlement.go`): a caller whose account has no row, or an `offboarded` one, and is not in the function's `DASHBOARD_ALLOWED_ACCOUNTS`, gets 403 |
 | `spore-bot-{audit,registry,workspaces}` | spore-bot (spore-host `lambda/spore-bot`); here, `cmd/bot.go` (registry, workspaces) and `lambda/dashboard-api/slack_oauth.go` (workspaces). `deployment/cloudformation/spore-bot.yaml` declares them for self-hosting only — the hosted tables are not in any stack (per spore-host repo) |
 | `spore-sms-pending` | written by spore-bot's SMS notifications, read by spore-host's `lambda/rest-api` for replies (per spore-host repo). Declared here only by the self-hosting `spore-bot.yaml` |
 | `lagotto-watches`, `lagotto-match-history` | lagotto; also read by `lambda/dashboard-api/watches.go` |

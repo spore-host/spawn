@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -61,8 +62,9 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 	// to protect. Above LoadDefaultConfig too, since it needs no AWS config either —
 	// one fewer thing to fail on the anonymous path.
 	//
-	// Only the read-only listing moves. POST /api/strata/resolve stays authenticated:
-	// it reaches S3 (s3://strata-registry) with this Lambda's credentials.
+	// Only the read-only listing moves. POST /api/strata/resolve stays authenticated
+	// and entitled (entitlement.go): it reaches S3 (s3://strata-registry) with this
+	// Lambda's credentials.
 	if path == "/api/strata/catalog" && method == "GET" {
 		return handleStrataGetCatalog()
 	}
@@ -84,6 +86,14 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 	// Extract user identity and account info
 	userID, cliIamArn, accountBase36, callerCreds, err := getUserFromRequest(ctx, cfg, request)
 	if err != nil {
+		switch {
+		case errors.Is(err, errNotEntitled):
+			log.Printf("authorization refused: %v", err)
+			return errorResponse(403, "this AWS account is not onboarded to spore.host"), nil
+		case errors.Is(err, errEntitlementUnavailable):
+			log.Printf("authorization unavailable: %v", err)
+			return errorResponse(503, "could not verify account entitlement; retry shortly"), nil
+		}
 		log.Printf("authentication failed: %v", err)
 		return errorResponse(401, "authentication failed"), nil
 	}
