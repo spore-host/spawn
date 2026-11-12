@@ -83,7 +83,16 @@ import (
 // TestSporedPolicySchemaPinsTheDocuments. Same schema must mean the same
 // document: otherwise an older CLI at the same schema would overwrite a newer
 // one's grants, which is #1558 again.
-const sporedPolicySchema = 1
+//
+// History:
+//
+//	1  #1558/#1573: the versioned and managed spored grants.
+//	2  Instance-mutating grants scoped to the calling instance
+//	   (iam_instance_scope.go): CreateTags/DeleteTags/StopInstances only on
+//	   aws:ARN == ${ec2:SourceInstanceARN}, explicit Denies retiring the
+//	   account-wide forms older CLIs still write, and spawn:config,
+//	   spawn:iam-user and spawn:nested-parent added to reaperControlTagKeys.
+const sporedPolicySchema = 2
 
 // The unversioned policy names, which every CLI up to v0.161.0 overwrites on
 // every launch. This CLI writes them only as the base of its versioned names

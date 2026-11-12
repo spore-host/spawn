@@ -218,7 +218,7 @@ func Launch(ctx context.Context, deps Deps, spec *taskproto.TaskSpec, region str
 	// A private-ECR container image additionally needs ecr:ReadOnly to pull.
 	profile, err := client.CreateOrGetInstanceProfile(ctx, aws.IAMRoleConfig{
 		TrustServices:    []string{"ec2"}, // an instance profile is assumed by EC2
-		InlinePolicyJSON: taskiam.TaskRunPolicyFor(taskiam.S3Buckets(spec.Inputs), taskiam.S3Buckets(spec.Outputs), resultsBucket, taskiam.S3BucketsFromURIs(spec.Resources.S3ReadWrite), stagingBucket),
+		InlinePolicyJSON: taskiam.TaskRunPolicyFor(taskiam.S3Buckets(spec.Inputs), taskiam.S3Buckets(spec.Outputs), taskiam.ResultsWriteTarget(resultsBucket, resultsKeyPrefix, spec.TaskID), taskiam.S3BucketsFromURIs(spec.Resources.S3ReadWrite), stagingBucket),
 		Policies:         taskiam.ExtraPolicies(spec),
 	})
 	if err != nil {

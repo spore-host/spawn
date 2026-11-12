@@ -68,3 +68,41 @@ func TestStagedFilesKey(t *testing.T) {
 		t.Errorf("staged-files resource %s no longer matches keys under %s", pat, StagedFilesRoot)
 	}
 }
+
+// A task's role writes the results bucket only under the results base prefix
+// (tenant-11): never the bucket's other keys, such as the pool specs under
+// staging/pool-specs/ that pool workers run.
+func TestTaskResultsWriteIsScopedToTheResultsPrefix(t *testing.T) {
+	const bucket = "spawn-results-123456789012-us-east-1"
+	cases := []struct {
+		key, task, want string
+	}{
+		{"tasks/t-1", "t-1", bucket + "/tasks"},         // the default layout
+		{"runs/r9/t-1", "t-1", bucket + "/runs/r9"},     // a spec's own results_prefix
+		{"t-1", "t-1", bucket},                          // results at the bucket root
+		{"/tasks/t-1/", "t-1", bucket + "/tasks"},       // slashes trimmed
+		{"tasks/other", "t-1", bucket + "/tasks/other"}, // not a task-id suffix: kept whole
+		{"", "t-1", bucket},                             // no key at all
+	}
+	for _, c := range cases {
+		if got := ResultsWriteTarget(bucket, c.key, c.task); got != c.want {
+			t.Errorf("ResultsWriteTarget(%q, %q) = %q, want %q", c.key, c.task, got, c.want)
+		}
+	}
+	if got := ResultsWriteTarget("", "tasks/t-1", "t-1"); got != "" {
+		t.Errorf("no bucket gave %q, want \"\"", got)
+	}
+
+	pol := parse(t, TaskRunPolicyFor(nil, nil, ResultsWriteTarget(bucket, "tasks/t-1", "t-1"), nil, ""))
+	var writes []string
+	for _, st := range pol.Statement {
+		for _, a := range st.Action {
+			if a == "s3:PutObject" {
+				writes = append(writes, st.Resource...)
+			}
+		}
+	}
+	if want := []string{"arn:aws:s3:::" + bucket + "/tasks/*"}; !reflect.DeepEqual(writes, want) {
+		t.Errorf("results PutObject on %q, want exactly %q", writes, want)
+	}
+}

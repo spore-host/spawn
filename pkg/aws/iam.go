@@ -1010,55 +1010,9 @@ func (c *Client) sporedSelfManagementStatements() []interface{} {
 	}
 	statements = append(statements, sporedReadPermissions)
 
-	// Tag writes are scoped to already-managed instances (#174). Previously
-	// ec2:CreateTags was granted on "*" with NO condition, so a compromised spore
-	// could tag ANY instance spawn:managed=true and then terminate it — the
-	// condition on the destructive actions below provided no containment.
-	// Conditioning CreateTags/DeleteTags on ec2:ResourceTag/spawn:managed=true
-	// means a spore can only (re)tag instances ALREADY in scope; it cannot pull a
-	// foreign instance into scope. spored only ever tags its own instance (which
-	// always carries spawn:managed=true), so legitimate use is unaffected. (This
-	// also adds the previously-missing DeleteTags grant the FSx-mount path needs.)
-	//
-	// That reasoning is correct and was not sufficient: re-tagging an instance
-	// already in scope is itself an attack when the reaper EXECUTES a tag's value.
-	// See reaperControlTagKeys below, and the Deny appended right after this
-	// statement — GHSA-8q3p-qcv8-2pr4.
-	sporedTagPermissions := map[string]interface{}{
-		"Effect": "Allow",
-		"Action": []interface{}{
-			"ec2:CreateTags",
-			"ec2:DeleteTags",
-		},
-		"Resource": "*",
-		"Condition": map[string]interface{}{
-			"StringEquals": map[string]interface{}{
-				"ec2:ResourceTag/spawn:managed": "true",
-			},
-		},
-	}
-	statements = append(statements, sporedTagPermissions)
-	statements = append(statements, reaperControlTagDeny())
-
-	// ec2:CancelSpotInstanceRequests (#922): spored cancels its own persistent
-	// Spot request before it self-terminates, or EC2 launches a replacement. The
-	// request carries the instance's tags, so the same spawn:managed condition
-	// scopes it.
-	sporedActionPermissions := map[string]interface{}{
-		"Effect": "Allow",
-		"Action": []interface{}{
-			"ec2:TerminateInstances",
-			"ec2:StopInstances",
-			"ec2:CancelSpotInstanceRequests",
-		},
-		"Resource": "*",
-		"Condition": map[string]interface{}{
-			"StringEquals": map[string]interface{}{
-				"ec2:ResourceTag/spawn:managed": "true",
-			},
-		},
-	}
-	statements = append(statements, sporedActionPermissions)
+	// Tag writes, stop and terminate are scoped to the calling instance itself,
+	// and the Denies retire the account-wide forms. See sporedInstanceScopeStatements.
+	statements = append(statements, sporedInstanceScopeStatements()...)
 
 	// Allow the spored role to invoke the DNS-updater Function URL under AWS_IAM
 	// auth (#173). This is the caller's half of the IAM-auth cutover: rather than
@@ -1779,6 +1733,15 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 // spore could write its own ARN onto another instance's address and release it.
 // spawn:instance-id is what the reaper's sweep and `spawn terminate` select by.
 // Launch writes both, from the workstation, and nothing on the instance does.
+//
+// Three more since schema 2, now that an instance may tag only itself
+// (sporedInstanceScopeStatements). spawn:config names the launch-config object
+// spored, running as root, loads on boot and reload; an unprivileged process
+// that could repoint it would choose what root runs. spawn:iam-user is the
+// owner the dashboard authorizes by. NestedParentTagKey says which nested head
+// may manage the instance, and the nested role may set it only at
+// RunInstances (tag-on-create, which the nested baseline exempts). The launch
+// writes all three, and nothing on the instance does.
 var reaperControlTagKeys = []string{
 	"spawn:pre-stop",
 	"spawn:pre-stop-timeout",
@@ -1787,6 +1750,9 @@ var reaperControlTagKeys = []string{
 	"spawn:managed",
 	elasticip.InstanceIDTagKey,
 	elasticip.InstanceARNTagKey,
+	"spawn:config",
+	"spawn:iam-user",
+	NestedParentTagKey,
 }
 
 // reaperControlTagDeny is the statement form for sporedSelfManagementStatements.
@@ -1815,17 +1781,6 @@ func reaperControlTagDeny() map[string]interface{} {
 	}
 }
 
-// reaperControlTagKeysJSON renders the same list for the static DCV policy below,
-// so the two policies cannot drift on it — the failure mode this whole comment
-// block is about.
-func reaperControlTagKeysJSON() string {
-	quoted := make([]string, 0, len(reaperControlTagKeys))
-	for _, k := range reaperControlTagKeys {
-		quoted = append(quoted, `"`+k+`"`)
-	}
-	return strings.Join(quoted, ", ")
-}
-
 // sporedTrustPolicy is the assume-role trust policy for the spored EC2 role:
 // it lets the EC2 service assume the role. Used by SetupSporedIAMRole when
 // creating the role.
@@ -1842,9 +1797,11 @@ const sporedTrustPolicy = `{
   ]
 }`
 
-// A var rather than a const so the reaper control-tag deny below is rendered from
-// reaperControlTagKeys, the same slice sporedSelfManagementStatements uses. Hardcoding the list
-// twice is the drift this file has already shipped once.
+// A var rather than a const so the instance-scope statements below (the tag,
+// stop and Spot grants, the reaper control-tag Deny and the Denies retiring the
+// account-wide forms) are rendered from sporedInstanceScopeStatements, the same
+// statements sporedSelfManagementStatements uses. Hardcoding them twice is the
+// drift this file has already shipped once.
 var sporedDCVRolePolicy = fmt.Sprintf(`{
   "Version": "2012-10-17",
   "Statement": [
@@ -1858,40 +1815,7 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
       ],
       "Resource": "*"
     },
-    {
-      "Effect": "Allow",
-      "Action": ["ec2:CreateTags", "ec2:DeleteTags"],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "ec2:ResourceTag/spawn:managed": "true"
-        }
-      }
-    },
-    {
-      "Effect": "Deny",
-      "Action": ["ec2:CreateTags", "ec2:DeleteTags"],
-      "Resource": "*",
-      "Condition": {
-        "ForAnyValue:StringEquals": {
-          "aws:TagKeys": [%s]
-        }
-      }
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ec2:TerminateInstances",
-        "ec2:StopInstances",
-        "ec2:CancelSpotInstanceRequests"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "ec2:ResourceTag/spawn:managed": "true"
-        }
-      }
-    },
+    %s,
     {
       "Effect": "Allow",
       "Action": [
@@ -1967,7 +1891,7 @@ var sporedDCVRolePolicy = fmt.Sprintf(`{
     %s,
     %s
   ]
-}`, reaperControlTagKeysJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedLaunchConfigReadStatementJSON(), sporedSelfTerminateStatementJSON(), sporedOwnElasticIPStatementsJSON())
+}`, sporedInstanceScopeStatementsJSON(), spawnconfig.DefaultDNSFunctionARN, sporedHybridRegistryStatementJSON(), sporedLaunchConfigReadStatementJSON(), sporedSelfTerminateStatementJSON(), sporedOwnElasticIPStatementsJSON())
 
 // waitForInstanceProfile polls until the instance profile is retrievable (IAM
 // is eventually consistent after creation), or a bounded deadline passes. It

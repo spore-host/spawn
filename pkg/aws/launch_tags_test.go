@@ -163,3 +163,56 @@ func TestLaunchTaggerPricesEachShapeOnce(t *testing.T) {
 		t.Error("a member with a cost limit was tagged with no price to enforce it by")
 	}
 }
+
+// A nested head's children carry NestedParentTagKey = the head's
+// ${aws:userid}, which every nested grant on an existing child is
+// conditioned on; nobody else's launches carry it.
+func TestNestedHeadTagsItsChildren(t *testing.T) {
+	ctx := context.Background()
+	orig := callerUserID
+	t.Cleanup(func() { callerUserID = orig })
+	calls := 0
+	callerUserID = func(context.Context, *Client) (string, error) {
+		calls++
+		return "AROANESTED:i-0head", nil
+	}
+	nestedARN := "arn:aws:sts::111122223333:assumed-role/" + NestedSpawnRoleName() + "/i-0head"
+	got, err := nestedParentFor(ctx, &Client{}, nestedARN)
+	if err != nil || got != "AROANESTED:i-0head" {
+		t.Fatalf("nested caller: %q, %v", got, err)
+	}
+	for _, arn := range []string{
+		"arn:aws:sts::111122223333:assumed-role/spored-instance-role/i-0x",
+		"arn:aws:iam::111122223333:user/alice",
+	} {
+		if got, err := nestedParentFor(ctx, &Client{}, arn); err != nil || got != "" {
+			t.Errorf("%s: %q, %v; want no tag", arn, got, err)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("GetCallerIdentity called %d times, want once (for the nested caller only)", calls)
+	}
+
+	callerUserID = func(context.Context, *Client) (string, error) { return "", errors.New("denied") }
+	if _, err := nestedParentFor(ctx, &Client{}, nestedARN); err == nil {
+		t.Error("a nested caller whose user id cannot be read was allowed to launch untagged children")
+	}
+
+	tg := &LaunchTagger{c: &Client{}, accountID: "111122223333", userARN: nestedARN, nestedParent: "AROANESTED:i-0head",
+		pricer: &countingPricer{rate: 0.01}, prices: map[string]resolvedPrice{}}
+	tags, err := tg.Tags(ctx, LaunchConfig{InstanceType: "t3.micro", Region: "us-east-1", TargetOS: "linux", TTL: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := tagMap(tags)[NestedParentTagKey]; v != "AROANESTED:i-0head" {
+		t.Errorf("%s = %q on a nested head's child", NestedParentTagKey, v)
+	}
+	tg.nestedParent = ""
+	tags, err = tg.Tags(ctx, LaunchConfig{InstanceType: "t3.micro", Region: "us-east-1", TargetOS: "linux", TTL: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := tagMap(tags)[NestedParentTagKey]; ok {
+		t.Errorf("a workstation launch carries %s=%q", NestedParentTagKey, v)
+	}
+}

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The spored instance roles may now stop, terminate and tag only their own
+  instance (`aws:ARN` equal to `${ec2:SourceInstanceARN}`); before, any
+  instance tagged `spawn:managed=true` in the account. Explicit Denies in the
+  new grants keep the old account-wide grants that older CLIs still write from
+  taking effect. An instance can no longer write `spawn:config`,
+  `spawn:iam-user` or `spawn:nested-parent` on itself. The spored grant schema
+  is now 2 (`spored-policy-v2` and siblings).
+- A `--nested-spawn` head may now run SSM commands on, start, stop, terminate
+  and retag only the children it launched (tagged `spawn:nested-parent` with
+  its own `aws:userid` at launch), and may pass only `spored-instance-role`
+  and its own role to them, not the `spawn-instance-*` family. It may set
+  `spawn:nested-parent` and the other keys no instance may write only when
+  creating a resource, never on an existing one, itself included. The nested role
+  gets a new name, so heads launched by this release use a new role; old
+  nested roles are reaped as before once unused.
+- A `spawn task run` task's role may write the results bucket only under the
+  results prefix (`tasks/` by default, or the spec's `results_prefix`), not
+  the whole bucket.
+
 ## [0.163.2] - 2026-11-11
 
 ### Security

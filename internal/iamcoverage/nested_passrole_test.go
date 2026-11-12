@@ -43,8 +43,9 @@ type passPrincipal struct {
 //
 // The --nested-spawn role's own policy (pkg/aws.nestedSpawnStatements, Go, not
 // a script or template) is deliberately outside this rule: a nested head node
-// passes its own role to a nested child (cmd nestedChildProfile), and that
-// role's name is a hash of the policy, so the policy cannot name it.
+// passes its own role to a nested child (cmd nestedChildProfile). That
+// policy names exactly spored-instance-role and the nested role itself
+// (pkg/aws TestNestedSpawnRoleReachesOnlyItsOwnChildren).
 func TestNoOrchestratorMayPassANestedSpawnRole(t *testing.T) {
 	principals := discoverPassPrincipals(t)
 	nested := spawnaws.NestedSpawnRolePrefix + "0123abcd"

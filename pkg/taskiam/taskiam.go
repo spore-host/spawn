@@ -113,12 +113,46 @@ func StagingPolicy(inputBuckets, outputBuckets []string, resultsBucket string, r
 	return StagingPolicyFor(inputBuckets, outputBuckets, resultsBucket, readWriteBuckets, false)
 }
 
+// ResultsWriteTarget is the part of the results bucket a task's role may
+// write: the results base prefix every task's records sit under
+// (taskproto.EffectiveResultsPrefix without the task id), as "bucket/prefix",
+// or the bare bucket when the records are at its root. StagingPolicyFor's
+// resultsBucket takes either form and grants writes beneath it.
+//
+// Not the whole bucket: spawn-results-<account>-<region> also holds what the
+// task does not write, such as pool specs under staging/pool-specs/, which
+// pool workers run. Not the one task's own prefix either, though that is the
+// only one it needs: CreateOrGetInstanceProfile names a role by the hash of
+// its policy, so a per-task Resource would give every task_id a role of its
+// own (thousands for one workflow fan-out, against IAM's default quota of
+// 1,000), where today every task with the same buckets shares one. Within a
+// shared role IAM cannot tell its instances apart in an S3 Resource without a
+// key layout carrying ${aws:userid}, which every adapter reading
+// tasks/<task_id>/ would have to follow. A spec with its own results_prefix
+// gets a role scoped to that prefix.
+func ResultsWriteTarget(bucket, keyPrefix, taskID string) string {
+	key := strings.Trim(keyPrefix, "/")
+	switch {
+	case bucket == "":
+		return ""
+	case key == "" || key == taskID:
+		return bucket
+	}
+	if base, ok := strings.CutSuffix(key, "/"+taskID); ok && taskID != "" {
+		key = base
+	}
+	return bucket + "/" + key
+}
+
 // StagingPolicyFor is StagingPolicy, plus, when provenance is set, what
 // `spored provenance upload` needs on the WRITE buckets (#1076): an upload that
 // sets tags in the request requires s3:PutObjectTagging as well as PutObject,
 // and the provenance record is written with s3:PutObjectAnnotation. Both action
 // names are from AWS's machine-readable service reference. Only `spawn task
 // run` asks for it; `spawn launch --s3-write` and sweeps never tag.
+//
+// resultsBucket may carry a key prefix ("bucket/tasks", ResultsWriteTarget),
+// and the write grant is then beneath that prefix only.
 func StagingPolicyFor(inputBuckets, outputBuckets []string, resultsBucket string, readWriteBuckets []string, provenance bool) string {
 	readB := DedupeBuckets(inputBuckets)
 	writeB := DedupeBuckets(append(append([]string{}, outputBuckets...), resultsBucket))

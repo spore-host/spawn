@@ -30,6 +30,7 @@ const LaunchInstanceGone
 const LaunchSettingsSchema
 const MaxEncodedUserDataBytes
 const MaxUserDataBytes
+const NestedParentTagKey
 const NestedSpawnRolePrefix
 const PriceSourceTag
 const ReaperCoverageRoleName
