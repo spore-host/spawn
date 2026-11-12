@@ -63,6 +63,9 @@ func nestedSpawnStatements() []interface{} {
 	managedRequest := map[string]interface{}{
 		"StringEquals": map[string]interface{}{"aws:RequestTag/" + spawnManagedTag: "true"},
 	}
+	ownChild := map[string]interface{}{
+		"StringEquals": map[string]interface{}{"ec2:ResourceTag/" + NestedParentTagKey: "${aws:userid}"},
+	}
 	return []interface{}{
 		// Reads. EC2 Describe* and these SSM/EFS reads have no resource-level
 		// permissions, so "*" is the only form AWS accepts.
@@ -102,15 +105,28 @@ func nestedSpawnStatements() []interface{} {
 		},
 		// RunInstances, the resources it CREATES: the instance and its volumes
 		// must be tagged spawn:managed=true in the request, so no child is ever
-		// outside the reaper's scan.
+		// outside the reaper's scan. The instance must also carry
+		// NestedParentTagKey set to this head's own ${aws:userid}: that tag is
+		// what every grant below on an existing child is conditioned on, and
+		// requiring the caller's own value here is what stops a head claiming
+		// another instance's children.
 		map[string]interface{}{
-			"Sid":    "NestedSpawnRunTaggedInstances",
-			"Effect": "Allow",
-			"Action": "ec2:RunInstances",
-			"Resource": []interface{}{
-				"arn:aws:ec2:*:" + acct + ":instance/*",
-				"arn:aws:ec2:*:" + acct + ":volume/*",
+			"Sid":      "NestedSpawnRunTaggedInstances",
+			"Effect":   "Allow",
+			"Action":   "ec2:RunInstances",
+			"Resource": "arn:aws:ec2:*:" + acct + ":instance/*",
+			"Condition": map[string]interface{}{
+				"StringEquals": map[string]interface{}{
+					"aws:RequestTag/" + spawnManagedTag:    "true",
+					"aws:RequestTag/" + NestedParentTagKey: "${aws:userid}",
+				},
 			},
+		},
+		map[string]interface{}{
+			"Sid":       "NestedSpawnRunTaggedVolumes",
+			"Effect":    "Allow",
+			"Action":    "ec2:RunInstances",
+			"Resource":  "arn:aws:ec2:*:" + acct + ":volume/*",
 			"Condition": managedRequest,
 		},
 		// RunInstances, the resources it only REFERENCES. AWS authorizes
@@ -184,20 +200,17 @@ func nestedSpawnStatements() []interface{} {
 				},
 			},
 		},
-		// Lifecycle of spawn-managed resources only. The condition key is
-		// EC2's (ec2:ResourceTag), because every action here is EC2's.
-		//
-		// The Revoke pair and DeleteSecurityGroup are the egress proxy's
-		// (#1515): find-or-create removes the default allow-all egress EC2
-		// gives its two new groups and any drifted rule (pkg/egressproxy/
-		// deploy EnsureGroups), and `spawn egress-proxy delete` deletes the
-		// groups. Both groups carry spawn:managed=true from creation, so the
-		// grant reaches them and no group spawn did not tag. A nested spore
-		// could already terminate any spawn-managed instance, so deleting an
-		// unused spawn-managed group (EC2 refuses one in use) grants it
-		// nothing more destructive.
+		// Lifecycle of this head's own children only: start, stop, terminate,
+		// read the Windows password, cancel the Spot request, and retag (`spawn
+		// extend`). Every child carries NestedParentTagKey = this head's
+		// ${aws:userid} from RunInstances (above), and no instance may write
+		// that key afterwards (reaperControlTagKeys), so the condition reaches
+		// exactly the instances this head launched. A persistent Spot request
+		// is tagged with the instance's tags at the same RunInstances. The
+		// condition key is EC2's (ec2:ResourceTag), because every action here
+		// is EC2's.
 		map[string]interface{}{
-			"Sid":    "NestedSpawnManageManaged",
+			"Sid":    "NestedSpawnManageOwnChildren",
 			"Effect": "Allow",
 			"Action": []interface{}{
 				"ec2:StartInstances",
@@ -205,6 +218,25 @@ func nestedSpawnStatements() []interface{} {
 				"ec2:TerminateInstances",
 				"ec2:CancelSpotInstanceRequests",
 				"ec2:GetPasswordData",
+				"ec2:CreateTags",
+				"ec2:DeleteTags",
+			},
+			"Resource":  "*",
+			"Condition": ownChild,
+		},
+		// Security and placement groups spawn manages. The Revoke pair and
+		// DeleteSecurityGroup are the egress proxy's (#1515): find-or-create
+		// removes the default allow-all egress EC2 gives its two new groups
+		// and any drifted rule (pkg/egressproxy/deploy EnsureGroups), and
+		// `spawn egress-proxy delete` deletes the groups. Both groups carry
+		// spawn:managed=true from creation, so the grant reaches them and no
+		// group spawn did not tag. Groups are found-or-created by name and
+		// shared with workstation launches (pkg/aws securitygroup.go), so they
+		// carry no parent tag and stay scoped to spawn:managed=true.
+		map[string]interface{}{
+			"Sid":    "NestedSpawnManageManagedGroups",
+			"Effect": "Allow",
+			"Action": []interface{}{
 				"ec2:AuthorizeSecurityGroupIngress",
 				"ec2:AuthorizeSecurityGroupEgress",
 				"ec2:RevokeSecurityGroupIngress",
@@ -216,15 +248,16 @@ func nestedSpawnStatements() []interface{} {
 			"Condition": managedResource,
 		},
 		// `spawn connect` (Session Manager, through the aws CLI) and the
-		// terminate-time task flush (SendCommand) — to spawn-managed instances.
-		// The condition key is SSM's, because the action is SSM's.
+		// terminate-time task flush (SendCommand) — to this head's own
+		// children only. The condition key is SSM's, because the action is
+		// SSM's; ${aws:userid} is a global key, present on every request.
 		map[string]interface{}{
-			"Sid":      "NestedSpawnSSMToManagedInstances",
+			"Sid":      "NestedSpawnSSMToOwnChildren",
 			"Effect":   "Allow",
 			"Action":   []interface{}{"ssm:SendCommand", "ssm:StartSession"},
 			"Resource": "arn:aws:ec2:*:" + acct + ":instance/*",
 			"Condition": map[string]interface{}{
-				"StringEquals": map[string]interface{}{"ssm:resourceTag/" + spawnManagedTag: "true"},
+				"StringEquals": map[string]interface{}{"ssm:resourceTag/" + NestedParentTagKey: "${aws:userid}"},
 			},
 		},
 		map[string]interface{}{
@@ -253,16 +286,21 @@ func nestedSpawnStatements() []interface{} {
 			"Action":   "s3:PutObject",
 			"Resource": launchconfig.ObjectARNPattern(acct),
 		},
-		// PassRole to EC2 only, and only the roles spawn makes: the shared
-		// default identity and the per-task family (which includes this role, so
-		// a child may itself be nested).
+		// PassRole to EC2 only, and only the two roles a nested child ever
+		// gets (cmd nestedChildProfile): the shared default identity, and
+		// this role itself, so a child may itself be nested. Not the
+		// spawn-instance-* family: those roles carry whatever --iam-* flags
+		// and task policies gave them, so passing them would hand a head node
+		// the grants of every per-task role in the account. This role's name
+		// is a hash of this document, so the document names it through
+		// nestedSelfRolePlaceholder (see NestedSpawnRoleName).
 		map[string]interface{}{
 			"Sid":    "NestedSpawnPassSpawnRoles",
 			"Effect": "Allow",
 			"Action": "iam:PassRole",
 			"Resource": []interface{}{
 				"arn:aws:iam::" + acct + ":role/" + SporedRoleName,
-				"arn:aws:iam::" + acct + ":role/spawn-instance-*",
+				"arn:aws:iam::" + acct + ":role/" + nestedSelfRolePlaceholder,
 			},
 			"Condition": map[string]interface{}{
 				"StringEquals": map[string]interface{}{"iam:PassedToService": "ec2.amazonaws.com"},
@@ -271,9 +309,16 @@ func nestedSpawnStatements() []interface{} {
 	}
 }
 
-// nestedSpawnPolicyDoc is the grant document, still carrying
-// sporedAccountPlaceholder (bound by sporedPolicyDoc before it is written).
-func nestedSpawnPolicyDoc() string {
+// nestedSelfRolePlaceholder stands for the nested role's own name in the
+// grant document. The name is a hash of the document, so the document cannot
+// carry it literally: NestedSpawnRoleName hashes the document with this
+// placeholder in it, and nestedSpawnPolicyDoc then replaces the placeholder
+// with that name. Not a valid role name, so an unbound document matches no
+// role.
+const nestedSelfRolePlaceholder = "SPAWN-NESTED-ROLE-SELF"
+
+// nestedSpawnPolicyTemplate is the grant document with both placeholders.
+func nestedSpawnPolicyTemplate() string {
 	b, err := json.Marshal(map[string]interface{}{
 		"Version":   "2012-10-17",
 		"Statement": nestedSpawnStatements(),
@@ -284,11 +329,19 @@ func nestedSpawnPolicyDoc() string {
 	return string(b)
 }
 
+// nestedSpawnPolicyDoc is the grant document with the role's own name bound,
+// still carrying sporedAccountPlaceholder (bound by sporedPolicyDoc before it
+// is written).
+func nestedSpawnPolicyDoc() string {
+	return strings.ReplaceAll(nestedSpawnPolicyTemplate(), nestedSelfRolePlaceholder, NestedSpawnRoleName())
+}
+
 // NestedSpawnRoleName is the role and instance-profile name --nested-spawn
 // creates or reuses: NestedSpawnRolePrefix plus 8 hex digits of the grant
-// document's hash. No AWS call; usable by --dry-run.
+// document's hash (taken with nestedSelfRolePlaceholder in place of the name
+// itself). No AWS call; usable by --dry-run.
 func NestedSpawnRoleName() string {
-	sum := sha256.Sum256([]byte(nestedSpawnPolicyDoc()))
+	sum := sha256.Sum256([]byte(nestedSpawnPolicyTemplate()))
 	return fmt.Sprintf("%s%x", NestedSpawnRolePrefix, sum[:4])
 }
 
@@ -314,21 +367,24 @@ func NestedSpawnRoleFromCallerARN(arn string) (string, bool) {
 }
 
 // nestedSpawnBaselinePolicyDoc is the spored baseline with one change: the
-// reaper-control-tag Deny does not apply to tag-on-create.
+// tag Denies do not apply to tag-on-create.
 //
-// The Deny stops an instance writing spawn:managed, spawn:launch-time,
-// spawn:pre-stop and the rest onto an EXISTING resource
-// (GHSA-8q3p-qcv8-2pr4, GHSA-c93q-4jh7-6pvj). IAM evaluates the tags of a
-// RunInstances request as ec2:CreateTags too, so unchanged it would refuse
-// every child launch: a child must be created carrying exactly those keys.
-// ec2:CreateAction is present only in that create-time evaluation, so requiring
-// it to be absent keeps the Deny whole for every existing resource. Only the
-// nested role gets this variant; the default baseline is unchanged.
+// The reaper-control-tag Deny stops an instance writing spawn:managed,
+// spawn:launch-time, spawn:pre-stop and the rest onto an EXISTING resource
+// (GHSA-8q3p-qcv8-2pr4, GHSA-c93q-4jh7-6pvj), and DenyTagOthers stops it
+// tagging anything but itself and its own children. IAM evaluates the tags of
+// a RunInstances request as ec2:CreateTags too, so unchanged they would refuse
+// every child launch: a child must be created carrying exactly those keys, and
+// is not yet anyone's child. ec2:CreateAction is present only in that
+// create-time evaluation, so requiring it to be absent keeps both Denies whole
+// for every existing resource. Only the nested role gets this variant; the
+// default baseline is unchanged. The stop/terminate Deny is left as it is: it
+// never sees a create.
 func (c *Client) nestedSpawnBaselinePolicyDoc() string {
 	statements := c.sporedSelfManagementStatements()
 	for i, st := range statements {
 		m, ok := st.(map[string]interface{})
-		if !ok || m["Effect"] != "Deny" {
+		if !ok || m["Effect"] != "Deny" || !policyActionIncludes(m["Action"], "ec2:CreateTags") {
 			continue
 		}
 		cp := make(map[string]interface{}, len(m))
@@ -374,4 +430,26 @@ func (c *Client) SetupNestedSpawnProfile(ctx context.Context) (string, error) {
 		InlinePolicyJSON: doc,
 		Tags:             map[string]string{"spawn:purpose": "nested-spawn"},
 	}, c.nestedSpawnBaselinePolicyDoc(), sporedNestedBaselinePolicyBase)
+}
+
+// policyActionIncludes reports whether a statement's Action (a string or a
+// list of them) names want.
+func policyActionIncludes(action interface{}, want string) bool {
+	switch a := action.(type) {
+	case string:
+		return a == want
+	case []interface{}:
+		for _, x := range a {
+			if s, ok := x.(string); ok && s == want {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range a {
+			if s == want {
+				return true
+			}
+		}
+	}
+	return false
 }

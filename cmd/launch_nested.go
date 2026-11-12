@@ -111,7 +111,8 @@ func nestedChildProfile(callerRole string, wantNested, customIAM, customDNS, noT
 	switch {
 	case customIAM:
 		return "", fmt.Errorf("this instance runs as the nested-spawn role %s, which cannot create IAM roles (a spore that could would be able to grant itself anything); "+
-			"launch without --iam-*/--s3-* flags to use %s, or pass --instance-profile with an existing spawn-instance-* profile", callerRole, aws.SporedInstanceProfileName)
+			"launch without --iam-*/--s3-* flags to use %s, or with --nested-spawn to give the child this instance's own role; "+
+			"a nested spore may pass no other role", callerRole, aws.SporedInstanceProfileName)
 	case customDNS:
 		return "", fmt.Errorf("this instance runs as the nested-spawn role %s, which cannot grant a child access to a custom DNS updater; launch the child without a custom DNS updater", callerRole)
 	case noTimeoutSet:

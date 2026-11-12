@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"path"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -490,6 +491,13 @@ func TestStagedGrantKeepsTheRoleShared(t *testing.T) {
 	a, b := store.profiles[0], store.profiles[1]
 	if aws.PredictedInstanceRoleName(a) != aws.PredictedInstanceRoleName(b) {
 		t.Errorf("two tasks with the same buckets get different roles:\n%s\n%s", a.InlinePolicyJSON, b.InlinePolicyJSON)
+	}
+	// Shared, but not the whole results bucket: only the tasks/ prefix every
+	// default task's records are under (tenant-11). The bucket's other keys,
+	// such as staging/pool-specs/, stay out of a task's reach.
+	if regexp.MustCompile(`"arn:aws:s3:::spawn-results-[^"/]+/\*"`).MatchString(a.InlinePolicyJSON) ||
+		!regexp.MustCompile(`"arn:aws:s3:::spawn-results-[^"/]+/tasks/\*"`).MatchString(a.InlinePolicyJSON) {
+		t.Errorf("a task's results write is not scoped to the tasks/ prefix:\n%s", a.InlinePolicyJSON)
 	}
 }
 

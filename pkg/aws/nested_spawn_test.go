@@ -114,8 +114,11 @@ func TestNestedSpawnPassRoleIsScopedToSpawnRolesAndEC2(t *testing.T) {
 			found++
 			res := stringList(st.Resource)
 			sort.Strings(res)
+			// The shared default identity and this role itself, never the
+			// spawn-instance-* family: those roles carry arbitrary --iam-*
+			// and task grants (instance-3, iam-6).
 			want := []string{
-				"arn:aws:iam::" + sporedAccountPlaceholder + ":role/spawn-instance-*",
+				"arn:aws:iam::" + sporedAccountPlaceholder + ":role/" + NestedSpawnRoleName(),
 				"arn:aws:iam::" + sporedAccountPlaceholder + ":role/" + SporedRoleName,
 			}
 			sort.Strings(want)
@@ -137,10 +140,10 @@ func TestNestedSpawnPassRoleIsScopedToSpawnRolesAndEC2(t *testing.T) {
 	}
 }
 
-// The nested baseline differs from the default one in exactly one place: the
-// reaper-control-tag Deny is lifted for tag-on-create only. Without that, IAM
-// refuses every child RunInstances, which must carry spawn:managed and
-// spawn:launch-time.
+// The nested baseline differs from the default one in exactly the tag Denies:
+// the reaper-control-tag Deny and DenyTagOthers are lifted for tag-on-create
+// only. Without that, IAM refuses every child RunInstances, which must carry
+// spawn:managed and spawn:launch-time and is nobody's child yet.
 func TestNestedSpawnBaselineDiffersOnlyAtTagOnCreate(t *testing.T) {
 	c := &Client{}
 	def := parseStatements(t, c.sporedBaselinePolicyDoc())
@@ -155,8 +158,8 @@ func TestNestedSpawnBaselineDiffersOnlyAtTagOnCreate(t *testing.T) {
 		}
 		diffs++
 		d, n := def[i], nested[i]
-		if d.Effect != "Deny" {
-			t.Errorf("statement %d (%s) differs and is not the Deny", i, d.Sid)
+		if d.Effect != "Deny" || !policyActionIncludes(d.Action, "ec2:CreateTags") {
+			t.Errorf("statement %d (%s) differs and is not a tag Deny", i, d.Sid)
 			continue
 		}
 		if !reflect.DeepEqual(n.Condition["Null"], map[string]interface{}{"ec2:CreateAction": "true"}) {
@@ -167,8 +170,8 @@ func TestNestedSpawnBaselineDiffersOnlyAtTagOnCreate(t *testing.T) {
 			t.Errorf("the nested Deny differs beyond the Null condition:\n default %+v\n nested  %+v", d, n)
 		}
 	}
-	if diffs != 1 {
-		t.Errorf("%d statements differ, want exactly the one Deny", diffs)
+	if diffs != 2 {
+		t.Errorf("%d statements differ, want exactly the two tag Denies", diffs)
 	}
 }
 

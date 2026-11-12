@@ -3,10 +3,12 @@ package aws
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/ttl"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
@@ -29,8 +31,13 @@ import (
 type LaunchTagger struct {
 	c                          *Client
 	accountID, userARN, accSlg string
-	pricer                     onDemandPricer // truffle in production
-	prices                     map[string]resolvedPrice
+	// nestedParent is the caller's ${aws:userid} when the caller is a
+	// --nested-spawn role, and "" otherwise: every instance it launches is
+	// tagged NestedParentTagKey with it, which the nested role's grants on
+	// existing children are conditioned on (and its RunInstances requires).
+	nestedParent string
+	pricer       onDemandPricer // truffle in production
+	prices       map[string]resolvedPrice
 }
 
 // resolvedPrice is a memoized resolvePricePerHour outcome. price 0 means no
@@ -50,8 +57,44 @@ func (c *Client) NewLaunchTagger(ctx context.Context) (*LaunchTagger, error) {
 	// Best-effort: empty when unset or not permitted, in which case the DNS
 	// updater falls back to base36 (#121).
 	slug := slugifyDNSLabel(c.GetAccountName(ctx))
-	return &LaunchTagger{c: c, accountID: accountID, userARN: userARN, accSlg: slug,
-		pricer: truffleaws.NewClientFromConfig(c.cfg), prices: map[string]resolvedPrice{}}, nil
+	t := &LaunchTagger{c: c, accountID: accountID, userARN: userARN, accSlg: slug,
+		pricer: truffleaws.NewClientFromConfig(c.cfg), prices: map[string]resolvedPrice{}}
+	if t.nestedParent, err = nestedParentFor(ctx, c, userARN); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// nestedParentFor is the NestedParentTagKey value a caller's launches carry:
+// its ${aws:userid} when userARN is a --nested-spawn role session, and ""
+// otherwise. A nested caller whose user id cannot be read cannot launch at
+// all, since its RunInstances requires the tag; it fails here, with the
+// reason, rather than at RunInstances with UnauthorizedOperation.
+func nestedParentFor(ctx context.Context, c *Client, userARN string) (string, error) {
+	if _, nested := NestedSpawnRoleFromCallerARN(userARN); !nested {
+		return "", nil
+	}
+	id, err := callerUserID(ctx, c)
+	if err != nil {
+		return "", fmt.Errorf("resolve this nested spore's user id for the %s tag its children must carry: %w", NestedParentTagKey, err)
+	}
+	return id, nil
+}
+
+// callerUserID is the caller's sts:GetCallerIdentity UserId, which IAM
+// evaluates as ${aws:userid}: "<role unique id>:<session name>", and for
+// instance-profile credentials the session name is the instance id. A var so
+// tests need no STS endpoint.
+var callerUserID = func(ctx context.Context, c *Client) (string, error) {
+	out, err := sts.NewFromConfig(c.cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", err
+	}
+	id := aws.ToString(out.UserId)
+	if !strings.Contains(id, ":") {
+		return "", fmt.Errorf("sts:GetCallerIdentity returned user id %q, not a role session's", id)
+	}
+	return id, nil
 }
 
 // Tags returns the instance tags Launch would write for lc, launched now. The
@@ -87,7 +130,11 @@ func (t *LaunchTagger) tags(ctx context.Context, lc *LaunchConfig) ([]types.Tag,
 			t.prices[key] = resolvedPrice{price: lc.PricePerHour, source: lc.PriceSource}
 		}
 	}
-	return BuildLaunchTags(*lc, t.accountID, t.userARN, t.accSlg)
+	tags, err := BuildLaunchTags(*lc, t.accountID, t.userARN, t.accSlg)
+	if err != nil || t.nestedParent == "" {
+		return tags, err
+	}
+	return append(tags, types.Tag{Key: aws.String(NestedParentTagKey), Value: aws.String(t.nestedParent)}), nil
 }
 
 // launchAnchoredTags are the tags whose values are instants buildTags fixes at

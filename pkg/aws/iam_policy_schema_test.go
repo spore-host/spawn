@@ -395,7 +395,7 @@ func TestSporedPolicy_ListDeniedStillWritesAndWarns(t *testing.T) {
 	role.listErr = &smithy.GenericAPIError{Code: "AccessDenied", Message: "not authorized to perform iam:ListRolePolicies"}
 	var w warnings
 	doc := bound(t, sporedDCVRolePolicy)
-	if err := putVersionedRolePolicy(context.Background(), role, "r", sporedRolePolicyBase, doc, 1, w.add); err != nil {
+	if err := putVersionedRolePolicy(context.Background(), role, "r", sporedRolePolicyBase, doc, sporedPolicySchema, w.add); err != nil {
 		t.Fatalf("a denied list failed the launch: %v", err)
 	}
 	if role.policies[sporedRolePolicyName()] != doc {
@@ -473,11 +473,11 @@ func TestParseVersionedPolicyName(t *testing.T) {
 // bumped (the bump is what lets the change reach roles an older CLI shares),
 // and the pins below are updated to the new documents.
 func TestSporedPolicySchemaPinsTheDocuments(t *testing.T) {
-	const pinnedSchema = 1
+	const pinnedSchema = 2
 	pins := map[string]string{
-		"sporedDCVRolePolicy (spored-policy)":            "2c8f337b4ba4e52885ba6efb333c7f1cf2679889c55b09c524dc583712424555",
-		"spored baseline (spored-baseline-policy)":       "8d76144b2bdd724b2b01fd960d533ed4ee8a78d7de01155fb58a0f3d50bc7ddb",
-		"nested-spawn baseline (spored-baseline-policy)": "3b61fc0809c5beccd475bdf39fc11578739e5c0c581a88d5cb14f540ef52e2a7",
+		"sporedDCVRolePolicy (spored-policy)":            "227926143670c37ecf4a3bdcb23262d4cfa455162e0c1dc957ee88c780aa63c9",
+		"spored baseline (spored-baseline-policy)":       "46fd6e493f4b1449474bf2beda016347e11387e7c0866e5cb5faa71807a88d21",
+		"nested-spawn baseline (spored-baseline-policy)": "8dcbd3c1ffe5364e8c26471729ebe2739a166e131e8daa22e70f46d79aa7c548",
 	}
 	docs := map[string]string{
 		"sporedDCVRolePolicy (spored-policy)":            sporedDCVRolePolicy,
