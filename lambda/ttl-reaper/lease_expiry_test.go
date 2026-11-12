@@ -177,13 +177,20 @@ func TestReportLeasesDeletesOnlyWhatItShould(t *testing.T) {
 	})
 
 	t.Run("armed deletes exactly the stale uncovered record and the orphaned lease", func(t *testing.T) {
-		f := &fakeRoute53{sets: leaseZone()}
+		// Each with the ownership marker the DNS updater writes beside it, which
+		// goes with the record: an expired name must be free to claim again.
+		zone := append(leaseZone(),
+			rawTXT(dns.OwnerName(staleRec), `"i-0aaaa1111"`),
+			rawTXT(dns.OwnerName(orphanRec), `"i-0bbbb2222"`))
+		f := &fakeRoute53{sets: zone}
 		var sum Summary
 		leaseReaper(f, true, false).reportLeases(context.Background(), &sum, leaseNow)
 		want := map[string]bool{
 			"A " + staleRec:                   true,
 			"TXT " + dns.LeaseName(staleRec):  true,
 			"TXT " + dns.LeaseName(orphanRec): true,
+			"TXT " + dns.OwnerName(staleRec):  true,
+			"TXT " + dns.OwnerName(orphanRec): true,
 		}
 		got := map[string]bool{}
 		for _, d := range f.deleted {

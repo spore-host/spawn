@@ -92,7 +92,9 @@ import (
 //	   aws:ARN == ${ec2:SourceInstanceARN}, explicit Denies retiring the
 //	   account-wide forms older CLIs still write, and spawn:config,
 //	   spawn:iam-user and spawn:nested-parent added to reaperControlTagKeys.
-const sporedPolicySchema = 2
+//	3  spored-policy no longer reads the wildcard TLS key (spawn-certs-*), and
+//	   Denies it: app launches read it with their own role (app_role.go).
+const sporedPolicySchema = 3
 
 // The unversioned policy names, which every CLI up to v0.161.0 overwrites on
 // every launch. This CLI writes them only as the base of its versioned names

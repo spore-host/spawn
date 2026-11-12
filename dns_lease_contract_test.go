@@ -84,3 +84,59 @@ func TestDNSLeaseContractMatchesTheUpdater(t *testing.T) {
 		t.Errorf("pkg/dns.ParseLease no longer reads RFC 3339, which is what the updater writes: %v", err)
 	}
 }
+
+// The ownership marker and the lease age the updater takes over at are the
+// same kind of contract: the reaper deletes markers by pkg/dns.OwnerName, and
+// the updater lets an instance take over a record whose lease is older than its
+// copy of pkg/dns.LeaseMaxAge. Read from the updater's source by value.
+func TestDNSOwnerContractMatchesTheUpdater(t *testing.T) {
+	const path = "lambda/dns-updater/ownership.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	consts := map[string]ast.Expr{}
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs := spec.(*ast.ValueSpec)
+			for i, name := range vs.Names {
+				if i < len(vs.Values) {
+					consts[name.Name] = vs.Values[i]
+				}
+			}
+		}
+	}
+	if len(consts) == 0 {
+		t.Fatalf("found no constants in %s — the parse has broken, not the contract", path)
+	}
+
+	lit, ok := consts["ownerPrefix"].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		t.Fatalf("%s has no string-literal ownerPrefix constant", path)
+	}
+	if got, _ := strconv.Unquote(lit.Value); got != dns.OwnerPrefix {
+		t.Errorf("the updater writes owner markers as %q but the reaper deletes %q: every marker "+
+			"would outlive its record", got, dns.OwnerPrefix)
+	}
+
+	// leaseMaxAge = <int> * time.Hour.
+	be, ok := consts["leaseMaxAge"].(*ast.BinaryExpr)
+	if !ok {
+		t.Fatalf("%s: leaseMaxAge is not <n> * time.<unit>", path)
+	}
+	n, okN := be.X.(*ast.BasicLit)
+	unit, okU := be.Y.(*ast.SelectorExpr)
+	if !okN || !okU || be.Op != token.MUL {
+		t.Fatalf("%s: leaseMaxAge is not <n> * time.<unit>", path)
+	}
+	units := map[string]time.Duration{"Hour": time.Hour, "Minute": time.Minute, "Second": time.Second}
+	k, _ := strconv.Atoi(n.Value)
+	if got := time.Duration(k) * units[unit.Sel.Name]; got != dns.LeaseMaxAge {
+		t.Errorf("the updater takes over a record whose lease is older than %s, but pkg/dns.LeaseMaxAge is %s", got, dns.LeaseMaxAge)
+	}
+}

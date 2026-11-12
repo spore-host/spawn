@@ -65,15 +65,40 @@ enforcement is staged.
 
 | variable | default | effect |
 |---|---|---|
-| `DNS_AUTHZ_MODE` | *(unset = audit)* | `enforce` makes a refusal a 403. Anything else logs the would-be refusal and continues. |
+| `DNS_AUTHZ_MODE` | *(unset = enforce)* | `audit` logs a would-be refusal (account or record ownership) and continues. Anything else, including unset, makes a refusal a 403. |
 | `DNS_ALLOWED_ACCOUNTS` | *(empty)* | Comma-separated account IDs entitled without a registry entry. Malformed entries are reported, not silently dropped. |
 | `DNS_ACCOUNTS_TABLE` | `spawn-user-accounts` | The registry to read. |
 
-Audit is the default deliberately. `update-function-code` does not touch
-environment variables and `--environment` *replaces* the whole map, so an unset
-variable is the normal outcome of a deploy — the unset value therefore has to be
-the one that is safe to deploy. It also means **deploying the code does not close
-the hole**; the two steps below do.
+Enforce is the default. `update-function-code` does not touch environment
+variables and `--environment` *replaces* the whole map, so an unset variable is
+the normal outcome of a deploy. That used to argue for audit; since the same
+switch now guards record ownership (below), a lost variable must fail closed
+rather than reopen every account's records to every principal in it. **Before
+deploying a version with this default, entitle every account that must keep
+registering without a registry entry in `DNS_ALLOWED_ACCOUNTS`** (the account
+behind `c0zxr0ao` above), or set `DNS_AUTHZ_MODE=audit` explicitly.
+
+## Record ownership
+
+The account check says a caller may write under its account's subdomain; it says
+nothing about which records there. `lambda/dns-updater/ownership.go` decides that.
+The owner of a record is an instance, as IAM identifies it: an instance-profile
+session `arn:aws:sts::<account>:assumed-role/<role>/<instance id>` of one of
+spawn's instance roles (`spored-instance-role`, `spawn-instance-*`). The owner is
+held in the zone as `_spore-instance.<record>` = `"<instance id>"`, written by the
+updater in the same batch as the A record (a first claim uses `CREATE`, so two
+instances cannot both claim one name), and deleted with it by the updater, the TTL
+reaper's DNS teardown and its lease expiry.
+
+- An instance may register a free name, or its own record. It may take over
+  another instance's record only once that record's lease is older than
+  `pkg/dns.LeaseMaxAge`.
+- A record from before ownership (no marker) may be claimed or deleted by an
+  instance only when the request comes from the address the record points at.
+- Deletes are the owner's only.
+- Any other caller (`spawn dns register`/`delete` from a workstation, or an
+  instance under a role spawn did not create) may change only records no instance
+  owns, and never claims one.
 
 ## The IAM grant
 

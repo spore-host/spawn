@@ -113,3 +113,27 @@ func Evaluate(renewed, now time.Time, maxAge time.Duration) LeaseState {
 	}
 	return LeaseFresh
 }
+
+// OwnerPrefix is the leading label of a record's ownership marker: the TXT
+// record _spore-instance.<fqdn> = "<instance id>" naming the instance the DNS
+// updater lets change or delete fqdn (lambda/dns-updater ownership.go). The
+// updater is its only writer; it and the TTL reaper delete it with the record.
+// Mirrored in the updater, which does not import this module, and held equal
+// by TestDNSLeaseContractMatchesTheUpdater.
+const OwnerPrefix = "_spore-instance"
+
+// OwnerName returns the ownership marker's TXT name for an A-record FQDN.
+func OwnerName(fqdn string) string {
+	return OwnerPrefix + "." + strings.TrimSuffix(fqdn, ".")
+}
+
+// OwnedRecord returns the A-record FQDN an ownership marker's TXT name
+// describes, and false if the name is not a marker.
+func OwnedRecord(txtName string) (string, bool) {
+	name := strings.TrimSuffix(strings.ToLower(txtName), ".")
+	rest, ok := strings.CutPrefix(name, OwnerPrefix+".")
+	if !ok || rest == "" {
+		return "", false
+	}
+	return rest, true
+}

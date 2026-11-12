@@ -433,9 +433,11 @@ func runAppLaunch(cmd *cobra.Command, args []string) error {
 		keyName = ""
 	}
 
-	// 9. IAM instance profile — spored needs EC2/tag permissions to write spawn:ready-url
+	// 9. IAM instance profile — spored needs EC2/tag permissions to write
+	// spawn:ready-url, and the user data reads the account's wildcard TLS
+	// certificate, which only the app role may (aws.AppRoleName).
 	iamProfile := ""
-	if p, err := client.SetupSporedIAMRole(ctx); err != nil {
+	if p, err := client.SetupAppInstanceProfile(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  IAM role setup failed: %v — spored may not be able to write tags\n", err)
 	} else {
 		iamProfile = p

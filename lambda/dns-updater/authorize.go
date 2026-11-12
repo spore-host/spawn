@@ -46,8 +46,11 @@ import (
 // c0zxr0ao decodes to an account that is NOT in that table. So the obvious
 // implementation of this issue, shipped enforcing, would have broken DNS for four
 // running hosts on their next registration. Hence DNS_AUTHZ_MODE below: this
-// deploys in audit, the logs say who actually calls, and enforcement is a separate
-// deliberate flip. Same staging the TTL reaper shipped with.
+// first deployed in audit, so the logs could say who actually calls. It now
+// defaults to enforce (record ownership, ownership.go, made audit-by-default a
+// hole in every account rather than only an entitlement gap); an account that
+// must keep registering without being in the registry goes in
+// DNS_ALLOWED_ACCOUNTS, and DNS_AUTHZ_MODE=audit is the explicit way back.
 //
 // Note also that the table's own account_base36 attribute is NOT reliably the
 // encoding of its aws_account_id (one row stores "c8s8u", which decodes to
@@ -71,8 +74,13 @@ const accountIDAttr = "aws_account_id"
 // call in the path of every launch.
 const allowlistTTL = 5 * time.Minute
 
-// authzModeEnforce is the value of DNS_AUTHZ_MODE that makes a refusal a 403.
-const authzModeEnforce = "enforce"
+// authzModeEnforce and authzModeAudit are the values of DNS_AUTHZ_MODE. Only
+// audit lets a refused request through (logged); anything else, including
+// unset or a typo, enforces.
+const (
+	authzModeEnforce = "enforce"
+	authzModeAudit   = "audit"
+)
 
 var (
 	dynamoClient *dynamodb.Client
@@ -88,24 +96,19 @@ var (
 	scanAccountRegistry = scanAccountRegistryLive
 )
 
-// authzEnforced reports whether a refusal should be fatal.
+// authzEnforced reports whether a refusal should be fatal: always, unless
+// DNS_AUTHZ_MODE is exactly "audit".
 //
-// Deliberately defaulting to audit, which means a fresh deploy does NOT yet close
-// the hole. Two reasons, both specific:
-//
-//   - update-function-code does not touch environment variables and
-//     --environment REPLACES the whole map, so "the deploy sets it" is exactly how
-//     a variable goes missing. An unset mode must therefore be the SAFE-to-deploy
-//     one, not the strict one.
-//   - the account owning four live records is not in the registry (see above).
-//     Defaulting to enforce would take those hosts off the air to fix a
-//     vulnerability nobody is exploiting.
-//
-// This is the one place in this file where failing OPEN is the right default, and
-// it is only safe because the edge fix — the resource policy — does not depend on
-// it.
+// This used to default to audit, for two reasons: --environment REPLACES a
+// function's whole variable map, so a variable is easily lost and "unset" had
+// to be safe to deploy; and the account owning four live records was not in the
+// registry. The first argues the other way once the check guards record
+// ownership as well as entitlement: a lost variable must not quietly reopen
+// every account's records to every principal in it, so unset now enforces, and
+// losing the variable fails closed. The second is handled by entitling that
+// account in DNS_ALLOWED_ACCOUNTS before this deploys (the PR's deploy notes).
 func authzEnforced() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("DNS_AUTHZ_MODE")), authzModeEnforce)
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("DNS_AUTHZ_MODE")), authzModeAudit)
 }
 
 // extraAllowedAccounts reads the static allowlist from the environment.

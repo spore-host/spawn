@@ -469,27 +469,28 @@ func TestEvaluate_PopulatesDNSFields(t *testing.T) {
 }
 
 // TestDNSRecordsToDelete covers the pure record-construction the reaper feeds to
-// Route53: canonical A-record always, plus the #121 friendly-name alias CNAME
-// when present; nil when the instance registered no DNS or lacks account-base36.
+// Route53: canonical A-record and its ownership marker always, plus the #121
+// friendly-name alias CNAME when present; nil when the instance registered no DNS or lacks account-base36.
 func TestDNSRecordsToDelete(t *testing.T) {
 	domain := "spore.host"
 
-	// A-record only (no friendly name)
+	// A-record and its ownership marker (no friendly name)
 	recs := dnsRecordsToDelete(candidate{dnsName: "box", accountBase36: "5k0zfnmq"}, domain)
-	if len(recs) != 1 || recs[0].fqdn != "box.5k0zfnmq.spore.host" || recs[0].rrType != "A" {
-		t.Errorf("A-only: got %+v", recs)
+	if len(recs) != 2 || recs[0].fqdn != "box.5k0zfnmq.spore.host" || recs[0].rrType != "A" ||
+		recs[1].fqdn != "_spore-instance.box.5k0zfnmq.spore.host" || recs[1].rrType != "TXT" {
+		t.Errorf("A-only: got %+v, want the A-record and its _spore-instance marker", recs)
 	}
 
-	// A-record + alias CNAME
+	// A-record + marker + alias CNAME
 	recs = dnsRecordsToDelete(candidate{dnsName: "box", accountBase36: "5k0zfnmq", accountName: "buckai"}, domain)
-	if len(recs) != 2 {
-		t.Fatalf("A+alias: want 2 records, got %d (%+v)", len(recs), recs)
+	if len(recs) != 3 {
+		t.Fatalf("A+alias: want 3 records, got %d (%+v)", len(recs), recs)
 	}
 	if recs[0].fqdn != "box.5k0zfnmq.spore.host" || recs[0].rrType != "A" {
 		t.Errorf("A+alias[0] = %+v, want A box.5k0zfnmq.spore.host", recs[0])
 	}
-	if recs[1].fqdn != "box.buckai.spore.host" || recs[1].rrType != "CNAME" {
-		t.Errorf("A+alias[1] = %+v, want CNAME box.buckai.spore.host", recs[1])
+	if recs[2].fqdn != "box.buckai.spore.host" || recs[2].rrType != "CNAME" {
+		t.Errorf("A+alias[2] = %+v, want CNAME box.buckai.spore.host", recs[2])
 	}
 
 	// no DNS registered → nil

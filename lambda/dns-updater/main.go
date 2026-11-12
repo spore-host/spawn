@@ -206,8 +206,8 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 	// SigV4 above establishes WHO the caller is. It does not establish that they
 	// are a customer: the Function URL's resource policy is `Principal: "*"`, so
 	// until that is narrowed, any principal in any AWS account reaches this line
-	// with a verified identity. See authorize.go for which registry answers this
-	// and why this ships in audit mode rather than enforcing on deploy.
+	// with a verified identity. See authorize.go for which registry answers this;
+	// it enforces unless DNS_AUTHZ_MODE=audit.
 	if ok, reason := authorizeCaller(ctx, accountID); !ok {
 		if authzEnforced() {
 			fmt.Printf("DNS caller REFUSED: %s\n", reason)
@@ -216,8 +216,8 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 			// The log line above carries the detail.
 			return errorResponse(403, "caller account is not entitled to register DNS records")
 		}
-		fmt.Printf("DNS caller WOULD BE REFUSED (DNS_AUTHZ_MODE is not %q, allowing): %s\n",
-			authzModeEnforce, reason)
+		fmt.Printf("DNS caller WOULD BE REFUSED (DNS_AUTHZ_MODE=%s, allowing): %s\n",
+			authzModeAudit, reason)
 	}
 
 	// Resolve domain and hosted zone
@@ -235,10 +235,30 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 	// subdomain. Example: my-instance.1kpqzg2c.spore.host (for account 123456789012)
 	fqdn := getFullDNSName(req.RecordName, accountID, reqDomain)
 
+	// ── Authorize the record, not just the account (ownership.go) ────────────────
+	// The account check above says the caller may write under this subdomain; it
+	// says nothing about WHICH records in it. A failed read refuses: an ownership
+	// question that cannot be answered is not answered "yes".
+	instance := callerInstance(authz.IAM.UserARN, accountID)
+	state, err := readRecordState(ctx, zoneID, fqdn)
+	if err != nil {
+		fmt.Printf("DNS ownership lookup for %s failed: %v — refusing\n", fqdn, err)
+		return errorResponse(503, "could not determine who owns the record; retry")
+	}
+	decision := authorizeOwnership(req.Action, fqdn, instance, request.RequestContext.HTTP.SourceIP, state, time.Now().UTC())
+	if !decision.allow {
+		if authzEnforced() {
+			fmt.Printf("DNS %s of %s REFUSED (caller %s): %s\n", req.Action, fqdn, authz.IAM.UserARN, decision.reason)
+			return errorResponse(403, "the record is owned by another instance")
+		}
+		fmt.Printf("DNS %s of %s WOULD BE REFUSED (DNS_AUTHZ_MODE=%s, allowing): %s\n",
+			req.Action, fqdn, authzModeAudit, decision.reason)
+		decision.markerChanges = auditTransfer(req.Action, fqdn, instance, state)
+	}
+
 	// Update DNS record
 	var changeID string
 	var message string
-	var err error
 
 	// Optional friendly alias: {record}.{account-name}.{domain} as a CNAME to the
 	// canonical base36 A-record (#121). base36 stays authoritative (holds the IP);
@@ -259,7 +279,7 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 	}
 
 	if req.Action == "UPSERT" {
-		changeID, err = upsertDNSRecord(ctx, fqdn, req.IPAddress, zoneID, req.Lease)
+		changeID, err = upsertDNSRecordWith(ctx, fqdn, req.IPAddress, zoneID, req.Lease, decision.markerChanges)
 		if err != nil {
 			return errorResponse(500, fmt.Sprintf("Failed to update DNS: %v", err))
 		}
@@ -273,7 +293,7 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 			}
 		}
 	} else {
-		changeID, err = deleteDNSRecord(ctx, fqdn, zoneID)
+		changeID, err = deleteDNSRecordWith(ctx, fqdn, zoneID, decision.markerChanges)
 		if err == nil {
 			// The lease describes a record that no longer exists. Non-fatal: the
 			// reaper deletes a lease whose A-record is gone.
@@ -313,6 +333,13 @@ func handler(ctx context.Context, request events.LambdaFunctionURLRequest) (even
 }
 
 func upsertDNSRecord(ctx context.Context, fqdn, ipAddress, zoneID string, lease bool) (string, error) {
+	return upsertDNSRecordWith(ctx, fqdn, ipAddress, zoneID, lease, nil)
+}
+
+// upsertDNSRecordWith is upsertDNSRecord with the ownership marker's changes
+// (authorizeOwnership) in the same atomic batch: a claim's CREATE fails the
+// whole batch if another instance claimed the name first.
+func upsertDNSRecordWith(ctx context.Context, fqdn, ipAddress, zoneID string, lease bool, marker []types.Change) (string, error) {
 	now := time.Now().UTC()
 	comment := fmt.Sprintf("Updated by spawn instance at %s", now.Format(time.RFC3339))
 
@@ -334,6 +361,7 @@ func upsertDNSRecord(ctx context.Context, fqdn, ipAddress, zoneID string, lease 
 	if lease {
 		changes = append(changes, leaseChange(fqdn, now))
 	}
+	changes = append(changes, marker...)
 
 	output, err := route53Client.ChangeResourceRecordSets(ctx, &route53.ChangeResourceRecordSetsInput{
 		HostedZoneId: aws.String(zoneID),
@@ -354,6 +382,12 @@ func upsertDNSRecord(ctx context.Context, fqdn, ipAddress, zoneID string, lease 
 }
 
 func deleteDNSRecord(ctx context.Context, fqdn, zoneID string) (string, error) {
+	return deleteDNSRecordWith(ctx, fqdn, zoneID, nil)
+}
+
+// deleteDNSRecordWith is deleteDNSRecord with the ownership marker's DELETE
+// in the same batch, so a record and its owner go together.
+func deleteDNSRecordWith(ctx context.Context, fqdn, zoneID string, marker []types.Change) (string, error) {
 	// First, get the current record
 	listOutput, err := route53Client.ListResourceRecordSets(ctx, &route53.ListResourceRecordSetsInput{
 		HostedZoneId:    aws.String(zoneID),
@@ -384,12 +418,12 @@ func deleteDNSRecord(ctx context.Context, fqdn, zoneID string) (string, error) {
 		HostedZoneId: aws.String(zoneID),
 		ChangeBatch: &types.ChangeBatch{
 			Comment: aws.String(comment),
-			Changes: []types.Change{
+			Changes: append([]types.Change{
 				{
 					Action:            types.ChangeActionDelete,
 					ResourceRecordSet: recordToDelete,
 				},
-			},
+			}, marker...),
 		},
 	})
 	if err != nil {

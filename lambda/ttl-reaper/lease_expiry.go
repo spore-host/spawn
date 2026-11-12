@@ -220,6 +220,9 @@ func (r *reaper) actOnLease(ctx context.Context, f leaseFinding, sum *Summary, n
 		sum.DNSLeasesExpired++
 	}
 	r.deleteRecord(ctx, f.lease, r53types.RRTypeTxt)
+	// The ownership marker goes with its record, as the updater's own delete
+	// takes it: an expired or orphaned record leaves no claim on its name.
+	r.deleteRecord(ctx, dns.OwnerName(f.record), r53types.RRTypeTxt)
 }
 
 // currentLease re-reads one lease's renewal time.
