@@ -3,6 +3,7 @@ package accesstoken
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,13 +39,16 @@ func TestStoreAddVerifyExpire(t *testing.T) {
 	if !exp.Equal(now.Add(time.Hour).UTC()) {
 		t.Errorf("expires %s, want %s", exp, now.Add(time.Hour))
 	}
-	fi, err := os.Stat(s.Dir)
-	if err != nil || fi.Mode().Perm() != 0o700 {
-		t.Errorf("dir mode %v (%v), want 0700", fi.Mode().Perm(), err)
-	}
-	fi, err = os.Stat(filepath.Join(s.Dir, Hash(tok)))
-	if err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("record mode %v (%v), want 0600", fi.Mode().Perm(), err)
+	// Unix modes; Windows has none to check (and spored opens no session there).
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(s.Dir)
+		if err != nil || fi.Mode().Perm() != 0o700 {
+			t.Errorf("dir mode %v (%v), want 0700", fi.Mode().Perm(), err)
+		}
+		fi, err = os.Stat(filepath.Join(s.Dir, Hash(tok)))
+		if err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("record mode %v (%v), want 0600", fi.Mode().Perm(), err)
+		}
 	}
 	data, _ := os.ReadFile(filepath.Join(s.Dir, Hash(tok)))
 	if strings.Contains(string(data), tok) {
