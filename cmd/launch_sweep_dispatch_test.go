@@ -251,10 +251,13 @@ const testOrchestratorAccount = "444455556666"
 // Organization (none).
 func stubSweepRoleBoundary(t *testing.T) {
 	t.Helper()
-	prevOrch, prevMgmt := sweepOrchestratorAccount, sweepRoleManagementAccount
-	t.Cleanup(func() { sweepOrchestratorAccount, sweepRoleManagementAccount = prevOrch, prevMgmt })
+	prevOrch, prevMgmt, prevOrchMgmt := sweepOrchestratorAccount, sweepRoleManagementAccount, sweepOrchestratorManagementAccount
+	t.Cleanup(func() {
+		sweepOrchestratorAccount, sweepRoleManagementAccount, sweepOrchestratorManagementAccount = prevOrch, prevMgmt, prevOrchMgmt
+	})
 	sweepOrchestratorAccount = func(context.Context) (string, error) { return testOrchestratorAccount, nil }
 	sweepRoleManagementAccount = func(context.Context, awssdk.Config) (string, error) { return "", nil }
+	sweepOrchestratorManagementAccount = func(context.Context) (string, error) { return "", nil }
 }
 
 func stubSweepRoleIAM(t *testing.T, f *roleIAMFake) {

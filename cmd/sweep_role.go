@@ -28,8 +28,10 @@ import (
 // (aws.EnsureSweepCrossAccountRole), `spawn sweep setup` does the same on its
 // own, and `spawn sweep teardown` deletes it.
 //
-// Before anything is created, aws.CheckSweepRoleAccounts refuses the role in,
-// or trusting, 942542972736 or an Organizations management account.
+// Before anything is created, aws.CheckSweepRoleTrust refuses the role in,
+// or trusting, 942542972736 or an Organizations management account, of the
+// compute account's organization or of the orchestrator account's, and
+// refuses it when either organization cannot be read (#1583).
 
 // sweepCrossAccountRoleName is the role the sweep orchestrator assumes in the
 // account the members launch in.
@@ -44,6 +46,18 @@ var sweepRoleIAM = aws.NewSweepRoleIAM
 // account's Organization ("" when it is in none), with the compute
 // credentials. A var so tests need no Organizations endpoint.
 var sweepRoleManagementAccount = func(ctx context.Context, cfg sdkaws.Config) (string, error) {
+	return orgaccount.ManagementAccount(ctx, orgaccount.New(cfg))
+}
+
+// sweepOrchestratorManagementAccount is the management account of the
+// orchestrator account's Organization ("" when it is in none), with the infra
+// credentials the orchestrator account was resolved with (#1583). A var so
+// tests need no Organizations endpoint.
+var sweepOrchestratorManagementAccount = func(ctx context.Context) (string, error) {
+	cfg, err := spawnconfig.LoadInfraAWSConfig(ctx, "us-east-1")
+	if err != nil {
+		return "", err
+	}
 	return orgaccount.ManagementAccount(ctx, orgaccount.New(cfg))
 }
 
@@ -125,7 +139,7 @@ func ensureSweepRole(ctx context.Context, cfg sdkaws.Config, accountID string, s
 		return refuse(fmt.Sprintf("spawn could not resolve the account of the sweep orchestrator the role must trust (%v)", err))
 	}
 	mgmt := func(ctx context.Context) (string, error) { return sweepRoleManagementAccount(ctx, cfg) }
-	if err := aws.CheckSweepRoleAccounts(ctx, accountID, orchestrator, mgmt, warn); err != nil {
+	if err := aws.CheckSweepRoleTrust(ctx, accountID, orchestrator, mgmt, sweepOrchestratorManagementAccount); err != nil {
 		return refuse("spawn will not create it: " + err.Error())
 	}
 

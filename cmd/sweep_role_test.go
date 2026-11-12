@@ -124,15 +124,37 @@ func TestSweepRoleRefusesAManagementAccount(t *testing.T) {
 		t.Errorf("IAM calls in a management account: %v", ops)
 	}
 
-	// Unreadable Organizations: a warning, and the role is ensured.
-	role = &roleIAMFake{}
+	// The orchestrator account managing its own organization (#1583): asked
+	// with the infra credentials, and refused the same way.
+	role = &roleIAMFake{err: errNoCrossAccountRole}
 	stubSweepRoleIAM(t, role)
-	sweepRoleManagementAccount = func(context.Context, awssdk.Config) (string, error) {
-		return "", errors.New("AccessDeniedException")
+	sweepOrchestratorManagementAccount = func(context.Context) (string, error) { return testOrchestratorAccount, nil }
+	err = ensureSweepRole(t.Context(), awssdk.Config{}, "111122223333", false, &out)
+	if !isRoleRefusal(err) || !strings.Contains(err.Error(), "management account") || !strings.Contains(err.Error(), testOrchestratorAccount) {
+		t.Fatalf("orchestrator manages its organization: err = %v, want the management-account refusal", err)
 	}
-	stderr := captureStderr(t, func() { err = ensureSweepRole(t.Context(), awssdk.Config{}, "111122223333", false, &out) })
-	if err != nil || !strings.Contains(stderr, "could not tell whether account 111122223333 is an AWS Organizations management account") {
-		t.Errorf("unreadable organization: err %v, stderr %q", err, stderr)
+	if ops := role.allOps(); len(ops) != 0 {
+		t.Errorf("IAM calls trusting a management account: %v", ops)
+	}
+
+	// Unreadable Organizations, on either end: refused, and nothing is
+	// created (#1583). It used to warn and create the role.
+	for _, end := range []string{"compute", "orchestrator"} {
+		role = &roleIAMFake{err: errNoCrossAccountRole}
+		stubSweepRoleIAM(t, role)
+		denied := func() (string, error) { return "", errors.New("AccessDeniedException") }
+		if end == "compute" {
+			sweepRoleManagementAccount = func(context.Context, awssdk.Config) (string, error) { return denied() }
+		} else {
+			sweepOrchestratorManagementAccount = func(context.Context) (string, error) { return denied() }
+		}
+		err = ensureSweepRole(t.Context(), awssdk.Config{}, "111122223333", false, &out)
+		if !isRoleRefusal(err) || !strings.Contains(err.Error(), "organizations:DescribeOrganization") {
+			t.Errorf("unreadable %s organization: err = %v, want a refusal naming organizations:DescribeOrganization", end, err)
+		}
+		if ops := role.allOps(); len(ops) != 0 {
+			t.Errorf("unreadable %s organization: IAM calls %v", end, ops)
+		}
 	}
 }
 

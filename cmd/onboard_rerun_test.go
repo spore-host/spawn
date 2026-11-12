@@ -109,9 +109,16 @@ func runOnboardHermetic(t *testing.T, fake *fakeOnboardIAM, region, externalID, 
 		return "222222222222", "arn:aws:iam::222222222222:user/tester", nil
 	}
 	onboardHTTPClient = func() *http.Client { return &http.Client{Transport: r.http} }
+	prevMgmt := onboardManagementAccount
+	t.Cleanup(func() { onboardManagementAccount = prevMgmt })
+	onboardManagementAccount = func(context.Context, aws.Config) (string, error) { return "", nil }
 	onboardRegion, onboardPhoneHomeURL, onboardPhoneHomeRole = region, testPhoneHomeURL, testPhoneHomeRole
 	onboardSporedRole, onboardExternalID, spawnOutputFormat = "", externalID, outputFormat
 	onboardSkipPhoneHome, onboardJSONOutput = false, false
+
+	if onboardHermeticTweak != nil {
+		onboardHermeticTweak()
+	}
 
 	c := &cobra.Command{}
 	c.SetOut(&r.stdout)
@@ -119,6 +126,10 @@ func runOnboardHermetic(t *testing.T, fake *fakeOnboardIAM, region, externalID, 
 	r.err = runOnboard(c, nil)
 	return r
 }
+
+// onboardHermeticTweak, when set, runs after runOnboardHermetic's defaults and
+// before the command, to vary one of them.
+var onboardHermeticTweak func()
 
 func (r *onboardRun) phoneHomeBody(t *testing.T) map[string]string {
 	t.Helper()

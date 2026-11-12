@@ -39,6 +39,8 @@ import (
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/dns"
+	"github.com/spore-host/spawn/pkg/orgaccount"
+	"github.com/spore-host/spawn/pkg/trustboundary"
 )
 
 const portalOnboardRoleName = "spore-portal-onboard"
@@ -78,7 +80,30 @@ var (
 		return spawnaws.NewClientFromConfig(cfg).GetCallerIdentityInfo(ctx)
 	}
 	onboardHTTPClient = func() *http.Client { return http.DefaultClient }
+	// onboardManagementAccount is the management account of the onboarded
+	// account's Organization, with its credentials (#1582).
+	onboardManagementAccount = func(ctx context.Context, cfg aws.Config) (string, error) {
+		return orgaccount.ManagementAccount(ctx, orgaccount.New(cfg))
+	}
 )
+
+// checkCrossAccountTrust refuses a role in account (whose credentials cfg
+// holds) trusting principalARN when either end is a forbidden account or an
+// Organizations management account, or when account's Organization cannot be
+// read (#1582). The trusted end is checked against the forbidden list only:
+// spawn holds no credentials there.
+func checkCrossAccountTrust(ctx context.Context, cfg aws.Config, account, principalARN, role string) error {
+	err := trustboundary.Check(ctx,
+		trustboundary.Side{What: "the account " + role + " would be created in", Account: account,
+			Mgmt: func(ctx context.Context) (string, error) { return onboardManagementAccount(ctx, cfg) }},
+		trustboundary.Side{What: "the account " + role + " would trust (" + principalARN + ")",
+			Account: trustboundary.AccountOfARN(principalARN)},
+	)
+	if err != nil {
+		return fmt.Errorf("refusing to create or update %s: %w. Nothing was created", role, err)
+	}
+	return nil
+}
 
 // onboardIAMAPI is the slice of the IAM client spawn onboard uses.
 type onboardIAMAPI interface {
@@ -137,6 +162,11 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 	sporedRole := onboardSporedRole
 	if sporedRole == "" {
 		sporedRole = spawnaws.SporedRoleName
+	}
+
+	// The account boundary, before any IAM call (#1582).
+	if err := checkCrossAccountTrust(ctx, cfg, accountID, phoneHomeRole, portalOnboardRoleName); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(progress, "Onboarding account %s (region %s)…\n", accountID, region)

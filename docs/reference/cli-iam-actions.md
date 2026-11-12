@@ -94,12 +94,12 @@ instances):
 | `spawn notify disable` | `dynamodb:UpdateItem` |
 | `spawn notify enable` | `dynamodb:UpdateItem` |
 | `spawn notify list` | `dynamodb:Scan` |
-| `spawn notify register` | `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:CreateRole`, `iam:GetRole`, `iam:PutRolePolicy`, `iam:TagRole`, `iam:UpdateAssumeRolePolicy`, `kms:Decrypt`, `kms:Encrypt` |
+| `spawn notify register` | `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:UpdateItem`, `iam:CreateRole`, `iam:GetRole`, `iam:PutRolePolicy`, `iam:TagRole`, `iam:UpdateAssumeRolePolicy`, `kms:Decrypt`, `kms:Encrypt`, `organizations:DescribeOrganization` |
 | `spawn notify workspace add` | `dynamodb:PutItem`, `kms:Encrypt` |
 | `spawn notify workspace destroy` | `dynamodb:BatchWriteItem`, `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:Scan` |
 | `spawn notify workspace list` | `dynamodb:Scan` |
 | `spawn notify workspace remove` | `dynamodb:DeleteItem` |
-| `spawn onboard` | `iam:CreateRole`, `iam:GetRole`, `iam:PutRolePolicy`, `iam:TagRole`, `iam:UpdateAssumeRolePolicy`, `lambda:InvokeFunctionUrl` |
+| `spawn onboard` | `iam:CreateRole`, `iam:GetRole`, `iam:PutRolePolicy`, `iam:TagRole`, `iam:UpdateAssumeRolePolicy`, `lambda:InvokeFunctionUrl`, `organizations:DescribeOrganization` |
 | `spawn orphans` | `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribePlacementGroups`, `ec2:DescribeRegions`, `ec2:DescribeVolumes`, `tag:GetResources` |
 | `spawn pipeline cancel` | `dynamodb:UpdateItem` |
 | `spawn pipeline collect` | `dynamodb:GetItem`, `s3:GetObject`, `s3:ListBucket` |
@@ -311,7 +311,7 @@ instances):
 | `logs:DescribeLogGroups` | `spawn footprint`, `spawn reaper deploy` |
 | `logs:FilterLogEvents` | `spawn reaper status`, `spawn reaper teardown` |
 | `logs:PutRetentionPolicy` | `spawn reaper deploy` |
-| `organizations:DescribeOrganization` | `spawn doctor`, `spawn launch`, `spawn resume`, `spawn sweep resume`, `spawn sweep setup` |
+| `organizations:DescribeOrganization` | `spawn doctor`, `spawn launch`, `spawn notify register`, `spawn onboard`, `spawn resume`, `spawn sweep resume`, `spawn sweep setup` |
 | `pricing:GetProducts` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn cost`, `spawn egress-proxy upgrade`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn slurm estimate`, `spawn slurm submit`, `spawn sweep resume`, `spawn task run` |
 | `route53:ListHostedZones` | `spawn doctor` |
 | `s3:AbortMultipartUpload` | `spawn image import`, `spawn launch`, `spawn schedule create` |

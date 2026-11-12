@@ -631,6 +631,7 @@ func (*LaunchError) Unwrap() error
 func (*LaunchTagger) TagValues(ctx context.Context, lc LaunchConfig) (map[string]string, error)
 func (*LaunchTagger) Tags(ctx context.Context, lc LaunchConfig) ([]types.Tag, error)
 func (*SweepRoleRefusedError) Error() string
+func (*SweepRoleRefusedError) Unwrap() error
 func (*TagLimitError) Error() string
 func (*UserDataTooLargeError) Error() string
 func (*ZoneFallbackError) Error() string
@@ -665,6 +666,7 @@ func CheckElasticIPHeadroom(q ElasticIPQuota, region string, need int) error
 func CheckNestedSpawnTTL(source, profile, ttl string) error
 func CheckPrivateNetwork(n PrivateNetwork, cfg LaunchConfig, internet []string) PrivateCheck
 func CheckSweepRoleAccounts(ctx context.Context, computeAccount, orchestratorAccount string, mgmt ManagementAccountLookup, warn func(string)) error
+func CheckSweepRoleTrust(ctx context.Context, computeAccount, orchestratorAccount string, computeMgmt, orchestratorMgmt ManagementAccountLookup) error
 func CheckUserDataSize(encoded string) error
 func DNSInvokePolicyName(functionARN string) string
 func DecodeLaunchSettings(raw interface{}) (LaunchSettings, error)
