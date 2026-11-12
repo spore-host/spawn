@@ -39,6 +39,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `spawn app launch` instances use their own role, `spawn-instance-app`, the
   only one that may read the account's wildcard TLS key.
   `spored-instance-role` now Denies that read (spored grant schema 3).
+- Every IAM role spawn creates (`spored-instance-role`, the `spawn-instance-*`
+  family, the worker-pool roles and the cross-account sweep role) is now
+  created with, or retrofitted onto, a customer-managed permissions boundary,
+  `arn:aws:iam::<account>:policy/spore-host/spawn-instance-boundary`. The
+  boundary allows a broad data-plane ceiling but denies IAM administration,
+  `organizations:*`, `account:*` and assuming a role in another account, so
+  that whatever is written onto a role — including a caller's own
+  `--iam-policy-file` or `--iam-managed-policies` — an instance cannot be used
+  to escalate IAM or reach another account. Within it, a caller can still grant
+  an instance data-plane access they do not hold themselves; IAM cannot express
+  "role ⊆ caller". New roles get the boundary at `CreateRole`; existing roles
+  get it with `PutRolePermissionsBoundary` before any policy is written, so a
+  role is never left with weaker containment mid-launch.
+- The boundary is a per-account customer-managed policy the documented spawn
+  user baseline deliberately cannot create. An administrator provisions it once
+  with `spawn setup-account` (or the first admin-run launch creates it); a
+  non-admin whose account has no boundary gets an error naming that command,
+  and launches that must create or update a role are refused until it is run.
+  `spawn cleanup --instance-roles` deletes the boundary once no role uses it.
+- `spawn onboard`'s portal role no longer grants `ec2:StopInstances`,
+  `StartInstances`, `TerminateInstances` or `CancelSpotInstanceRequests`,
+  matching the live portal role and the BYOA CloudFormation template
+  (spore-host#694). An explicit `Deny` stops it writing the ownership tags
+  (`spawn:managed`, …) onto an existing instance.
 
 ## [0.163.2] - 2026-11-11
 

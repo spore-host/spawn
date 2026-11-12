@@ -20,6 +20,9 @@ type fakePolicies struct {
 	deleted  []string
 	// attachedSince: policies attached between the listing and the delete.
 	attachedSince map[string]bool
+	// versions by policy ARN, and the (arn, versionId) pairs deleted.
+	versions        map[string][]iamtypes.PolicyVersion
+	deletedVersions []string
 }
 
 func (f *fakePolicies) ListPolicies(_ context.Context, in *iam.ListPoliciesInput, _ ...func(*iam.Options)) (*iam.ListPoliciesOutput, error) {
@@ -40,6 +43,28 @@ func (f *fakePolicies) DeletePolicy(_ context.Context, in *iam.DeletePolicyInput
 	}
 	f.deleted = append(f.deleted, arn)
 	return &iam.DeletePolicyOutput{}, nil
+}
+
+func (f *fakePolicies) ListPolicyVersions(_ context.Context, in *iam.ListPolicyVersionsInput, _ ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error) {
+	return &iam.ListPolicyVersionsOutput{Versions: f.versions[aws.ToString(in.PolicyArn)]}, nil
+}
+
+func (f *fakePolicies) DeletePolicyVersion(_ context.Context, in *iam.DeletePolicyVersionInput, _ ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error) {
+	f.deletedVersions = append(f.deletedVersions, aws.ToString(in.PolicyArn)+" "+aws.ToString(in.VersionId))
+	return &iam.DeletePolicyVersionOutput{}, nil
+}
+
+// boundaryPolicy is the spawn-instance boundary as ListPolicies returns it:
+// its use is counted by PermissionsBoundaryUsageCount, not AttachmentCount.
+func boundaryPolicy(usage int32, age time.Duration) iamtypes.Policy {
+	return iamtypes.Policy{
+		Arn:                           aws.String("arn:aws:iam::111122223333:policy" + SporedPolicyPath + BoundaryPolicyName),
+		Path:                          aws.String(SporedPolicyPath),
+		PolicyName:                    aws.String(BoundaryPolicyName),
+		AttachmentCount:               aws.Int32(0),
+		PermissionsBoundaryUsageCount: aws.Int32(usage),
+		CreateDate:                    aws.Time(sweepNow.Add(-age)),
+	}
 }
 
 func policy(path, name string, attachments int32, age time.Duration) iamtypes.Policy {
@@ -120,6 +145,60 @@ func TestSweepSporedPolicies(t *testing.T) {
 		if d.Name == "spored-policy-v9" && (d.Deleted || d.Delete || d.Err != nil) {
 			t.Errorf("a policy attached since the listing: %+v, want kept without error", d)
 		}
+	}
+}
+
+// The spawn-instance boundary is swept here too: it is kept while any role
+// uses it as a permissions boundary (PermissionsBoundaryUsageCount > 0) and
+// deleted, with its non-default versions, once none does and it is past the
+// grace window.
+func TestSweepSporedPolicies_Boundary(t *testing.T) {
+	old := 72 * time.Hour
+	boundaryARN := "arn:aws:iam::111122223333:policy" + SporedPolicyPath + BoundaryPolicyName
+
+	// In use: kept, even though it is attached to nothing.
+	inUse := &fakePolicies{policies: []iamtypes.Policy{boundaryPolicy(3, old)}}
+	prev, err := SweepSporedPolicies(context.Background(), inUse, sweepNow, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prev) != 1 || prev[0].Delete || prev[0].Reason != KeepBoundaryInUse {
+		t.Fatalf("a boundary in use: %+v, want kept as %q", prev, KeepBoundaryInUse)
+	}
+	if len(inUse.deleted) != 0 {
+		t.Errorf("a boundary in use was deleted: %v", inUse.deleted)
+	}
+
+	// Unused and old: deleted, non-default versions first.
+	unused := &fakePolicies{
+		policies: []iamtypes.Policy{boundaryPolicy(0, old)},
+		versions: map[string][]iamtypes.PolicyVersion{boundaryARN: {
+			{VersionId: aws.String("v1"), IsDefaultVersion: false},
+			{VersionId: aws.String("v2"), IsDefaultVersion: true},
+		}},
+	}
+	res, err := SweepSporedPolicies(context.Background(), unused, sweepNow, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || !res[0].Deleted {
+		t.Fatalf("an unused old boundary: %+v, want deleted", res)
+	}
+	if strings.Join(unused.deletedVersions, "|") != boundaryARN+" v1" {
+		t.Errorf("deleted versions %v, want only the non-default v1", unused.deletedVersions)
+	}
+	if strings.Join(unused.deleted, "|") != boundaryARN {
+		t.Errorf("deleted %v, want the boundary policy", unused.deleted)
+	}
+
+	// Unused but young: kept.
+	young := &fakePolicies{policies: []iamtypes.Policy{boundaryPolicy(0, time.Hour)}}
+	r, err := SweepSporedPolicies(context.Background(), young, sweepNow, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r) != 1 || r[0].Delete || r[0].Reason != KeepPolicyYoung {
+		t.Fatalf("a young unused boundary: %+v, want kept young", r)
 	}
 }
 

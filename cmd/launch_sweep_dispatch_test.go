@@ -100,6 +100,9 @@ type roleIAMFake struct {
 	policies  map[string]string
 	// onCreate runs when the role is created.
 	onCreate func()
+	// boundaryExists: the account's spawn-instance boundary policy exists.
+	boundaryExists bool
+	roleBoundary   string
 }
 
 func (f *roleIAMFake) op(s string) {
@@ -119,10 +122,16 @@ func (f *roleIAMFake) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...func
 		return nil, err
 	}
 	trust, _ := aws.SweepCrossAccountTrustDocument(testOrchestratorAccount)
-	return &iam.GetRoleOutput{Role: &iamtypes.Role{RoleName: in.RoleName, AssumeRolePolicyDocument: awssdk.String(trust)}}, nil
+	role := &iamtypes.Role{RoleName: in.RoleName, AssumeRolePolicyDocument: awssdk.String(trust)}
+	f.mu.Lock()
+	if f.roleBoundary != "" {
+		role.PermissionsBoundary = &iamtypes.AttachedPermissionsBoundary{PermissionsBoundaryArn: awssdk.String(f.roleBoundary)}
+	}
+	f.mu.Unlock()
+	return &iam.GetRoleOutput{Role: role}, nil
 }
 
-func (f *roleIAMFake) CreateRole(_ context.Context, _ *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
+func (f *roleIAMFake) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
 	f.op("CreateRole")
 	if f.createErr != nil {
 		return nil, f.createErr
@@ -132,8 +141,36 @@ func (f *roleIAMFake) CreateRole(_ context.Context, _ *iam.CreateRoleInput, _ ..
 	}
 	f.mu.Lock()
 	f.created = true
+	f.roleBoundary = awssdk.ToString(in.PermissionsBoundary)
 	f.mu.Unlock()
 	return &iam.CreateRoleOutput{}, nil
+}
+
+func (f *roleIAMFake) GetPolicy(_ context.Context, _ *iam.GetPolicyInput, _ ...func(*iam.Options)) (*iam.GetPolicyOutput, error) {
+	f.op("GetPolicy")
+	f.mu.Lock()
+	exists := f.boundaryExists
+	f.mu.Unlock()
+	if !exists {
+		return nil, &iamtypes.NoSuchEntityException{Message: awssdk.String("policy not found")}
+	}
+	return &iam.GetPolicyOutput{Policy: &iamtypes.Policy{DefaultVersionId: awssdk.String("v1")}}, nil
+}
+
+func (f *roleIAMFake) CreatePolicy(_ context.Context, in *iam.CreatePolicyInput, _ ...func(*iam.Options)) (*iam.CreatePolicyOutput, error) {
+	f.op("CreatePolicy")
+	f.mu.Lock()
+	f.boundaryExists = true
+	f.mu.Unlock()
+	return &iam.CreatePolicyOutput{Policy: &iamtypes.Policy{Arn: awssdk.String("arn:aws:iam::" + "210987654321" + ":policy/spore-host/" + awssdk.ToString(in.PolicyName))}}, nil
+}
+
+func (f *roleIAMFake) PutRolePermissionsBoundary(_ context.Context, in *iam.PutRolePermissionsBoundaryInput, _ ...func(*iam.Options)) (*iam.PutRolePermissionsBoundaryOutput, error) {
+	f.op("PutRolePermissionsBoundary")
+	f.mu.Lock()
+	f.roleBoundary = awssdk.ToString(in.PermissionsBoundary)
+	f.mu.Unlock()
+	return &iam.PutRolePermissionsBoundaryOutput{}, nil
 }
 
 func (f *roleIAMFake) UpdateAssumeRolePolicy(context.Context, *iam.UpdateAssumeRolePolicyInput, ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
@@ -354,8 +391,10 @@ func TestDetachedSweepWithoutTheCrossAccountRoleCreatesNothing(t *testing.T) {
 			if role.count() != 1 || role.calls[0] != sweepCrossAccountRoleName {
 				t.Errorf("GetRole calls %v, want one for %s", role.calls, sweepCrossAccountRoleName)
 			}
-			if ops := role.allOps(); len(ops) != 2 || ops[1] != "CreateRole" {
-				t.Errorf("IAM calls %v, want the GetRole and the refused CreateRole", ops)
+			// The boundary is provisioned (GetPolicy, CreatePolicy) before the
+			// role is looked up and the create refused.
+			if ops := role.allOps(); strings.Join(ops, ",") != "GetPolicy,CreatePolicy,GetRole,CreateRole" {
+				t.Errorf("IAM calls %v, want the boundary provisioning, the GetRole and the refused CreateRole", ops)
 			}
 			if calls := f.beyondIdentity(); len(calls) != 0 {
 				t.Errorf("the refused sweep made AWS call(s) beyond the identity lookup: %v", calls)

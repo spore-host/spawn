@@ -38,16 +38,17 @@ var nestedSpawnCommandFiles = []string{
 var nestedSpawnNotGranted = map[string]string{
 	// IAM writes: a spore that can write IAM can grant itself anything. A nested
 	// spore uses existing profiles instead (cmd nestedChildProfile).
-	"iam:CreateRole":               "IAM write; nested spores never write IAM",
-	"iam:PutRolePolicy":            "IAM write; nested spores never write IAM",
-	"iam:AttachRolePolicy":         "IAM write; nested spores never write IAM",
-	"iam:CreateInstanceProfile":    "IAM write; nested spores never write IAM",
-	"iam:AddRoleToInstanceProfile": "IAM write; nested spores never write IAM",
-	"iam:DeleteRolePolicy":         "IAM write; nested spores never write IAM",
-	"iam:UpdateAssumeRolePolicy":   "IAM write (a detached sweep's SpawnSweepCrossAccountRole, #1537); nested spores never write IAM",
-	"iam:ListRolePolicies":         "only reached by the role-setup paths a nested spore skips",
-	"iam:GetRole":                  "only reached by the role-setup paths a nested spore skips",
-	"iam:GetInstanceProfile":       "only reached by the role-setup paths a nested spore skips",
+	"iam:CreateRole":                 "IAM write; nested spores never write IAM",
+	"iam:PutRolePolicy":              "IAM write; nested spores never write IAM",
+	"iam:AttachRolePolicy":           "IAM write; nested spores never write IAM",
+	"iam:CreateInstanceProfile":      "IAM write; nested spores never write IAM",
+	"iam:AddRoleToInstanceProfile":   "IAM write; nested spores never write IAM",
+	"iam:DeleteRolePolicy":           "IAM write; nested spores never write IAM",
+	"iam:UpdateAssumeRolePolicy":     "IAM write (a detached sweep's SpawnSweepCrossAccountRole, #1537); nested spores never write IAM",
+	"iam:PutRolePermissionsBoundary": "IAM write (sets the spawn-instance boundary on a role, iam_boundary.go); only the role-setup paths a nested spore skips do it, and the boundary is provisioned by an admin, not a nested spore",
+	"iam:ListRolePolicies":           "only reached by the role-setup paths a nested spore skips",
+	"iam:GetRole":                    "only reached by the role-setup paths a nested spore skips",
+	"iam:GetInstanceProfile":         "only reached by the role-setup paths a nested spore skips",
 	// The spored grants as a managed policy (#1573), on the same role-setup
 	// paths.
 	"iam:CreatePolicy":             "IAM write; nested spores never write IAM",

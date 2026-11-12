@@ -23,10 +23,12 @@ import (
 // roles with their inline policies and instance profiles, enough for
 // CreateOrGetInstanceProfile to run end to end.
 type fakeIAM struct {
-	mu       sync.Mutex
-	roles    map[string]map[string]string // role -> policy name -> document
-	profiles map[string]bool
-	puts     []url.Values // every PutRolePolicy form, in order
+	mu             sync.Mutex
+	roles          map[string]map[string]string // role -> policy name -> document
+	profiles       map[string]bool
+	puts           []url.Values // every PutRolePolicy form, in order
+	boundaryExists bool         // the spawn-instance boundary policy exists
+	roleBoundary   map[string]string
 }
 
 const iamNS = `xmlns="https://iam.amazonaws.com/doc/2010-05-08/"`
@@ -38,6 +40,9 @@ func (f *fakeIAM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	if f.roles == nil {
 		f.roles, f.profiles = map[string]map[string]string{}, map[string]bool{}
+	}
+	if f.roleBoundary == nil {
+		f.roleBoundary = map[string]string{}
 	}
 	notFound := func() {
 		w.WriteHeader(http.StatusNotFound)
@@ -82,6 +87,20 @@ func (f *fakeIAM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.roles[n][form.Get("PolicyName")] = form.Get("PolicyDocument")
+		ok(a, "")
+	case "GetPolicy":
+		if !f.boundaryExists {
+			notFound()
+			return
+		}
+		// nosemgrep
+		ok(a, `<GetPolicyResult><Policy><Arn>`+form.Get("PolicyArn")+`</Arn><DefaultVersionId>v1</DefaultVersionId></Policy></GetPolicyResult>`)
+	case "CreatePolicy":
+		f.boundaryExists = true
+		// nosemgrep
+		ok(a, `<CreatePolicyResult><Policy><Arn>arn:aws:iam::123456789012:policy/spore-host/`+form.Get("PolicyName")+`</Arn><DefaultVersionId>v1</DefaultVersionId></Policy></CreatePolicyResult>`)
+	case "PutRolePermissionsBoundary":
+		f.roleBoundary[form.Get("RoleName")] = form.Get("PermissionsBoundary")
 		ok(a, "")
 	case "AttachRolePolicy", "AddRoleToInstanceProfile":
 		ok(a, "")

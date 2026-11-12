@@ -43,15 +43,17 @@ const (
 // cap) and its attached managed policies.
 type fakeSweepIAM struct {
 	*fakeRolePolicies
-	mu       sync.Mutex
-	exists   bool
-	trust    string
-	tags     []types.Tag
-	attached []string
-	getErr   error
-	create   error
-	update   error
-	log      []string
+	mu             sync.Mutex
+	exists         bool
+	trust          string
+	tags           []types.Tag
+	attached       []string
+	getErr         error
+	create         error
+	update         error
+	log            []string
+	boundaryExists bool   // the account's spawn-instance boundary policy exists
+	roleBoundary   string // the role's permissions boundary ARN
 }
 
 func newFakeSweepIAM() *fakeSweepIAM { return &fakeSweepIAM{fakeRolePolicies: newFakeRole()} }
@@ -99,10 +101,37 @@ func (f *fakeSweepIAM) GetRole(_ context.Context, in *iam.GetRoleInput, _ ...fun
 		return nil, noSuchRole()
 	}
 	// IAM returns the trust URL-encoded.
-	return &iam.GetRoleOutput{Role: &types.Role{
+	role := &types.Role{
 		RoleName:                 in.RoleName,
 		AssumeRolePolicyDocument: aws.String(url.QueryEscape(f.trust)),
-	}}, nil
+	}
+	if f.roleBoundary != "" {
+		role.PermissionsBoundary = &types.AttachedPermissionsBoundary{PermissionsBoundaryArn: aws.String(f.roleBoundary)}
+	}
+	return &iam.GetRoleOutput{Role: role}, nil
+}
+
+func (f *fakeSweepIAM) GetPolicy(_ context.Context, _ *iam.GetPolicyInput, _ ...func(*iam.Options)) (*iam.GetPolicyOutput, error) {
+	f.record("GetPolicy")
+	if !f.boundaryExists {
+		return nil, &types.NoSuchEntityException{Message: aws.String("policy not found")}
+	}
+	return &iam.GetPolicyOutput{Policy: &types.Policy{DefaultVersionId: aws.String("v1")}}, nil
+}
+
+func (f *fakeSweepIAM) CreatePolicy(_ context.Context, in *iam.CreatePolicyInput, _ ...func(*iam.Options)) (*iam.CreatePolicyOutput, error) {
+	f.record("CreatePolicy " + aws.ToString(in.PolicyName))
+	if f.boundaryExists {
+		return nil, &smithy.GenericAPIError{Code: "EntityAlreadyExists", Message: "policy exists"}
+	}
+	f.boundaryExists = true
+	return &iam.CreatePolicyOutput{Policy: &types.Policy{Arn: aws.String("arn:aws:iam::" + sweepCompute + ":policy/spore-host/" + aws.ToString(in.PolicyName))}}, nil
+}
+
+func (f *fakeSweepIAM) PutRolePermissionsBoundary(_ context.Context, in *iam.PutRolePermissionsBoundaryInput, _ ...func(*iam.Options)) (*iam.PutRolePermissionsBoundaryOutput, error) {
+	f.record("PutRolePermissionsBoundary " + aws.ToString(in.PermissionsBoundary))
+	f.roleBoundary = aws.ToString(in.PermissionsBoundary)
+	return &iam.PutRolePermissionsBoundaryOutput{}, nil
 }
 
 func (f *fakeSweepIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
@@ -116,6 +145,7 @@ func (f *fakeSweepIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ 
 	f.exists = true
 	f.trust = aws.ToString(in.AssumeRolePolicyDocument)
 	f.tags = in.Tags
+	f.roleBoundary = aws.ToString(in.PermissionsBoundary)
 	return &iam.CreateRoleOutput{Role: &types.Role{RoleName: in.RoleName}}, nil
 }
 

@@ -342,6 +342,11 @@ type SweepRoleIAM interface {
 	UpdateAssumeRolePolicy(ctx context.Context, in *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error)
 	DetachRolePolicy(ctx context.Context, in *iam.DetachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DetachRolePolicyOutput, error)
 	DeleteRole(ctx context.Context, in *iam.DeleteRoleInput, optFns ...func(*iam.Options)) (*iam.DeleteRoleOutput, error)
+	// For the permissions boundary (iam_boundary.go): the sweep role is capped
+	// by it like every role spawn creates.
+	GetPolicy(ctx context.Context, in *iam.GetPolicyInput, optFns ...func(*iam.Options)) (*iam.GetPolicyOutput, error)
+	CreatePolicy(ctx context.Context, in *iam.CreatePolicyInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyOutput, error)
+	PutRolePermissionsBoundary(ctx context.Context, in *iam.PutRolePermissionsBoundaryInput, optFns ...func(*iam.Options)) (*iam.PutRolePermissionsBoundaryOutput, error)
 }
 
 // NewSweepRoleIAM is the IAM client for cfg's account.
@@ -393,6 +398,13 @@ func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeA
 	role := sweep.CrossAccountRoleName
 	principal := SweepOrchestratorRoleARN(orchestratorAccount)
 
+	// The sweep role is capped by the spawn-instance permissions boundary like
+	// every role spawn creates (iam_boundary.go). It must exist in the compute
+	// account before CreateRole references it and before the policy write below.
+	if err := ensureBoundaryForLaunch(ctx, api, computeAccount, warn); err != nil {
+		return out, err
+	}
+
 	current, err := getRole(ctx, api, role)
 	switch {
 	case err == nil:
@@ -404,7 +416,8 @@ func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeA
 				AssumeRolePolicyDocument: aws.String(trust),
 				Description: aws.String("spawn: the sweep orchestrator launches, tags and cancels detached sweep " +
 					"members here through this role. Created by spawn; `spawn sweep teardown` removes it."),
-				Tags: []types.Tag{{Key: aws.String("spawn:managed"), Value: aws.String("true")}},
+				PermissionsBoundary: aws.String(spawnInstanceBoundaryARN(computeAccount)),
+				Tags:                []types.Tag{{Key: aws.String("spawn:managed"), Value: aws.String("true")}},
 			})
 			return e
 		})
@@ -443,6 +456,14 @@ func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeA
 			out.TrustUpdated = true
 			out.PreviousTrust = doc
 		}
+	}
+
+	// Retrofit the boundary before the policy write, so an adopted role (made
+	// by the setup script or an older spawn, before the boundary existed) is
+	// never left uncapped while its policy is updated. A freshly created role
+	// already carries it, so this is a no-op there.
+	if err := ensureRoleBoundary(ctx, api, role, computeAccount); err != nil {
+		return out, err
 	}
 
 	if err := putVersionedRolePolicy(ctx, api, role, sweepRolePolicyBase, policy, sweepRolePolicySchema, warn); err != nil {
