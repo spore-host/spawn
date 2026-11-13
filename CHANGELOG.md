@@ -72,7 +72,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin specs may mark a config key `secret: true`. spored refuses to install
   a launch-declared plugin that sets such a key, and records how to set it
   instead (#1590).
-### Security
 
 - `spawn connect --rdp` no longer puts the Windows Administrator password in
   the SSM command it sends (#1587). SSM keeps a command's parameters and
