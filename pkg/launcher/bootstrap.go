@@ -609,7 +609,15 @@ chmod 600 %[3]s
 	// won a race against spored's IMDS reads and first DescribeTags, so anything
 	// that slowed the bootstrap at that point silently dropped every plugin.
 	// Written here, the file exists before spored is even installed.
+	//
+	// No secret goes in user data (#1590): a declaration whose config sets a
+	// secret-named key is refused, for every caller (the CLI, sweeps, SDK
+	// callers of Provision). The file is root-only (spored runs as root), and
+	// created so under umask 077, never briefly world-readable.
 	if len(cfg.Plugins) > 0 {
+		if err := plugin.CheckDeclarationsCarryNoSecrets(cfg.Plugins); err != nil {
+			return "", err
+		}
 		declJSON, err := json.Marshal(cfg.Plugins)
 		if err != nil {
 			return "", fmt.Errorf("marshal plugin declarations: %w", err)
@@ -617,10 +625,11 @@ chmod 600 %[3]s
 		script += fmt.Sprintf(`
 # Plugin declarations, read once by spored at startup, so written before it starts (#1023)
 mkdir -p /etc/spawn
-cat > /etc/spawn/plugins.json <<'EOFPLUGINS'
+(umask 077; cat > /etc/spawn/plugins.json <<'EOFPLUGINS'
 %s
 EOFPLUGINS
-chmod 644 /etc/spawn/plugins.json
+)
+chmod 600 /etc/spawn/plugins.json
 echo "Plugin declarations written: %d plugin(s)"
 `, string(declJSON), len(cfg.Plugins))
 	}

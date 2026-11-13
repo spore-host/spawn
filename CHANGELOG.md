@@ -59,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed per VPC, so anyone able to create a security group in the account
   could otherwise pre-create one with rules of their own and have spawn join
   it (#1596).
+### Security
+
+- A launch now refuses a plugin declaration whose config sets a secret, such
+  as a `password`, `token`, `*_key` or `*secret*` key. This applies to
+  `spawn launch --config`, sweeps, and SDK callers of `pkg/launcher`.
+  Declarations travel in EC2 user data, which anyone with
+  `ec2:DescribeInstanceAttribute` (part of `ReadOnlyAccess`) can read. Set the
+  secret after launch with `spawn plugin install <instance> <ref> --config
+  key=value` instead; it reaches spored over SSH or sealed over SSM (#1590).
+  `/etc/spawn/plugins.json` is now root-only (0600, written under umask 077)
+  instead of world-readable.
+- Plugin specs may mark a config key `secret: true`. spored refuses to install
+  a launch-declared plugin that sets such a key, and records how to set it
+  instead (#1590).
 
 ## [0.164.0] - 2026-11-12
 

@@ -2,6 +2,7 @@ package pluginruntime
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,5 +222,21 @@ func TestBuildTemplateContext_LoginUser(t *testing.T) {
 	})
 	if tmplCtx.Instance["login_user"] != "scttfrdmn" {
 		t.Errorf("instance.login_user: got %q, want scttfrdmn", tmplCtx.Instance["login_user"])
+	}
+}
+
+// #1590: a key the spec marks secret, set by a launch declaration (it came in
+// user data), is refused on the instance with how to set it instead.
+func TestDeclaredSecretsRefusesSpecMarkedSecrets(t *testing.T) {
+	spec, err := plugin.ParseSpec([]byte("name: demo\nconfig:\n  admin_pw:\n    secret: true\n  port:\n    default: 80\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := declaredSecrets(spec, map[string]string{"port": "81"}); err != nil {
+		t.Errorf("a declaration with no secret refused: %v", err)
+	}
+	err = declaredSecrets(spec, map[string]string{"admin_pw": "x"})
+	if err == nil || !strings.Contains(err.Error(), "admin_pw") || !strings.Contains(err.Error(), "spawn plugin install") {
+		t.Errorf("declaredSecrets = %v, want a refusal naming admin_pw and spawn plugin install", err)
 	}
 }
