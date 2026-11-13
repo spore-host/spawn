@@ -7,6 +7,7 @@ import (
 	"log"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -488,6 +489,14 @@ func (rt *Runtime) LoadFromDeclarations(ctx context.Context, declarations []plug
 				rt.recordDeclarationFailure(spec.Name, spec.Version, fmt.Errorf("resolve config: %w", err))
 				return
 			}
+			// A key the spec marks secret never comes from user data (#1590):
+			// a CLI that let it through (one older than #1590, or a name the
+			// CLI's test does not recognise) is told how to set it instead.
+			if err := declaredSecrets(spec, d.Config); err != nil {
+				log.Printf("Plugin %s: %v", spec.Name, err)
+				rt.recordDeclarationFailure(spec.Name, spec.Version, err)
+				return
+			}
 
 			if err := rt.Install(ctx, spec, d.Config); err != nil {
 				log.Printf("Plugin %s: install failed: %v", spec.Name, err)
@@ -590,4 +599,21 @@ func (rt *Runtime) stopHealthLoop(name string) (plugin.HealthBlock, bool) {
 		delete(rt.healthCancels, name)
 	}
 	return health, had
+}
+
+// declaredSecrets refuses launch-declaration config that sets a key spec marks
+// secret: true (#1590). Such a value travelled in EC2 user data.
+func declaredSecrets(spec *plugin.PluginSpec, cfg map[string]string) error {
+	var set []string
+	for _, k := range spec.SecretKeys() {
+		if _, ok := cfg[k]; ok {
+			set = append(set, k)
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return fmt.Errorf("config %s is secret and came in the launch's user data, which is readable with "+
+		"ec2:DescribeInstanceAttribute; not installing. Set it with `spawn plugin install <instance> %s --config "+
+		"key=value` instead (#1590)", strings.Join(set, ", "), spec.Name)
 }

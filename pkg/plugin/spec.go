@@ -69,6 +69,10 @@ type ConfigParam struct {
 	Default  interface{} `yaml:"default"`
 	Required bool        `yaml:"required"`
 	Type     string      `yaml:"type"` // string, int, bool
+	// Secret marks a value that must never travel in EC2 user data (#1590):
+	// set it with `spawn plugin install --config`, not a launch config. A key
+	// whose name says it is secret (IsSecretConfigKey) is treated so anyway.
+	Secret bool `yaml:"secret,omitempty"`
 }
 
 // ConditionsBlock holds pre-flight condition checks.

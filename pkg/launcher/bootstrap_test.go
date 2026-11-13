@@ -485,3 +485,26 @@ func TestBuildLinuxBootstrap_ValidBash(t *testing.T) {
 		t.Errorf("generated bootstrap is not valid bash: %v\n%s", err, out)
 	}
 }
+
+// #1590: plugin declarations travel in user data, so one carrying a secret is
+// refused for every caller, and the file spored reads is root-only, created
+// under umask 077.
+func TestBuildLinuxBootstrap_PluginDeclarationsCarryNoSecrets(t *testing.T) {
+	base := BootstrapConfig{Username: "ec2-user"}
+	withSecret := base
+	withSecret.Plugins = []plugin.Declaration{{Ref: "code-server", Config: map[string]string{"password": "hunter2"}}}
+	if _, err := BuildLinuxBootstrap(withSecret); err == nil {
+		t.Error("a plugin declaration carrying a password was put in user data")
+	}
+
+	plain := base
+	plain.Plugins = []plugin.Declaration{{Ref: "globus-connect", Config: map[string]string{"endpoint_name": "lab"}}}
+	script, err := BuildLinuxBootstrap(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "chmod 644 /etc/spawn/plugins.json") || !strings.Contains(script, "chmod 600 /etc/spawn/plugins.json") ||
+		!strings.Contains(script, "(umask 077; cat > /etc/spawn/plugins.json") {
+		t.Error("/etc/spawn/plugins.json is not written root-only under umask 077")
+	}
+}
