@@ -178,11 +178,7 @@ func RunInput(s Spec, now time.Time) (*ec2.RunInstancesInput, time.Time, error) 
 			AssociatePublicIpAddress: aws.Bool(true),
 			DeleteOnTermination:      aws.Bool(true),
 		}},
-		MetadataOptions: &types.InstanceMetadataOptionsRequest{
-			HttpTokens:              types.HttpTokensStateRequired,
-			HttpEndpoint:            types.InstanceMetadataEndpointStateEnabled,
-			HttpPutResponseHopLimit: aws.Int32(1),
-		},
+		MetadataOptions:                   spawnaws.IMDSMetadataOptions(0),
 		InstanceInitiatedShutdownBehavior: types.ShutdownBehaviorTerminate,
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: tags},

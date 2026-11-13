@@ -19,6 +19,7 @@ var (
 	ami          string
 	osFlag       string
 	nestedVirt   bool
+	imdsHopLimit int
 	allowCIDR    string
 
 	// Network (empty = auto-create)
@@ -309,6 +310,7 @@ func init() {
 	launchCmd.Flags().StringVar(&ami, "ami", "", "AMI ID (ami-...); omit or use 'auto' to auto-detect the latest AL2023")
 	launchCmd.Flags().StringVar(&osFlag, "os", "", "Target OS: windows or linux. Omit to auto-detect from the AMI. Use to force the OS for a custom AMI whose platform metadata is unset.")
 	launchCmd.Flags().BoolVar(&nestedVirt, "nested-virtualization", false, "Enable nested virtualization (run KVM/Hyper-V inside the instance). Requires a C8i/M8i/R8i instance type.")
+	launchCmd.Flags().IntVar(&imdsHopLimit, "imds-hop-limit", 0, "IMDSv2 PUT response hop limit (1-64; default 1). Set 2 when a container on Docker's bridge network must use the instance role. IMDSv2 is always required")
 	launchCmd.Flags().StringVar(&allowCIDR, "allow-cidr", "", "CIDR allowed to reach the managed Windows security group (RDP 3389 + SSH 22); default 0.0.0.0/0")
 	launchCmd.Flags().Int32Var(&launchVolumeSize, "volume-size", 0, "Root EBS volume size in GiB (0 = use AMI default)")
 	launchCmd.Flags().StringArrayVar(&attachVolumes, "attach-volume", nil, "Attach an EBS volume from a snapshot, mounted at a path: snap-xxx:/mount/point[:ro]. Repeatable. Read-only is the common case for shared reference data.")

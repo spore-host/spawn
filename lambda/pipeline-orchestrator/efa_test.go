@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/pipeline"
 )
 
@@ -110,5 +111,16 @@ func TestNonEFAGroupDoesNotAdmitAllTraffic(t *testing.T) {
 	}
 	if !found {
 		t.Error("EFA group has no all-traffic rule")
+	}
+}
+
+// #1588: a stage instance requires IMDSv2 with hop limit 1, as every spawn
+// launch does.
+func TestStageRequiresIMDSv2(t *testing.T) {
+	state, def := efaPipeline()
+	in := buildStageRunInstancesInput(state, def.GetStage("eval"), &pipeline.StageState{StageID: "eval"}, 0, "ami-x", "ud", time.Now())
+	m := in.MetadataOptions
+	if m == nil || m.HttpTokens != ec2types.HttpTokensStateRequired || aws.ToInt32(m.HttpPutResponseHopLimit) != 1 {
+		t.Errorf("MetadataOptions = %+v, want IMDSv2 required, hop limit 1", m)
 	}
 }

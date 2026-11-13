@@ -69,7 +69,7 @@ var detachedDispositions = map[string]detachedDisposition{
 	"RootVolumeSizeGiB":    {settings: true},
 	"AttachVolumes":        {settings: true},
 	"EBSEncrypted":         {settings: true},
-	"IMDSv2Enforced":       {settings: true},
+	"IMDSv2Enforced":       {why: "every member requires IMDSv2 whatever it says: the settings always carry imdsv2_enforced=true (#1588)"},
 	"IMDSv2HopLimit":       {settings: true},
 	"HibernateOnIdle":      {settings: true, tags: true},
 

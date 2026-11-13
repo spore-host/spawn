@@ -138,6 +138,11 @@ func Provision(ctx context.Context, client *aws.Client, config aws.LaunchConfig,
 	if err := config.ValidateUserDataSize(); err != nil {
 		return nil, fmt.Errorf("provision: %w", err)
 	}
+	// Every launch requires IMDSv2 with hop limit 1 (#1588). A container
+	// launch's workload is a container on Docker's bridge network, one hop
+	// further, whose only credential is the instance profile: it gets
+	// IMDSHopLimitBridgedContainers unless the caller chose a limit.
+	config.IMDSv2HopLimit = provisionHopLimit(config, opts)
 	// And tags over AWS's 50-tag limit, which RunInstances would refuse after
 	// the AMI lookup and the IAM setup below (#1336). Counted with the
 	// username above, and the ephemeral FSx's tags if one is to be created.
@@ -333,6 +338,19 @@ func createAndAttachEphemeralFSx(ctx context.Context, client *aws.Client, config
 	config.FSxExportPath = exportPath
 	config.FSxMountPoint = mountPoint
 	return nil
+}
+
+// provisionHopLimit is the IMDS hop limit Provision launches config with: the
+// caller's, or for a container launch (opts.ContainerScript)
+// aws.IMDSHopLimitBridgedContainers, or 0 (aws.IMDSHopLimit).
+func provisionHopLimit(config aws.LaunchConfig, opts Options) int {
+	if config.IMDSv2HopLimit > 0 {
+		return config.IMDSv2HopLimit
+	}
+	if opts.ContainerScript != "" {
+		return aws.IMDSHopLimitBridgedContainers
+	}
+	return 0
 }
 
 func effectiveUsername(opts Options) string {

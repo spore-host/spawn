@@ -25,6 +25,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Denies retire the broader grants of an older copy of the policy. The sweep
   role policy schema is now 2 (`SweepCrossAccountEC2Policy-v2`); the next
   detached sweep writes it and removes v1.
+### Added
+
+- `spawn launch --imds-hop-limit N` sets the IMDSv2 PUT response hop limit
+  (1-64, default 1), for a workload that runs a container on Docker's bridge
+  network and needs the instance role from inside it (#1588).
+
+### Security
+
+- Every instance spawn launches now requires IMDSv2 (`HttpTokens=required`,
+  endpoint enabled, hop limit 1), not only compliance-mode launches. This
+  covers `spawn launch`, foreground and detached sweeps (the sweep
+  orchestrator, including members from older CLIs' params), pipeline stages,
+  nested spawn, `spawn app`, `spawn task run` and SDK callers of
+  `pkg/launcher` such as lagotto. A custom `--ami`, an Ubuntu or older
+  Windows image, or a `spawn create-ami` image in an account with no IMDS
+  default no longer accepts IMDSv1 (#1588). Container launches whose workload
+  must use the instance role from a bridged container get hop limit 2:
+  `spawn task run` with a `container`, and `pkg/launcher` launches with a
+  container script. Web-app containers keep hop limit 1, so a publicly
+  reachable app cannot fetch the instance role's credentials. DCV container
+  apps use host networking and are unaffected.
 
 ## [0.164.0] - 2026-11-12
 

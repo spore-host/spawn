@@ -106,6 +106,9 @@ func buildRunInstancesInput(state *SweepRecord, params map[string]interface{}, p
 	if keyName := getStringParam(config, "key_name", ""); keyName != "" {
 		input.KeyName = aws.String(keyName)
 	}
+	// IMDSv2 with hop limit 1 (#1588), for legacy params too, which carry no
+	// launch settings; a member's settings set it again, with their hop limit.
+	input.MetadataOptions = spawnaws.IMDSMetadataOptions(0)
 	// The params as uploaded: a legacy member's log line names the spawn that
 	// rendered its params, not this Lambda's own spawn:version.
 	if err := applyMemberLaunchSettings(input, state, params, paramIndex); err != nil {

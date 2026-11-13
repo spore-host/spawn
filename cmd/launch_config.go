@@ -276,6 +276,13 @@ func buildLaunchConfig(truffleInput *input.TruffleInput) (*aws.LaunchConfig, err
 	if nestedVirt {
 		config.NestedVirtualization = true
 	}
+	// Every launch requires IMDSv2 (#1588); this only widens the hop limit.
+	if imdsHopLimit != 0 {
+		if imdsHopLimit < 1 || imdsHopLimit > aws.MaxIMDSHopLimit {
+			return nil, fmt.Errorf("--imds-hop-limit %d: must be between 1 and %d", imdsHopLimit, aws.MaxIMDSHopLimit)
+		}
+		config.IMDSv2HopLimit = imdsHopLimit
+	}
 	if ttl != "" {
 		config.TTL = ttl
 		// A --ttl longer than the reaper's max-age ceiling is silently

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -235,5 +236,20 @@ func TestTaskSpecCarriesNoPublicIPChoice(t *testing.T) {
 	cfg := taskLaunchConfig(spec, &taskproto.SizeResult{InstanceType: "c8gn.48xlarge"}, "us-east-1", "p", "w")
 	if cfg.NoPublicIP || cfg.AllowMissingEndpoints {
 		t.Errorf("task config asks for a private-only launch: %+v", cfg)
+	}
+}
+
+// #1588: a container task runs on Docker's bridge network, one hop further
+// from IMDS, and its tooling may use the task role, so it gets hop limit 2; a
+// host task keeps the default (0, which pkg/aws launches as 1).
+func TestTaskLaunchConfig_IMDSHopLimit(t *testing.T) {
+	sized := &taskproto.SizeResult{InstanceType: "c7i.large"}
+	host := taskLaunchConfig(&taskproto.TaskSpec{TaskID: "h", Command: []string{"true"}}, sized, "us-east-1", "p", "w")
+	if host.IMDSv2HopLimit != 0 {
+		t.Errorf("host task hop limit = %d, want 0 (the default, 1)", host.IMDSv2HopLimit)
+	}
+	ctr := taskLaunchConfig(&taskproto.TaskSpec{TaskID: "c", Command: []string{"true"}, Container: "public.ecr.aws/x/y:1"}, sized, "us-east-1", "p", "w")
+	if ctr.IMDSv2HopLimit != aws.IMDSHopLimitBridgedContainers {
+		t.Errorf("container task hop limit = %d, want %d", ctr.IMDSv2HopLimit, aws.IMDSHopLimitBridgedContainers)
 	}
 }

@@ -109,6 +109,7 @@ var sweepLaunchFlags = map[string]sweepFlagRule{
 	"capacity-block":        viaConfig(whySweepEC2),
 	"hibernate":             viaConfig(whySweepEC2 + "; a row's hibernate: wins"),
 	"nested-virtualization": viaConfig(whySweepEC2),
+	"imds-hop-limit":        viaConfig(whySweepEC2 + " (MetadataOptions, carried in the launch settings)"),
 	"attach-volume":         viaConfig(whySweepEC2 + " (the volumes); " + whySweepStorage),
 	"tag":                   viaConfig(whySweepEC2 + " (instance and volume tags, #1356)"),
 	"team":                  viaConfig(whySweepEC2 + " (team tags, #1356)"),

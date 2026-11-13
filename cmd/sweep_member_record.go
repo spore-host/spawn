@@ -361,7 +361,7 @@ func (s *SweepState) lifetimeRecord() *SweepLifetime {
 // a carried flag with no category.
 var oldCheckpointLostCategory = map[string]string{
 	"instance-type": catShape, "ami": catShape, "az": catShape, "region": catShape, "volume-size": catShape,
-	"hibernate": catShape, "nested-virtualization": catShape, "key-name": catShape, "key-pair": catShape,
+	"hibernate": catShape, "nested-virtualization": catShape, "imds-hop-limit": catShape, "key-name": catShape, "key-pair": catShape,
 	"spot": catPurchase, "spot-max-price": catPurchase, "reservation-id": catPurchase, "capacity-block": catPurchase,
 	"security-group": catNetwork, "security-group-ids": catNetwork, "subnet": catNetwork, "subnet-id": catNetwork,
 	"efa": catNetwork, "efa-interfaces": catNetwork, "efa-secondary-type": catNetwork, "placement-group": catNetwork,

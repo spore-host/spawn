@@ -184,3 +184,24 @@ func TestProvision_PreservesCallerAMI(t *testing.T) {
 		t.Fatalf("unexpected non-launch error (AMI lookup should have been skipped): %v", err)
 	}
 }
+
+// #1588: a container launch (pkg/userdata, lagotto and spore-host-mcp) runs its
+// workload on Docker's bridge network with the instance profile as its only
+// credential, so it gets hop limit 2; anything else keeps the default; a
+// caller's own limit always wins.
+func TestProvisionHopLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  spawnaws.LaunchConfig
+		opts Options
+		want int
+	}{
+		{"plain", spawnaws.LaunchConfig{}, Options{}, 0},
+		{"container", spawnaws.LaunchConfig{}, Options{ContainerScript: "docker run x"}, spawnaws.IMDSHopLimitBridgedContainers},
+		{"caller's limit", spawnaws.LaunchConfig{IMDSv2HopLimit: 1}, Options{ContainerScript: "docker run x"}, 1},
+	} {
+		if got := provisionHopLimit(tc.cfg, tc.opts); got != tc.want {
+			t.Errorf("%s: hop limit %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}

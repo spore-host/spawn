@@ -109,7 +109,8 @@ func legacyConfig(spot bool) map[string]interface{} {
 }
 
 // assertLegacyLaunch holds in to what this Lambda composed before #1353: the
-// bare Spot market option for a spot member, and none of the settings.
+// bare Spot market option for a spot member, and none of the settings, except
+// IMDSv2 with hop limit 1, which every member gets (#1588).
 func assertLegacyLaunch(t *testing.T, in *ec2.RunInstancesInput, spot bool) {
 	t.Helper()
 	if spot {
@@ -121,9 +122,10 @@ func assertLegacyLaunch(t *testing.T, in *ec2.RunInstancesInput, spot bool) {
 		t.Errorf("an on-demand legacy member got market options %+v", in.InstanceMarketOptions)
 	}
 	if in.BlockDeviceMappings != nil || in.NetworkInterfaces != nil || in.Placement != nil ||
-		in.HibernationOptions != nil || in.CpuOptions != nil || in.MetadataOptions != nil {
+		in.HibernationOptions != nil || in.CpuOptions != nil {
 		t.Errorf("a legacy member got settings its params never carried: %+v", in)
 	}
+	assertIMDSv2(t, in, 1)
 	if awssdk.ToString(in.UserData) != "H4sIAAAAAAAA/legacy" || awssdk.ToString(in.ImageId) != "ami-0123456789abcdef0" {
 		t.Errorf("legacy member lost its user data or AMI: UserData=%q ImageId=%q", awssdk.ToString(in.UserData), awssdk.ToString(in.ImageId))
 	}
@@ -248,5 +250,42 @@ func TestOrchestratorNeverManagesElasticIPs(t *testing.T) {
 	}
 	if read == 0 {
 		t.Fatal("no orchestrator source found")
+	}
+}
+
+// assertIMDSv2 holds a member to IMDSv2 required, the endpoint on, and hop.
+func assertIMDSv2(t *testing.T, in *ec2.RunInstancesInput, hop int32) {
+	t.Helper()
+	m := in.MetadataOptions
+	if m == nil || m.HttpTokens != ec2types.HttpTokensStateRequired ||
+		m.HttpEndpoint != ec2types.InstanceMetadataEndpointStateEnabled || awssdk.ToInt32(m.HttpPutResponseHopLimit) != hop {
+		t.Errorf("MetadataOptions = %+v, want IMDSv2 required with hop limit %d (#1588)", m, hop)
+	}
+}
+
+// TestEveryMemberRequiresIMDSv2 (#1588): a member launches with IMDSv2
+// required whether its params carry launch settings or not, and whatever its
+// settings' imdsv2_enforced says (a CLI older than #1588 leaves it false); its
+// settings' hop limit is honoured.
+func TestEveryMemberRequiresIMDSv2(t *testing.T) {
+	in, err := buildRunInstancesInput(&SweepRecord{SweepID: "legacy"}, legacyConfig(false), 0, "t3.micro", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIMDSv2(t, in, 1)
+
+	for _, tc := range []struct {
+		enforced bool
+		hop      int
+		want     int32
+	}{{false, 0, 1}, {true, 0, 1}, {false, 2, 2}} {
+		lc := spawnaws.LaunchConfig{InstanceType: "t3.micro", IMDSv2Enforced: tc.enforced, IMDSv2HopLimit: tc.hop}
+		s := spawnaws.NewLaunchSettings(lc, "/dev/xvda", 0)
+		s.IMDSv2Enforced = tc.enforced // as an older CLI wrote it
+		in := &ec2.RunInstancesInput{}
+		if err := s.Apply(in); err != nil {
+			t.Fatal(err)
+		}
+		assertIMDSv2(t, in, tc.want)
 	}
 }
