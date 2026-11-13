@@ -72,6 +72,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin specs may mark a config key `secret: true`. spored refuses to install
   a launch-declared plugin that sets such a key, and records how to set it
   instead (#1590).
+### Security
+
+- `spawn connect --rdp` no longer puts the Windows Administrator password in
+  the SSM command it sends (#1587). SSM keeps a command's parameters and
+  output for about 30 days, readable with `ssm:ListCommands`. The instance now
+  generates the password itself, sets it, and returns it encrypted (RSA-OAEP)
+  to a single-use key that exists only in the running `spawn`, the scheme
+  EC2's `GetPasswordData` uses. The command history holds only a public key
+  and ciphertext.
 
 ## [0.164.0] - 2026-11-12
 
