@@ -70,37 +70,15 @@ func ensureMPIClusterRules(ctx context.Context, ec2Client *ec2.Client, sgID stri
 
 // CreateOrGetMPISecurityGroup creates or gets a security group configured for
 // MPI clusters. The group allows ALL traffic between its own members, which EFA
-// requires (#659), plus SSH from outside for user access.
+// requires (#659), and nothing from outside: it used to open SSH to 0.0.0.0/0
+// "for user access" (#1596), which `spawn connect` does not need (it uses SSM
+// when no group admits tcp/22). mpirun's SSH between nodes is intra-group and
+// covered by the self rule. An existing group loses that rule
+// (retireWorldSSH).
 func (c *Client) CreateOrGetMPISecurityGroup(ctx context.Context, region, vpcID, groupName string) (string, error) {
-	sgID, created, err := c.createOrGetClusterGroup(ctx, region, vpcID, groupName,
+	sgID, _, err := c.createOrGetClusterGroup(ctx, region, vpcID, groupName,
 		"Security group for MPI cluster inter-node communication", "mpi-cluster")
-	if err != nil || !created {
-		return sgID, err
-	}
-
-	// Add ingress rule: allow SSH from anywhere (for user access)
-	_, err = c.regionalEC2(region).AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
-		GroupId: aws.String(sgID),
-		IpPermissions: []types.IpPermission{
-			{
-				IpProtocol: aws.String("tcp"),
-				FromPort:   aws.Int32(22),
-				ToPort:     aws.Int32(22),
-				IpRanges: []types.IpRange{
-					{
-						CidrIp:      aws.String("0.0.0.0/0"),
-						Description: aws.String("SSH access"),
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		// Non-fatal if SSH rule fails (might already exist from default)
-		fmt.Printf("Warning: failed to add SSH rule: %v\n", err)
-	}
-
-	return sgID, nil
+	return sgID, err
 }
 
 // EFAGroupPrefix prefixes the security group `spawn launch --efa-group NAME`
@@ -176,10 +154,12 @@ func (c *Client) createOrGetClusterGroup(ctx context.Context, region, vpcID, gro
 	// workaround was deleting the group by hand, which fails while any instance
 	// still references it.
 	if len(describeResult.SecurityGroups) > 0 {
-		existingID := *describeResult.SecurityGroups[0].GroupId
+		existing := describeResult.SecurityGroups[0]
+		existingID := *existing.GroupId
 		if err := ensureMPIClusterRules(ctx, ec2Client, existingID); err != nil {
 			return "", false, err
 		}
+		retireWorldSSH(ctx, ec2Client, existing)
 		return existingID, false, nil
 	}
 
@@ -400,8 +380,10 @@ func sgHasUDP8443(sg types.SecurityGroup) bool {
 }
 
 // CreateOrGetDCVSecurityGroup creates or retrieves a security group named "spawn-dcv"
-// that allows inbound TCP+UDP 8443 (NICE DCV, incl. QUIC) from anywhere. Returns
-// the security group ID.
+// that allows inbound TCP+UDP 8443 (NICE DCV, incl. QUIC) from anywhere, and no
+// SSH (#1596; `spawn connect` uses SSM). An existing group is adopted only when
+// it carries spawn:managed=true, and loses the world-open SSH rule older spawns
+// wrote. Returns the security group ID.
 func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID string) (string, error) {
 	ec2Client := c.regionalEC2(region)
 
@@ -419,7 +401,11 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 	}
 	if len(describeResult.SecurityGroups) > 0 {
 		sg := describeResult.SecurityGroups[0]
+		if err := adoptManagedGroup(sg); err != nil {
+			return "", err
+		}
 		sgID := *sg.GroupId
+		retireWorldSSH(ctx, ec2Client, sg)
 		// Ensure the UDP 8443 (QUIC) rule exists on a pre-existing spawn-dcv SG
 		// created before #282 added it. Idempotent: only authorize if absent.
 		if !sgHasUDP8443(sg) {
@@ -485,15 +471,6 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 					{CidrIpv6: aws.String("::/0"), Description: aws.String("NICE DCV QUIC (IPv6)")},
 				},
 			},
-			// Also allow SSH so users can debug if needed
-			{
-				IpProtocol: aws.String("tcp"),
-				FromPort:   aws.Int32(22),
-				ToPort:     aws.Int32(22),
-				IpRanges: []types.IpRange{
-					{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("SSH")},
-				},
-			},
 		},
 	})
 	if err != nil {
@@ -505,7 +482,9 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 
 // CreateOrGetWebSecurityGroup creates or retrieves a security group named
 // "spawn-web" that allows inbound TCP 443 (the spored TLS reverse proxy that
-// fronts a web-UI app, #590) plus SSH. Returns the security group ID.
+// fronts a web-UI app, #590), and no SSH (#1596; `spawn connect` uses SSM). An
+// existing group is adopted only when it carries spawn:managed=true, and loses
+// the world-open SSH rule older spawns wrote. Returns the security group ID.
 func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID string) (string, error) {
 	ec2Client := c.regionalEC2(region)
 
@@ -521,7 +500,12 @@ func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID 
 		return "", fmt.Errorf("describe security groups: %w", err)
 	}
 	if len(describeResult.SecurityGroups) > 0 {
-		return *describeResult.SecurityGroups[0].GroupId, nil
+		sg := describeResult.SecurityGroups[0]
+		if err := adoptManagedGroup(sg); err != nil {
+			return "", err
+		}
+		retireWorldSSH(ctx, ec2Client, sg)
+		return aws.ToString(sg.GroupId), nil
 	}
 
 	createResult, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
@@ -549,12 +533,6 @@ func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID 
 				ToPort:     aws.Int32(443),
 				IpRanges:   []types.IpRange{{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("HTTPS (spored web proxy, IPv4)")}},
 				Ipv6Ranges: []types.Ipv6Range{{CidrIpv6: aws.String("::/0"), Description: aws.String("HTTPS (spored web proxy, IPv6)")}},
-			},
-			{
-				IpProtocol: aws.String("tcp"),
-				FromPort:   aws.Int32(22),
-				ToPort:     aws.Int32(22),
-				IpRanges:   []types.IpRange{{CidrIp: aws.String("0.0.0.0/0"), Description: aws.String("SSH")}},
 			},
 		},
 	})
@@ -644,4 +622,84 @@ func (c *Client) ValidateSubnetInVPC(ctx context.Context, region, subnetID, vpcI
 			subnetID, got, vpcID)
 	}
 	return nil
+}
+
+// adoptManagedGroup is the adoption check the group helpers make,
+// requireSpawnManagedGroup. A seam for the substrate-backed tests only: the
+// emulator keeps no security-group tags (scttfrdmn/substrate#1440), so a
+// group spawn created there reads as untagged.
+var adoptManagedGroup = requireSpawnManagedGroup
+
+// requireSpawnManagedGroup refuses to adopt sg, found by name, unless it
+// carries spawn:managed=true (#1596). The DCV and web groups have one fixed
+// name per VPC, so without this anyone who can create a security group in the
+// account could pre-create "spawn-dcv" with rules of their own and have every
+// spawn app launch in that VPC join it. spawn has tagged both at creation
+// since they were added. The cluster groups (spawn-mpi-<array>,
+// spawn-efa-<name>) carry a caller-chosen suffix and are joined by name on
+// purpose (--efa-group), so they are not held to it.
+func requireSpawnManagedGroup(sg types.SecurityGroup) error {
+	for _, t := range sg.Tags {
+		if aws.ToString(t.Key) == "spawn:managed" && aws.ToString(t.Value) == "true" {
+			return nil
+		}
+	}
+	return fmt.Errorf("security group %s (%s) in %s is not tagged spawn:managed=true, so spawn did not create it; "+
+		"refusing to launch into it. Delete or rename it, or tag it spawn:managed=true if it is spawn's (#1596)",
+		aws.ToString(sg.GroupName), aws.ToString(sg.GroupId), aws.ToString(sg.VpcId))
+}
+
+// worldSSHPermissions is the part of sg's ingress that opens tcp/22 to the
+// whole internet (0.0.0.0/0 or ::/0), as the DCV, web and MPI groups did
+// before #1596, or nil.
+func worldSSHPermissions(sg types.SecurityGroup) []types.IpPermission {
+	var out []types.IpPermission
+	for _, p := range sg.IpPermissions {
+		if aws.ToString(p.IpProtocol) != "tcp" || aws.ToInt32(p.FromPort) > 22 || aws.ToInt32(p.ToPort) < 22 {
+			continue
+		}
+		perm := types.IpPermission{IpProtocol: p.IpProtocol, FromPort: p.FromPort, ToPort: p.ToPort}
+		for _, r := range p.IpRanges {
+			if aws.ToString(r.CidrIp) == "0.0.0.0/0" {
+				perm.IpRanges = append(perm.IpRanges, types.IpRange{CidrIp: r.CidrIp})
+			}
+		}
+		for _, r := range p.Ipv6Ranges {
+			if aws.ToString(r.CidrIpv6) == "::/0" {
+				perm.Ipv6Ranges = append(perm.Ipv6Ranges, types.Ipv6Range{CidrIpv6: r.CidrIpv6})
+			}
+		}
+		if len(perm.IpRanges) > 0 || len(perm.Ipv6Ranges) > 0 {
+			out = append(out, perm)
+		}
+	}
+	return out
+}
+
+// sgIngressRevoker is the call retireWorldSSH makes.
+type sgIngressRevoker interface {
+	RevokeSecurityGroupIngress(ctx context.Context, in *ec2.RevokeSecurityGroupIngressInput, optFns ...func(*ec2.Options)) (*ec2.RevokeSecurityGroupIngressOutput, error)
+}
+
+// retireWorldSSH revokes the world-open SSH rule an older spawn wrote on a
+// spawn-managed group it is about to reuse (#1596). Only that rule: tcp/22 from
+// 0.0.0.0/0 or ::/0. A narrower SSH rule someone added on purpose stays. A
+// failure is a warning, not a launch failure: the instance is reachable as
+// before, and the next launch tries again.
+func retireWorldSSH(ctx context.Context, api sgIngressRevoker, sg types.SecurityGroup) {
+	perms := worldSSHPermissions(sg)
+	if len(perms) == 0 {
+		return
+	}
+	_, err := api.RevokeSecurityGroupIngress(ctx, &ec2.RevokeSecurityGroupIngressInput{
+		GroupId:       sg.GroupId,
+		IpPermissions: perms,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  security group %s still opens SSH (22) to the internet; spawn could not remove "+
+			"that rule: %v. `spawn connect` does not need it (#1596)\n", aws.ToString(sg.GroupId), err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Removed the world-open SSH (22) rule from security group %s (%s); `spawn connect` uses "+
+		"SSM where no group admits SSH (#1596)\n", aws.ToString(sg.GroupName), aws.ToString(sg.GroupId))
 }
