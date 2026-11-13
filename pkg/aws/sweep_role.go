@@ -63,7 +63,14 @@ const sweepRolePolicyBase = "SweepCrossAccountEC2Policy"
 // it whenever the template changes, and update the pin and the golden file in
 // sweep_role_test.go: at the same schema an older CLI would rewrite this one's
 // document with its own (#1558).
-const sweepRolePolicySchema = 1
+//
+// History:
+//
+//	1  #1537: the policy the setup script wrote, least-privileged.
+//	2  #1586: CreateTags only at RunInstances/CreateSecurityGroup and
+//	   TerminateInstances only of spawn:managed instances, with explicit
+//	   Denies retiring the unconditioned forms of both.
+const sweepRolePolicySchema = 2
 
 // SweepRolePolicyName is the inline policy this spawn writes to
 // SpawnSweepCrossAccountRole.
@@ -80,13 +87,29 @@ func SweepRolePolicySchema() int { return sweepRolePolicySchema }
 //
 // What each statement is for:
 //
-//   - The members: RunInstances, CreateTags on them, DescribeInstances and
-//     DescribeAvailabilityZones while launching and cancelling,
-//     TerminateInstances and CancelSpotInstanceRequests on cancel (#1349; a
-//     Spot member's request is cancelled before its instance, as on every
-//     spawn terminate path, #922). The members' requests are untagged, so the
-//     cancel takes no spawn:managed condition; it is no wider than the
-//     unconditioned TerminateInstances beside it.
+//   - The members: RunInstances, DescribeInstances and
+//     DescribeAvailabilityZones while launching and cancelling, and
+//     CancelSpotInstanceRequests on cancel (#1349; a Spot member's request is
+//     cancelled before its instance, as on every spawn terminate path, #922).
+//     The members' requests are untagged, so the cancel takes no spawn:managed
+//     condition; cancelling a request terminates nothing.
+//   - CreateTags only as the tag-on-create half of RunInstances (members and
+//     egress proxies) and CreateSecurityGroup (the egress proxy's groups): the
+//     orchestrator never tags an existing resource (#1586). Until schema 2 it
+//     could tag any instance in the account, which let it write spawn:managed
+//     and spawn:egress-proxy onto an instance that was not spawn's and so pass
+//     the tag gate on ssm:SendCommand below: a root shell on any instance in
+//     every compute account. DenyTagExistingResources keeps it that way
+//     whatever else the role carries (the unversioned script policy, a
+//     schema 1 copy): a negated operator holds when ec2:CreateAction is absent
+//     or names any other action, so only those two creates are spared. It
+//     names the creates rather than testing Null ec2:CreateAction, which a
+//     live check on the nested role showed does not refuse a direct CreateTags
+//     (nested_spawn.go, notOneOfTheCreates).
+//   - TerminateInstances only of spawn:managed=true instances: every member
+//     and every egress proxy carries it from RunInstances (tags.go,
+//     egressproxy/deploy), and no existing instance can be given it now.
+//     DenyTerminateUnmanaged retires the unconditioned form older copies grant.
 //   - DeletePlacementGroup of spawn's own (spawn:managed) MPI groups (#254).
 //   - iam:PassRole of the roles spawn creates, to EC2 only (#1323, #1331):
 //     spored-instance-role, spawnd-role, spawn-instance-*. The nested-spawn
@@ -113,11 +136,62 @@ const sweepCrossAccountPolicyTemplate = `{
         "ec2:DescribeInstances",
         "ec2:DescribeAvailabilityZones",
         "ec2:DescribeSecurityGroups",
-        "ec2:CreateTags",
-        "ec2:TerminateInstances",
         "ec2:CancelSpotInstanceRequests"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "TagOnlyAtCreate",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateSecurityGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyTagExistingResources",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotLike": {
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateSecurityGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TerminateManagedInstances",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyTerminateUnmanaged",
+      "Effect": "Deny",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
     },
     {
       "Sid": "DeleteManagedPlacementGroups",

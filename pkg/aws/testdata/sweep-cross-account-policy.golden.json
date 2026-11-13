@@ -9,11 +9,62 @@
         "ec2:DescribeInstances",
         "ec2:DescribeAvailabilityZones",
         "ec2:DescribeSecurityGroups",
-        "ec2:CreateTags",
-        "ec2:TerminateInstances",
         "ec2:CancelSpotInstanceRequests"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "TagOnlyAtCreate",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateSecurityGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyTagExistingResources",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotLike": {
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateSecurityGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TerminateManagedInstances",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyTerminateUnmanaged",
+      "Effect": "Deny",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "ec2:ResourceTag/spawn:managed": "true"
+        }
+      }
     },
     {
       "Sid": "DeleteManagedPlacementGroups",

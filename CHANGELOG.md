@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token, so on a shared login or HPC host another local user could read one
   and take over the desktop (#1593). `spawn cleanup`'s log, the path that
   created `~/.spawn` 0755, is now 0600.
+- The cross-account sweep role (`SpawnSweepCrossAccountRole`) may now tag a
+  resource only while creating it (`RunInstances`, `CreateSecurityGroup`) and
+  terminate only `spawn:managed=true` instances. Before, it could tag and
+  terminate any instance in the compute account, and by writing
+  `spawn:managed`/`spawn:egress-proxy` onto an instance that was not spawn's,
+  pass the tag gate on its egress-proxy `ssm:SendCommand` (#1586). Explicit
+  Denies retire the broader grants of an older copy of the policy. The sweep
+  role policy schema is now 2 (`SweepCrossAccountEC2Policy-v2`); the next
+  detached sweep writes it and removes v1.
 
 ## [0.164.0] - 2026-11-12
 
