@@ -80,7 +80,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a single-use key that exists only in the running `spawn`, the scheme
   EC2's `GetPasswordData` uses. The command history holds only a public key
   and ciphertext.
-### Security
 
 - The egress proxy (`--no-public-ip --bootstrap-egress proxy`) now reads a
   CONNECT tunnel's TLS ClientHello before forwarding any of it. It refuses the
