@@ -45,7 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container script. Web-app containers keep hop limit 1, so a publicly
   reachable app cannot fetch the instance role's credentials. DCV container
   apps use host networking and are unaffected.
-### Security
 
 - The security groups `spawn app launch` creates (`spawn-dcv`, `spawn-web`)
   and the MPI cluster groups (`spawn-mpi-*`) no longer open SSH (22) to
