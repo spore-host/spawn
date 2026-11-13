@@ -46,6 +46,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reachable app cannot fetch the instance role's credentials. DCV container
   apps use host networking and are unaffected.
 
+- The security groups `spawn app launch` creates (`spawn-dcv`, `spawn-web`)
+  and the MPI cluster groups (`spawn-mpi-*`) no longer open SSH (22) to
+  `0.0.0.0/0` (#1596). `spawn connect` uses SSM Session Manager when no group
+  admits SSH, as before. MPI's node-to-node SSH is covered by the group's
+  self rule. When spawn reuses one of these groups created by an older
+  release, it removes the world-open SSH rule and leaves narrower SSH rules
+  alone. To SSH directly, attach a group of your own that opens 22 to your
+  address (`--security-group-ids`).
+- `spawn app launch` now refuses to launch into an existing `spawn-dcv` or
+  `spawn-web` group that is not tagged `spawn:managed=true`. These names are
+  fixed per VPC, so anyone able to create a security group in the account
+  could otherwise pre-create one with rules of their own and have spawn join
+  it (#1596).
+
 ## [0.164.0] - 2026-11-12
 
 ### Security
