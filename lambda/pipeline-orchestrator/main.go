@@ -1069,6 +1069,8 @@ func buildStageRunInstancesInput(state *pipeline.PipelineState, stageDef *pipeli
 		// permission and no AWS CLI. The EC2 default is stop, which would leave
 		// the stage's EBS volumes billing.
 		InstanceInitiatedShutdownBehavior: ec2types.ShutdownBehaviorTerminate,
+		// IMDSv2 with hop limit 1, as on every spawn launch (#1588).
+		MetadataOptions: spawnaws.IMDSMetadataOptions(0),
 		TagSpecifications: []ec2types.TagSpecification{
 			{
 				ResourceType: ec2types.ResourceTypeInstance,

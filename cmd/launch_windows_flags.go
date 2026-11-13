@@ -116,6 +116,7 @@ var windowsLaunchFlags = map[string]windowsFlagRule{
 	"ami":                   honouredOnWindows(whyEC2Param),
 	"os":                    honouredOnWindows("selects the Windows bootstrap itself"),
 	"nested-virtualization": honouredOnWindows(whyEC2Param),
+	"imds-hop-limit":        honouredOnWindows(whyEC2Param + " (MetadataOptions)"),
 	"allow-cidr":            honouredOnWindows("sets the source of the managed Windows security group's RDP and SSH rules"),
 	"vpc":                   honouredOnWindows(whyEC2Param),
 	"subnet-id":             honouredOnWindows(whyEC2Param),

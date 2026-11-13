@@ -41,6 +41,13 @@ func taskLaunchConfig(spec *taskproto.TaskSpec, sized *taskproto.SizeResult, reg
 		IamInstanceProfile: iamProfile,
 		Tags:               map[string]string{"spawn:task-id": spec.TaskID},
 	}
+	// A container task runs on Docker's bridge network, one hop further from
+	// IMDS than the host, and its own tooling may use the task role
+	// (resources.s3_read_write). Hop limit 2 lets it; a host task keeps 1
+	// (#1588, pkg/aws imds.go).
+	if spec.Container != "" {
+		cfg.IMDSv2HopLimit = aws.IMDSHopLimitBridgedContainers
+	}
 	// Optional launch-time placement (nf-spawn's ext.* analogs): a specific AMI/AZ
 	// and attached EBS reference-data volumes. FSx/EFS mounting is threaded via the
 	// launcher's StorageScript (built in Launch), not here.

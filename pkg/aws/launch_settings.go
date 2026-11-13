@@ -129,12 +129,14 @@ func resolveLaunchSettings(lc LaunchConfig, memoryMiB func() (int64, bool), root
 		CapacityBlock:        lc.CapacityBlock,
 		Hibernate:            lc.Hibernate,
 		NestedVirtualization: lc.NestedVirtualization,
-		IMDSv2Enforced:       lc.IMDSv2Enforced,
-		IMDSv2HopLimit:       lc.IMDSv2HopLimit,
-		RootDeviceName:       aws.ToString(root.DeviceName),
-		RootVolumeGiB:        aws.ToInt32(root.Ebs.VolumeSize),
-		EBSEncrypted:         lc.EBSEncrypted,
-		EBSKMSKeyID:          lc.EBSKMSKeyID,
+		// Always true (#1588): an orchestrator deployed before every launch
+		// required IMDSv2 applies it only when this says so.
+		IMDSv2Enforced: true,
+		IMDSv2HopLimit: lc.IMDSv2HopLimit,
+		RootDeviceName: aws.ToString(root.DeviceName),
+		RootVolumeGiB:  aws.ToInt32(root.Ebs.VolumeSize),
+		EBSEncrypted:   lc.EBSEncrypted,
+		EBSKMSKeyID:    lc.EBSKMSKeyID,
 	}
 	for _, v := range lc.AttachVolumes {
 		s.AttachVolumes = append(s.AttachVolumes, LaunchSettingsVolume{SnapshotID: v.SnapshotID, SizeGiB: v.SizeGiB})
@@ -334,17 +336,6 @@ func applyLaunchSettings(input *ec2.RunInstancesInput, lc LaunchConfig, rootDevi
 		}
 	}
 
-	// Add IMDSv2 configuration if enforced (compliance requirement)
-	if lc.IMDSv2Enforced {
-		hopLimit := int32(1) // Default: only local access
-		if lc.IMDSv2HopLimit > 0 {
-			hopLimit = int32(lc.IMDSv2HopLimit)
-		}
-
-		input.MetadataOptions = &types.InstanceMetadataOptionsRequest{
-			HttpTokens:              types.HttpTokensStateRequired, // Require IMDSv2
-			HttpPutResponseHopLimit: aws.Int32(hopLimit),
-			HttpEndpoint:            types.InstanceMetadataEndpointStateEnabled,
-		}
-	}
+	// IMDSv2 on every launch, compliance mode or not (#1588; imds.go).
+	input.MetadataOptions = IMDSMetadataOptions(lc.IMDSv2HopLimit)
 }

@@ -405,7 +405,7 @@ var foregroundDispositions = map[string]foregroundDisposition{
 	"AttachVolumes":        {settings: true, userData: true},
 	"EBSEncrypted":         {settings: true},
 	"EBSKMSKeyID":          {settings: true},
-	"IMDSv2Enforced":       {settings: true},
+	"IMDSv2Enforced":       {why: "every member requires IMDSv2 whatever it says: the settings always carry imdsv2_enforced=true (#1588)"},
 	"IMDSv2HopLimit":       {settings: true},
 	"HibernateOnIdle":      {settings: true, tags: true},
 

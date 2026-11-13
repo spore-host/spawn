@@ -26,10 +26,13 @@ const ElasticIPPurpose
 const ElasticIPQuotaCode
 const HeartbeatTag
 const IAMBaselineURL
+const IMDSHopLimit
+const IMDSHopLimitBridgedContainers
 const ImageSpawnVersionTagKey
 const LaunchInstanceGone
 const LaunchSettingsSchema
 const MaxEncodedUserDataBytes
+const MaxIMDSHopLimit
 const MaxUserDataBytes
 const NestedParentTagKey
 const NestedSpawnRolePrefix
@@ -692,6 +695,7 @@ func GenerateScopedDynamoDBPolicy(region, accountID string) string
 func GenerateScopedS3Policy(region, accountID string) string
 func GenerateWindowsPassword(n int) (string, error)
 func GetEFSDNSName(filesystemID, region string) string
+func IMDSMetadataOptions(hopLimit int) *types.InstanceMetadataOptionsRequest
 func ImageCreateTags(userTags, sourceTags map[string]string) map[string]string
 func ImageProvenanceFromTags(tags map[string]string) ImageProvenance
 func ImageProvenanceTagKeys() []string

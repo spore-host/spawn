@@ -356,8 +356,8 @@ type LaunchConfig struct {
 	// Compliance settings
 	EBSEncrypted   bool   // Force EBS encryption (compliance requirement)
 	EBSKMSKeyID    string // Customer-managed KMS key for EBS encryption
-	IMDSv2Enforced bool   // Require IMDSv2 (no IMDSv1 fallback)
-	IMDSv2HopLimit int    // IMDSv2 hop limit (default: 1)
+	IMDSv2Enforced bool   // Compliance mode asked for IMDSv2; every launch requires it regardless (#1588, imds.go)
+	IMDSv2HopLimit int    // IMDS PUT response hop limit (0: IMDSHopLimit; see imds.go)
 
 	// Slack lifecycle notifications
 	// The settings below to WebAuth are spored settings fixed at launch: they go
