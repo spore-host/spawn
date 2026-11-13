@@ -398,8 +398,8 @@ func TestSweepPolicyGolden(t *testing.T) {
 		t.Errorf("SpawnSweepCrossAccountRole's policy for %s differs from %s:\n%s", sweepCompute, golden, pretty.String())
 	}
 
-	const pinnedSchema = 1
-	const pin = "cd81f5748cb58ec1144fbfc31ff2382c8d4d537a2842fd55252968afff8ab3d0"
+	const pinnedSchema = 2
+	const pin = "22e38f26be33a767eef2eee0cd64f05b76d7a716cc7abdea5ebcbe32e90fe7fd"
 	if sweepRolePolicySchema != pinnedSchema {
 		t.Fatalf("sweepRolePolicySchema is %d and the pin is for %d: update both together", sweepRolePolicySchema, pinnedSchema)
 	}
@@ -441,6 +441,59 @@ func TestSweepPolicyHasNoTraps(t *testing.T) {
 	}
 	if _, err := SweepCrossAccountPolicyDocument("SPAWN-ACCOUNT-ID"); err == nil {
 		t.Error("the policy was bound to a non-account")
+	}
+}
+
+// #1586: the role must not be able to tag, or terminate, an instance that is
+// not spawn's. An unconditioned ec2:CreateTags let it write spawn:managed and
+// spawn:egress-proxy onto any instance and so pass the ssm:SendCommand tag
+// gate. Every CreateTags Allow names the creates in ec2:CreateAction, every
+// TerminateInstances Allow requires spawn:managed, and both carry an explicit
+// Deny that retires the unconditioned forms an older copy of the policy grants.
+// The tag Deny is StringNotLike on ec2:CreateAction, never Null: a live check
+// on the nested role showed Null does not refuse a direct CreateTags.
+func TestSweepPolicyCannotRetagOrTerminateForeignInstances(t *testing.T) {
+	var tagDeny, termDeny bool
+	for _, st := range parseStatementsLoose(t, "sweep policy", sweepPolicy(t)) {
+		acts := actionSet(st["Action"])
+		cond, _ := st["Condition"].(map[string]interface{})
+		switch st["Effect"] {
+		case "Allow":
+			if acts["ec2:CreateTags"] || acts["ec2:*"] {
+				eq, _ := cond["StringEquals"].(map[string]interface{})
+				if len(resourceStrings(eq["ec2:CreateAction"])) == 0 || len(cond) != 1 {
+					t.Errorf("statement %v allows ec2:CreateTags outside a create: %v", st["Sid"], st["Condition"])
+				}
+			}
+			if acts["ec2:TerminateInstances"] {
+				eq, _ := cond["StringEquals"].(map[string]interface{})
+				if eq["ec2:ResourceTag/spawn:managed"] != "true" {
+					t.Errorf("statement %v allows ec2:TerminateInstances of instances that are not spawn:managed: %v", st["Sid"], st["Condition"])
+				}
+			}
+		case "Deny":
+			if acts["ec2:CreateTags"] {
+				if _, null := cond["Null"]; null {
+					t.Errorf("statement %v exempts tag-on-create with Null ec2:CreateAction, which does not refuse a direct CreateTags", st["Sid"])
+				}
+				nl, _ := cond["StringNotLike"].(map[string]interface{})
+				if len(cond) == 1 && len(resourceStrings(nl["ec2:CreateAction"])) > 0 {
+					tagDeny = true
+				}
+			}
+			if acts["ec2:TerminateInstances"] {
+				ne, _ := cond["StringNotEquals"].(map[string]interface{})
+				if len(cond) == 1 && ne["ec2:ResourceTag/spawn:managed"] == "true" {
+					termDeny = true
+				}
+			}
+		}
+	}
+	if !tagDeny {
+		t.Error("no Deny of ec2:CreateTags outside a create (StringNotLike ec2:CreateAction): an older copy of the policy still tags any instance")
+	}
+	if !termDeny {
+		t.Error("no Deny of ec2:TerminateInstances of instances that are not spawn:managed: an older copy of the policy still terminates any instance")
 	}
 }
 
@@ -521,8 +574,8 @@ func TestEnsureSweepRole_CreatesTheRole(t *testing.T) {
 	if len(f.tags) != 1 || aws.ToString(f.tags[0].Key) != "spawn:managed" || aws.ToString(f.tags[0].Value) != "true" {
 		t.Errorf("tags %v, want spawn:managed=true", f.tags)
 	}
-	if got := f.names(); len(got) != 1 || got[0] != SweepRolePolicyName() || got[0] != "SweepCrossAccountEC2Policy-v1" {
-		t.Errorf("inline policies %v, want [SweepCrossAccountEC2Policy-v1]", got)
+	if got := f.names(); len(got) != 1 || got[0] != SweepRolePolicyName() || got[0] != "SweepCrossAccountEC2Policy-v2" {
+		t.Errorf("inline policies %v, want [SweepCrossAccountEC2Policy-v2]", got)
 	}
 	if f.policies[SweepRolePolicyName()] != sweepPolicy(t) {
 		t.Error("the policy written is not SweepCrossAccountPolicyDocument")
