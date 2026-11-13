@@ -59,7 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed per VPC, so anyone able to create a security group in the account
   could otherwise pre-create one with rules of their own and have spawn join
   it (#1596).
-### Security
 
 - A launch now refuses a plugin declaration whose config sets a secret, such
   as a `password`, `token`, `*_key` or `*secret*` key. This applies to
