@@ -406,17 +406,15 @@ func deletionOrderCmd(resources []aws.ManagedResource) []aws.ManagedResource {
 // openCleanupLog opens ~/.spawn/cleanup-<ts>.log for append; returns ("",nil) if
 // it can't (logging is best-effort and must not block cleanup).
 func openCleanupLog() (string, *os.File) {
-	home, err := os.UserHomeDir()
+	// ~/.spawn is owner-only (#1593): it holds session tokens and keys, and
+	// this was the one path that created it 0755.
+	dir, err := spawnHomeSubdir()
 	if err != nil {
-		return "", nil
-	}
-	dir := filepath.Join(home, ".spawn")
-	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
 		return "", nil
 	}
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	path := filepath.Join(dir, fmt.Sprintf("cleanup-%s.log", ts))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return "", nil
 	}

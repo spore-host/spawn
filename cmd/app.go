@@ -1024,17 +1024,21 @@ echo "DCV session '%s' created for: %s"
 }
 
 // getSessionsDir returns the path to ~/.spawn/sessions/, creating it if necessary.
+//
+// 0700, with ~/.spawn: session files carry access tokens (#1593). A page an
+// older spawn wrote 0644 is tightened to 0600 here too.
 func getSessionsDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	dir, err := spawnHomeSubdir("sessions")
 	if err != nil {
-		return "", fmt.Errorf("get home directory: %w", err)
+		return "", err
 	}
-	dir := filepath.Join(homeDir, ".spawn", "sessions")
-	// 0700: session files carry access tokens.
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create sessions directory: %w", err)
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".html") {
+				tightenToOwnerOnly(filepath.Join(dir, e.Name()))
+			}
+		}
 	}
-	_ = os.Chmod(dir, 0o700) // best-effort, for a directory an older spawn made 0755
 	return dir, nil
 }
 

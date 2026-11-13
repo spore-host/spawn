@@ -470,15 +470,8 @@ func generateSweepID(name string) string {
 
 // getSweepStateDir returns the directory for sweep state files
 func getSweepStateDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	dir := filepath.Join(homeDir, ".spawn", "sweeps")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create sweeps directory: %w", err)
-	}
-	return dir, nil
+	// Owner-only, with ~/.spawn (#1593).
+	return spawnHomeSubdir("sweeps")
 }
 
 // saveSweepState saves the sweep state to ~/.spawn/sweeps/<id>.json

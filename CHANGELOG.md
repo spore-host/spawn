@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `~/.spawn`, `~/.spawn/sessions` and `~/.spawn/sweeps` are now created
+  owner-only (0700), and tightened to that when an older spawn left them 0755.
+  DCV session pages that older releases wrote 0644 are tightened to 0600 the
+  next time spawn opens the sessions directory. Each page embeds a DCV session
+  token, so on a shared login or HPC host another local user could read one
+  and take over the desktop (#1593). `spawn cleanup`'s log, the path that
+  created `~/.spawn` 0755, is now 0600.
+
 ## [0.164.0] - 2026-11-12
 
 ### Security
