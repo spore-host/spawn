@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `spawn launch --imds-hop-limit N` sets the IMDSv2 PUT response hop limit
+  (1-64, default 1), for a workload that runs a container on Docker's bridge
+  network and needs the instance role from inside it (#1588).
+
 ### Security
 
 - `~/.spawn`, `~/.spawn/sessions` and `~/.spawn/sweeps` are now created
@@ -25,13 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Denies retire the broader grants of an older copy of the policy. The sweep
   role policy schema is now 2 (`SweepCrossAccountEC2Policy-v2`); the next
   detached sweep writes it and removes v1.
-### Added
-
-- `spawn launch --imds-hop-limit N` sets the IMDSv2 PUT response hop limit
-  (1-64, default 1), for a workload that runs a container on Docker's bridge
-  network and needs the instance role from inside it (#1588).
-
-### Security
 
 - Every instance spawn launches now requires IMDSv2 (`HttpTokens=required`,
   endpoint enabled, hop limit 1), not only compliance-mode launches. This
