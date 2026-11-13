@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -192,19 +193,26 @@ func randChar(set string) (byte, error) {
 // then disables the retrievable password, so an instance launched from a warm
 // (re-imaged, never re-Sysprepped) AMI never produces a GetPasswordData-retriev‐
 // able password (#201, #98). Rather than depend on that, spawn owns the
-// credential — it generates a strong random password and sets it directly,
-// uniformly on warm and base AMIs. Requires the SSM agent Online and
-// ssm:SendCommand on the caller (the same dependency `connect` already has).
+// credential, uniformly on warm and base AMIs. Requires the SSM agent Online
+// and ssm:SendCommand on the caller (the same dependency `connect` already has).
 //
-// The password is interpolated into a double-quoted PowerShell string; the
-// generator (GenerateWindowsPassword) excludes the characters that would need
-// escaping there (" ` $ \), so no injection surface and no quoting surprises.
+// The password never appears in SSM (#1587). SSM keeps a command's parameters
+// and output for about 30 days, readable with ssm:ListCommands and
+// GetCommandInvocation, so a password interpolated into the command, as it was
+// until #1587, was readable by anyone with SSM read for a month. Instead, as EC2
+// GetPasswordData does, the instance generates the password itself and returns
+// it encrypted to a key only this process holds: spawn makes a single-use RSA
+// key pair in memory, the command carries only its public half, the script
+// sets a random password and prints it RSA-OAEP-encrypted to that key, and
+// spawn decrypts it here. The history holds a public key and ciphertext. A
+// Windows whose .NET cannot run the script (older than 4.6.2) fails the
+// command, and connect falls back to GetPasswordData as before.
 func (c *Client) SetWindowsAdminPasswordViaSSM(ctx context.Context, region, instanceID string, timeout time.Duration) (string, error) {
-	password, err := GenerateWindowsPassword(20)
+	priv, err := rsa.GenerateKey(rand.Reader, windowsPasswordSealBits)
 	if err != nil {
-		return "", fmt.Errorf("generate password: %w", err)
+		return "", fmt.Errorf("generate the password's sealing key: %w", err)
 	}
-	ps := windowsSetAdminPasswordScript(password)
+	ps := windowsSetAdminPasswordScript(&priv.PublicKey)
 	res, err := c.RunPowerShell(ctx, region, instanceID, ps, timeout)
 	if err != nil {
 		return "", fmt.Errorf("set Administrator password over SSM: %w", err)
@@ -212,22 +220,92 @@ func (c *Client) SetWindowsAdminPasswordViaSSM(ctx context.Context, region, inst
 	if res.Status != "Success" {
 		return "", fmt.Errorf("set Administrator password over SSM: command status %s%s", res.Status, ssmErrTail(res.Stderr))
 	}
-	return password, nil
+	return openSealedWindowsPassword(res.Stdout, priv)
 }
 
-// windowsSetAdminPasswordScript is the PowerShell that sets the Administrator
-// password and makes sure the account can actually be used for RDP: enabled, and
-// the password set not to expire (so a freshly-set credential isn't immediately
-// rejected). Pure/testable — no AWS calls. The password is embedded in a
-// double-quoted string; callers must pass a value free of " ` $ \ (the generator
-// guarantees this).
-func windowsSetAdminPasswordScript(password string) string {
+// windowsPasswordSealBits is the size of the single-use RSA key the password
+// is returned under.
+const windowsPasswordSealBits = 3072
+
+// windowsSealedPasswordMarker prefixes the one output line carrying the sealed
+// password.
+const windowsSealedPasswordMarker = "SPAWN-SEALED-PASSWORD:"
+
+// windowsSetAdminPasswordScript is the PowerShell that generates a random
+// Administrator password on the instance, sets it, makes sure the account can
+// be used for RDP (enabled, password not expiring), and prints it encrypted to
+// pub (RSA-OAEP with SHA-256) after windowsSealedPasswordMarker. Pure/testable
+// — no AWS calls.
+// The only per-call value in it is pub, so nothing secret reaches SSM.
+//
+// The password is 20 characters with one from each of windowsPasswordCharsets
+// and the rest from their union, drawn without modulo bias from
+// RandomNumberGenerator and shuffled, as GenerateWindowsPassword draws them.
+func windowsSetAdminPasswordScript(pub *rsa.PublicKey) string {
+	modulus := base64.StdEncoding.EncodeToString(pub.N.Bytes())
+	exponent := base64.StdEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes())
+	quoted := make([]string, len(windowsPasswordCharsets))
+	for i, set := range windowsPasswordCharsets {
+		quoted[i] = "'" + set + "'" // no set contains a single quote
+	}
 	return strings.Join([]string{
 		`$ErrorActionPreference = 'Stop'`,
-		fmt.Sprintf(`$p = ConvertTo-SecureString "%s" -AsPlainText -Force`, password),
+		`$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()`,
+		`function Get-SpawnIndex([int]$n) {`,
+		`  $span = [uint64]4294967296`,
+		`  $limit = $span - ($span % [uint64]$n)`,
+		`  $b = New-Object byte[] 4`,
+		`  do { $rng.GetBytes($b); $v = [uint64][BitConverter]::ToUInt32($b, 0) } while ($v -ge $limit)`,
+		`  return [int]($v % [uint64]$n)`,
+		`}`,
+		`$sets = @(` + strings.Join(quoted, ", ") + `)`,
+		`$all = -join $sets`,
+		`$chars = New-Object System.Collections.Generic.List[char]`,
+		`foreach ($s in $sets) { $chars.Add($s[(Get-SpawnIndex $s.Length)]) }`,
+		fmt.Sprintf(`while ($chars.Count -lt %d) { $chars.Add($all[(Get-SpawnIndex $all.Length)]) }`, windowsPasswordLength),
+		`for ($i = $chars.Count - 1; $i -gt 0; $i--) { $j = Get-SpawnIndex ($i + 1); $t = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $t }`,
+		`$pw = -join $chars`,
+		`$p = ConvertTo-SecureString $pw -AsPlainText -Force`,
 		`Get-LocalUser -Name 'Administrator' | Set-LocalUser -Password $p -PasswordNeverExpires $true`,
 		`Enable-LocalUser -Name 'Administrator'`,
+		// RSACng (.NET Framework 4.6.2+, every supported Windows Server) does
+		// OAEP-SHA256; RSACryptoServiceProvider, which RSA.Create() returns
+		// there, does not. RSA.Create() is the fallback for .NET on other
+		// platforms, where RSACng does not exist (the test runs it in pwsh).
+		`try { $rsa = New-Object System.Security.Cryptography.RSACng } catch { $rsa = [System.Security.Cryptography.RSA]::Create() }`,
+		`$k = New-Object System.Security.Cryptography.RSAParameters`,
+		fmt.Sprintf(`$k.Modulus = [Convert]::FromBase64String('%s')`, modulus),
+		fmt.Sprintf(`$k.Exponent = [Convert]::FromBase64String('%s')`, exponent),
+		`$rsa.ImportParameters($k)`,
+		`$sealed = [Convert]::ToBase64String($rsa.Encrypt([System.Text.Encoding]::UTF8.GetBytes($pw), [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))`,
+		`$pw = $null`,
+		`Write-Output ('` + windowsSealedPasswordMarker + `' + $sealed)`,
 	}, "\n")
+}
+
+// windowsPasswordLength is the length of the password the instance generates.
+const windowsPasswordLength = 20
+
+// openSealedWindowsPassword finds the sealed password in the script's output
+// and decrypts it with priv.
+func openSealedWindowsPassword(stdout string, priv *rsa.PrivateKey) (string, error) {
+	for _, line := range strings.Split(stdout, "\n") {
+		i := strings.Index(line, windowsSealedPasswordMarker)
+		if i < 0 {
+			continue
+		}
+		rest := line[i+len(windowsSealedPasswordMarker):]
+		ct, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rest))
+		if err != nil {
+			return "", fmt.Errorf("the instance returned a malformed sealed password: %w", err)
+		}
+		pt, err := rsa.DecryptOAEP(sha256.New(), nil, priv, ct, nil)
+		if err != nil {
+			return "", fmt.Errorf("decrypt the password the instance set: %w", err)
+		}
+		return string(pt), nil
+	}
+	return "", fmt.Errorf("the instance set the Administrator password but did not return it sealed (no %s line in its output)", windowsSealedPasswordMarker)
 }
 
 // ssmErrTail returns a trimmed, prefixed tail of SSM stderr for error messages,

@@ -4,11 +4,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -193,20 +196,116 @@ func TestGenerateWindowsPassword_Random(t *testing.T) {
 	}
 }
 
-// TestWindowsSetAdminPasswordScript embeds the password and sets the account up
-// for use (set password, never-expire, enable) (#201).
+// TestWindowsSetAdminPasswordScript (#201, #1587): the script sets the
+// Administrator account up for use (set password, never-expire, enable), and
+// carries no password: only the sealing key's public half. SSM keeps a
+// command's parameters for about 30 days.
 func TestWindowsSetAdminPasswordScript(t *testing.T) {
-	script := windowsSetAdminPasswordScript("Abc123!def456GH")
+	priv := testSealKey(t)
+	script := windowsSetAdminPasswordScript(&priv.PublicKey)
 	for _, want := range []string{
-		`ConvertTo-SecureString "Abc123!def456GH" -AsPlainText -Force`,
+		"ConvertTo-SecureString $pw -AsPlainText -Force",
 		"Set-LocalUser -Password $p",
 		"-PasswordNeverExpires $true",
 		"Enable-LocalUser -Name 'Administrator'",
 		"$ErrorActionPreference = 'Stop'",
+		"$k.Modulus = [Convert]::FromBase64String('" + base64.StdEncoding.EncodeToString(priv.N.Bytes()) + "')",
+		"$rsa.Encrypt(",
+		windowsSealedPasswordMarker,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q\n--- script ---\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, `ConvertTo-SecureString "`) {
+		t.Error("the script embeds a password literal: it would be kept in SSM command history (#1587)")
+	}
+	if a, b := windowsSetAdminPasswordScript(&priv.PublicKey), windowsSetAdminPasswordScript(&priv.PublicKey); a != b {
+		t.Error("the script varies for one key: something other than the public key is per call")
+	}
+}
+
+func testSealKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048) // the size does not matter to the format; keeps the test fast
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv
+}
+
+// The instance's answer is opened with the key, as the script seals it
+// (RSA.Encrypt with RSAEncryptionPadding.OaepSHA256).
+func TestOpenSealedWindowsPassword(t *testing.T) {
+	priv := testSealKey(t)
+	ct, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, &priv.PublicKey, []byte("Xy7!pQ"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := "noise\r\n" + windowsSealedPasswordMarker + base64.StdEncoding.EncodeToString(ct) + "\r\n"
+	if pw, err := openSealedWindowsPassword(out, priv); err != nil || pw != "Xy7!pQ" {
+		t.Errorf("openSealedWindowsPassword = %q, %v; want the sealed password", pw, err)
+	}
+	if _, err := openSealedWindowsPassword("Set the password\n", priv); err == nil {
+		t.Error("output with no sealed password was accepted")
+	}
+	other := testSealKey(t)
+	if _, err := openSealedWindowsPassword(out, other); err == nil {
+		t.Error("a password sealed to another key was opened")
+	}
+}
+
+// TestWindowsPasswordScriptRunsInPowerShell runs the script's generation and
+// sealing in a real PowerShell when one is installed (Windows PowerShell on
+// the Windows CI runner, pwsh elsewhere), with the account lines stubbed out,
+// and opens what it prints: the password meets the complexity rule the
+// account needs and decrypts with the key.
+func TestWindowsPasswordScriptRunsInPowerShell(t *testing.T) {
+	shell := "pwsh"
+	if runtime.GOOS == "windows" {
+		shell = "powershell"
+	}
+	path, err := exec.LookPath(shell)
+	if err != nil {
+		t.Skipf("%s not installed", shell)
+	}
+	priv := testSealKey(t)
+	script := windowsSetAdminPasswordScript(&priv.PublicKey)
+	for _, line := range []string{
+		"Get-LocalUser -Name 'Administrator' | Set-LocalUser -Password $p -PasswordNeverExpires $true",
+		"Enable-LocalUser -Name 'Administrator'",
+	} {
+		script = strings.Replace(script, line, "$null = $p", 1)
+	}
+	// As a file, as AWS-RunPowerShellScript runs its commands.
+	file := filepath.Join(t.TempDir(), "set-password.ps1")
+	if err := os.WriteFile(file, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s: %v\n%s", shell, err, out)
+	}
+	pw, err := openSealedWindowsPassword(string(out), priv)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(pw) != windowsPasswordLength {
+		t.Errorf("password is %d characters, want %d", len(pw), windowsPasswordLength)
+	}
+	for _, set := range windowsPasswordCharsets {
+		if !strings.ContainsAny(pw, set) {
+			t.Errorf("password has no character from %q: Windows' complexity rule may refuse it", set)
+		}
+	}
+	all := strings.Join(windowsPasswordCharsets, "")
+	for _, r := range pw {
+		if !strings.ContainsRune(all, r) {
+			t.Errorf("password has %q, outside the character sets", r)
+		}
+	}
+	if strings.Contains(string(out), pw) {
+		t.Error("the script printed the password in clear")
 	}
 }
 
