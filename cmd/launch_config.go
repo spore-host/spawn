@@ -699,7 +699,7 @@ try {
   $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers @{'X-aws-ec2-metadata-token'=$token} -TimeoutSec 5
 } catch {}
 if (-not $region) { $region = 'us-east-1' }
-
+__SPAWN_AMAZON_SIGNED_FUNC__
 # Ensure the SSM agent is installed, set to auto-start, and running (#95).
 # Stock Windows *Server* AMIs ship it running, but an imported Windows 11
 # *client* AMI (spawn image import) bakes the agent without it auto-starting
@@ -710,6 +710,8 @@ try {
   if (-not $svc) {
     $msi = "$env:TEMP\SSMAgent_latest.exe"
     Invoke-WebRequest -Uri "https://amazon-ssm-${region}.s3.${region}.amazonaws.com/latest/windows_amd64/AmazonSSMAgentSetup.exe" -OutFile $msi -UseBasicParsing
+    # Amazon-signed or not run at all (#1598).
+    Assert-SpawnAmazonSigned $msi
     Start-Process $msi -ArgumentList '/S' -Wait
   }
   Set-Service -Name AmazonSSMAgent -StartupType Automatic -ErrorAction SilentlyContinue
@@ -726,7 +728,11 @@ try {
   $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
   if (-not (Test-Path $aws)) {
     $msi = "$env:TEMP\AWSCLIV2.msi"
-    Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2.msi' -OutFile $msi -UseBasicParsing
+    # The release the Linux bootstrap pins, else the latest: Amazon-signed
+    # either way, or not run at all (#1598).
+    try { Invoke-WebRequest -Uri '__AWSCLI_MSI_URL__' -OutFile $msi -UseBasicParsing }
+    catch { Invoke-WebRequest -Uri '__AWSCLI_MSI_LATEST__' -OutFile $msi -UseBasicParsing }
+    Assert-SpawnAmazonSigned $msi
     Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
   }
 
@@ -757,6 +763,17 @@ __SPORED_WINDOWS_VERIFIED_INSTALL__
 		return "", fmt.Errorf("the Windows bootstrap template lost its verified-install placeholder")
 	}
 	script = strings.Replace(script, "__SPORED_WINDOWS_VERIFIED_INSTALL__", install, 1)
+	// The Amazon-signature check the SSM agent and AWS CLI installers pass
+	// before they run (#1598), and the AWS CLI release to install.
+	msiVersion := ""
+	if pins := launcher.AWSCLIPins(); len(pins) > 0 {
+		msiVersion = pins[0].Version
+	}
+	script = strings.NewReplacer(
+		"__SPAWN_AMAZON_SIGNED_FUNC__", sporedinstall.WindowsAmazonSignedFunc,
+		"__AWSCLI_MSI_URL__", sporedinstall.WindowsAWSCLIMSIURL(msiVersion),
+		"__AWSCLI_MSI_LATEST__", sporedinstall.WindowsAWSCLIMSIURL(""),
+	).Replace(script)
 
 	return script, nil
 }

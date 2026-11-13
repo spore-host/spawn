@@ -35,6 +35,8 @@ import (
 // for each way a source can be hostile or broken.
 type fixture struct {
 	t        *testing.T
+	priv     *ecdsa.PrivateKey // signs the manifest of a versioned copy (#1597)
+	sum      string            // the binary's sha256, hex
 	dir      string
 	keyPath  string // PEM public key the script verifies against
 	binary   string
@@ -79,6 +81,8 @@ func newFixture(t *testing.T) *fixture {
 
 	f := &fixture{
 		t:        t,
+		priv:     priv,
+		sum:      hex.EncodeToString(sum[:]),
 		dir:      dir,
 		keyPath:  keyPath,
 		binary:   binaryName,

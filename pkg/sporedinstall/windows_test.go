@@ -82,6 +82,16 @@ func (f *winFixture) publish(t *testing.T, url string, bin []byte, signer *ecdsa
 			t.Fatal(err)
 		}
 		f.objects[url+".sig"] = []byte(base64.StdEncoding.EncodeToString(sig) + "\n")
+		// A versioned object carries the release's manifest signature (#1597).
+		if _, rest, ok := strings.Cut(url, "/spawn/versions/"); ok {
+			v, name, _ := strings.Cut(rest, "/")
+			d := sha256.Sum256([]byte(ManifestText(name, v, hex.EncodeToString(sum[:]))))
+			msig, err := ecdsa.SignASN1(rand.Reader, signer, d[:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.objects[url+".msig"] = []byte(base64.StdEncoding.EncodeToString(msig) + "\n")
+		}
 	}
 }
 
@@ -427,8 +437,8 @@ func TestWindowsPinnedInstallFetchesOnlyItsOwnVersion(t *testing.T) {
 			out, got, requested := f.runVersion(t, f.pubPEM, v)
 			wantInstalled(t, out, got, bin)
 			onlyVersioned(t, requested)
-			if requested[len(requested)-1] != url+".sig" {
-				t.Errorf("the install did not end on %s's signature: %v", url, requested)
+			if requested[len(requested)-1] != url+".msig" {
+				t.Errorf("the install did not end on %s's manifest signature: %v", url, requested)
 			}
 		})
 	}
@@ -475,5 +485,48 @@ func TestWindowsPinnedInstallFetchesOnlyItsOwnVersion(t *testing.T) {
 		if _, err := WindowsInstallScript(SigningKeyPEM, "0.1.0'; Remove-Item C:\\"); err == nil {
 			t.Error("WindowsInstallScript accepted a version that is not a release")
 		}
+	})
+}
+
+// #1597 on Windows: a versioned install refuses a binary whose manifest
+// signature is missing or names another version (an older signed spored
+// replayed at this release's path), and accepts the release's own.
+func TestWindowsVersionedInstallRequiresTheManifestSignature(t *testing.T) {
+	const v = "9.9.9"
+	url := "s3://spawn-binaries-eu-west-1/spawn/versions/" + v + "/spored-windows-amd64.exe"
+	sum := sha256.Sum256(bin)
+	for name, msig := range map[string]func(f *winFixture) []byte{
+		"missing": func(*winFixture) []byte { return nil },
+		"another version": func(f *winFixture) []byte {
+			d := sha256.Sum256([]byte(ManifestText("spored-windows-amd64.exe", "0.150.0", hex.EncodeToString(sum[:]))))
+			s, err := ecdsa.SignASN1(rand.Reader, f.key, d[:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			return []byte(base64.StdEncoding.EncodeToString(s) + "\n")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newWinFixture(t)
+			f.publish(t, url, bin, f.key)
+			if b := msig(f); b == nil {
+				delete(f.objects, url+".msig")
+			} else {
+				f.objects[url+".msig"] = b
+			}
+			out, got, _ := f.runVersion(t, f.pubPEM, v)
+			if got != nil || strings.Contains(out, "RESULT installed=True") {
+				t.Fatalf("a spored whose manifest signature is %s was installed:\n%s", name, out)
+			}
+		})
+	}
+	t.Run("before the floor no manifest signature is needed", func(t *testing.T) {
+		const old = "0.100.0"
+		f := newWinFixture(t)
+		u := "s3://spawn-binaries-eu-west-1/spawn/versions/" + old + "/spored-windows-amd64.exe"
+		f.publish(t, u, bin, f.key)
+		delete(f.objects, u+".msig")
+		out, got, _ := f.runVersion(t, f.pubPEM, old)
+		wantInstalled(t, out, got, bin)
 	})
 }

@@ -899,18 +899,31 @@ if ! command -v dcv >/dev/null 2>&1; then
   echo "Installing Amazon DCV %[1]s for AL2023/${DCV_MACHINE}..."
   # GL/X libs DCV virtual sessions render against (NVIDIA GL comes via nice-dcv-gl).
   dnf install -y mesa-dri-drivers mesa-libGL glx-utils xterm >/dev/null 2>&1 || true
-  rpm --import https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY >/dev/null 2>&1 || true
   DCV_TGZ="nice-dcv-%[1]s-amzn2023-${DCV_MACHINE}.tgz"
-  if curl -fsSL "https://d1uj6qtbmh3dt5.cloudfront.net/%[2]s/Servers/${DCV_TGZ}" -o /tmp/dcv.tgz; then
+  # The packages run as root, so they install only once their signatures
+  # verify against Amazon's DCV key (#1598): the key import, and every RPM's
+  # rpm -K, must succeed, and dnf checks them again; any failure installs
+  # nothing. The import used to be "|| true" and dnf does not check a local
+  # package by default, so a tampered tarball would have installed.
+  if ! rpm --import https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY >/dev/null 2>&1; then
+    echo "WARNING: could not import the Amazon DCV signing key; not installing DCV unverified — the DCV session will not start"
+  elif curl -fsSL "https://d1uj6qtbmh3dt5.cloudfront.net/%[2]s/Servers/${DCV_TGZ}" -o /tmp/dcv.tgz; then
     mkdir -p /tmp/dcv && tar -xzf /tmp/dcv.tgz -C /tmp/dcv --strip-components=1
-    # nice-dcv-server = the server; nice-xdcv = virtual-session X server;
-    # nice-dcv-gl = GPU-accelerated OpenGL in virtual sessions (x86_64 only).
-    dnf install -y /tmp/dcv/nice-dcv-server-*.rpm /tmp/dcv/nice-xdcv-*.rpm >/dev/null 2>&1 || echo "WARNING: DCV server install failed"
-    if [ "${DCV_MACHINE}" = "x86_64" ]; then
-      dnf install -y /tmp/dcv/nice-dcv-gl-*.rpm >/dev/null 2>&1 || echo "WARNING: nice-dcv-gl install failed (GPU GL may be unavailable)"
+    DCV_SIGS=$(rpm -K /tmp/dcv/*.rpm 2>&1) || DCV_SIGS="${DCV_SIGS}
+rpm -K failed"
+    if printf '%%s\n' "$DCV_SIGS" | grep -qv 'digests signatures OK$'; then
+      echo "WARNING: Amazon DCV packages failed signature verification; not installing them — the DCV session will not start"
+      printf '%%s\n' "$DCV_SIGS"
+    else
+      # nice-dcv-server = the server; nice-xdcv = virtual-session X server;
+      # nice-dcv-gl = GPU-accelerated OpenGL in virtual sessions (x86_64 only).
+      dnf install -y --setopt=localpkg_gpgcheck=1 /tmp/dcv/nice-dcv-server-*.rpm /tmp/dcv/nice-xdcv-*.rpm >/dev/null 2>&1 || echo "WARNING: DCV server install failed"
+      if [ "${DCV_MACHINE}" = "x86_64" ]; then
+        dnf install -y --setopt=localpkg_gpgcheck=1 /tmp/dcv/nice-dcv-gl-*.rpm >/dev/null 2>&1 || echo "WARNING: nice-dcv-gl install failed (GPU GL may be unavailable)"
+      fi
+      systemctl enable dcvserver >/dev/null 2>&1 || true
     fi
     rm -rf /tmp/dcv /tmp/dcv.tgz
-    systemctl enable dcvserver >/dev/null 2>&1 || true
   else
     echo "WARNING: could not download Amazon DCV %[1]s — the DCV session will not start"
   fi

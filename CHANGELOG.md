@@ -92,6 +92,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. A tunnel that sends no hello is closed after the header timeout.
   Proxies pick this up when they are next launched or upgraded to this
   spored.
+### Security
+
+- spored's release signature is now bound to the binary's name and version
+  (#1597). The `.sig` beside each spored covers its bytes alone, and the
+  `.sha256` comes from the same bucket. Anyone able to write to one
+  `spawn-binaries-*` bucket could therefore put an older signed spored (one
+  with a known bug), or another architecture's, at the current release's path,
+  and it verified. Each release now also signs a manifest of the binary's
+  name, version and sha256 (`<name>.msig`). The Linux and Windows installers
+  rebuild that manifest from what they asked for and what they downloaded, and
+  refuse a spored whose manifest signature is missing or does not verify. This
+  applies to releases from 0.165.0 on; an older release's spored is still
+  checked against its `.sig` alone.
+- The Windows bootstrap runs the AWS CLI MSI and the SSM agent installer only
+  if they carry a valid Authenticode signature from Amazon, and refuses them
+  otherwise (#1598). Before, both ran as SYSTEM unverified. The MSI is now the
+  AWS CLI release the Linux bootstrap pins, falling back to the latest; either
+  way it is Amazon-signed. `scripts/install-spored.ps1` checks the MSI the
+  same way.
+- The Amazon DCV install (`spawn app launch`) now fails closed on package
+  signatures (#1598). The DCV signing key must import, every RPM must pass
+  `rpm -K`, and dnf checks the local packages again. Any failure installs
+  nothing. Before, a failed key import was ignored and dnf did not check local
+  packages, so a tampered tarball would have installed.
 
 ## [0.164.0] - 2026-11-12
 

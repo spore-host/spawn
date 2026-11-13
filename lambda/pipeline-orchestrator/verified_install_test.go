@@ -78,6 +78,16 @@ func useTestSigningKey(t *testing.T, binPath string, mode sigMode) string {
 	if err := os.WriteFile(sigPath, []byte(base64.StdEncoding.EncodeToString(sig)), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The release's manifest signature (#1597) for the one release these tests
+	// pin, 9.9.9, over the sha256 the fake sha256sum reports.
+	md := sha256.Sum256([]byte(sporedinstall.ManifestText("spored-linux-amd64", "9.9.9", "abc")))
+	msig, err := ecdsa.SignASN1(rand.Reader, signer, md[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sigPath+".msig", []byte(base64.StdEncoding.EncodeToString(msig)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return sigPath
 }
 

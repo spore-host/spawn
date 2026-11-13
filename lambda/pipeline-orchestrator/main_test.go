@@ -582,6 +582,7 @@ case "$url" in
   */meta-data/placement/region) echo eu-west-1;;
   *.sha256) echo abc > "$out";;
   *.sig) [ -n "$NO_SIG" ] && exit 22; [ -z "$out" ] && exit 0; cp "$SIG_SRC" "$out";;
+  *.msig) [ -f "$SIG_SRC.msig" ] || exit 22; cp "$SIG_SRC.msig" "$out";;
   *) [ -n "$FAIL_DOWNLOAD" ] && exit 22; cp "$SPORED_SRC" "$out";;
 esac`,
 		"aws":       `[ "$1 $2" = "s3 cp" ] && cat >/dev/null; echo "aws $*" >> "$CALLS"`,

@@ -97,6 +97,43 @@ func dirOf(p string) string {
 	return "/"
 }
 
+// The manifest signature (#1597). The .sig a release publishes beside each
+// spored covers the file's bytes alone, and the .sha256 comes from the same
+// bucket, so anyone who could write to one release bucket could put an older
+// signed spored (one with a known bug), or another architecture's, at
+// spawn/versions/<current>/, and every check passed. So each release also signs
+// a manifest naming the binary, the version and its sha256, as
+// "<name>.msig" (.github/workflows/release.yaml), and the installers rebuild
+// that manifest from what they asked for and what they downloaded, and verify
+// the signature over it.
+//
+// ManifestFloor is the first release that publishes them. A versioned install
+// of it or anything newer requires the .msig; one of an older release, which
+// has none, is held to the .sig alone, as before. Set it to the first release
+// cut with this change (TestManifestFloorIsNotAnExistingRelease).
+const ManifestFloor = "0.165.0"
+
+// ManifestVersionVar names the shell variable PinScriptFor sets to the pinned
+// version when it is ManifestFloor or newer: then VerifiedInstallFunc requires
+// that version's manifest signature.
+const ManifestVersionVar = "SPORED_MANIFEST_VERSION"
+
+// manifestHeader is the manifest's first line, which versions the format.
+const manifestHeader = "spored-manifest-v1"
+
+// ManifestText is the manifest a release signs for binary name at version
+// with sha256 (lowercase hex): what release.yaml writes and both installers
+// rebuild. TestManifestTextIsWhatEveryWriterWrites holds the bash printf, the
+// PowerShell and the release workflow to it byte for byte.
+func ManifestText(name, version, sha256 string) string {
+	return manifestHeader + "\nname=" + name + "\nversion=" + version + "\nsha256=" + sha256 + "\n"
+}
+
+// manifestPrintfFormat is ManifestText as a printf format, with the name,
+// version and sha256 as its three %s: what the bash installer passes to
+// printf.
+const manifestPrintfFormat = manifestHeader + `\nname=%s\nversion=%s\nsha256=%s\n`
+
 // FuncName is the shell function VerifiedInstallFunc defines. Exported so gates
 // can assert that a script which downloads spored actually calls it.
 const FuncName = "spore_install_verified_spored"
@@ -209,6 +246,11 @@ func PinScript(version string) string {
 // CurrentPrefix, never fall back to the frozen latest, which would ignore it.
 func PinScriptFor(version string, readsLaunchConfig bool) string {
 	s := "\n" + PinVar + "='" + strings.ReplaceAll(version, "'", `'\''`) + "'\n"
+	// A release from ManifestFloor on publishes, and so must be installed
+	// with, its manifest signature (#1597).
+	if version != "" && versionAtLeast(version, ManifestFloor) {
+		s += ManifestVersionVar + "='" + strings.ReplaceAll(version, "'", `'\''`) + "'\n"
+	}
 	// A release build installs its own version whatever the launch holds, so
 	// its script is exactly PinScript's (TestAReleaseBuildsScriptIsUnchanged).
 	if readsLaunchConfig && version == "" {
@@ -370,6 +412,21 @@ func VerifiedInstallFunc() string {
         fi
         rm -f "${tmp}.sig" "${tmp}.sig.der"
         echo "Signature verified (spore.host)"
+
+        # The .sig covers the bytes alone, so any signed spored verifies under
+        # any name and version. A release's manifest signature covers this
+        # name, version and sha256, rebuilt here, so an older or another
+        # architecture's signed spored at its path is refused (#1597).
+        if [ -n "${%[12]s:-}" ]; then
+            printf '%[11]s' "$binary" "$%[12]s" "$actual" > "${tmp}.mf"
+            if ! %[4]s 5 2 -f -o "${tmp}.ms" "${chosen}/${binary}.msig" || ! base64 -d < "${tmp}.ms" > "${tmp}.md" 2>/dev/null ||
+                ! openssl dgst -sha256 -verify %[2]s -signature "${tmp}.md" "${tmp}.mf" >/dev/null 2>&1; then
+                echo "No valid manifest signature for ${binary} $%[12]s; refusing it (#1597)" >&2
+                rm -f "$tmp" "${tmp}.mf" "${tmp}.ms" "${tmp}.md"
+                return 1
+            fi
+            rm -f "${tmp}.mf" "${tmp}.ms" "${tmp}.md"
+        fi
     else
         echo "Signature verification not enabled in this spawn build; checksum only (corruption, not authenticity)"
     fi
@@ -413,5 +470,6 @@ func VerifiedInstallFunc() string {
     fi
 }
 # --- end spored verified install -------------------------------------------
-`, FuncName, SigningKeyPath, Dest, CurlRetryFuncName, RelabelFuncName, BucketInstallFuncName, PinVar, CurrentPrefix, FrozenLatestVersion, ReadsLaunchConfigVar)
+`, FuncName, SigningKeyPath, Dest, CurlRetryFuncName, RelabelFuncName, BucketInstallFuncName, PinVar, CurrentPrefix, FrozenLatestVersion, ReadsLaunchConfigVar,
+		manifestPrintfFormat, ManifestVersionVar)
 }

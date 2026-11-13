@@ -1,6 +1,10 @@
 package sporedinstall
 
 import (
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +25,21 @@ func (f *fixture) copyTo(prefix string) {
 	for _, suf := range []string{"", ".sha256", ".sig"} {
 		f.bodies[prefix+"/"+f.binary+suf] = f.bodies["/"+f.binary+suf]
 	}
+	// A versioned copy carries the release's manifest signature (#1597).
+	if _, v, ok := strings.Cut(prefix, "/spawn/versions/"); ok {
+		f.bodies[prefix+"/"+f.binary+".msig"] = f.manifestSig(f.binary, v, f.sum)
+	}
+}
+
+// manifestSig is the .msig a release publishes for name at version with sha.
+func (f *fixture) manifestSig(name, version, sha string) []byte {
+	f.t.Helper()
+	d := sha256.Sum256([]byte(ManifestText(name, version, sha)))
+	sig, err := ecdsa.SignASN1(rand.Reader, f.priv, d[:])
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return []byte(base64.StdEncoding.EncodeToString(sig) + "\n")
 }
 
 // runFromBuckets runs BucketInstallFuncName with the version pinned by
