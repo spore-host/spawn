@@ -4,95 +4,73 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
-// Cross-account EC2 reads are performed AS THE CALLER, not as this Lambda (#815).
+// Instance reads are made WITH THE CALLER'S OWN CREDENTIALS, in the caller's
+// own account, and nothing else (#1585).
 //
-// The member-account role's trust policy names
-// `Cognito_SpawnDashboard_Auth_Role` — the identity-pool role the browser assumes
-// — and has never named `SpawnDashboardLambdaRole`. The code drifted the other
-// way: main.go built one `aws.Config` from the Lambda's own credentials and passed
-// it everywhere, so the assume-role call was made by the Lambda and was denied.
-// That is why the dashboard's cross-account instance listing has never worked.
+// They used to assume SpawnDashboardCrossAccountReadRole in one hardcoded
+// member account (435415984226), with the caller's credentials (#815). That
+// role trusted Cognito_SpawnDashboard_Auth_Role, the identity-pool role every
+// Google, GitHub or Globus sign-in receives, so any of them could assume it
+// straight from the browser and DescribeInstances every tenant's spores there;
+// the spawn:iam-user filter this Lambda applies was the only isolation. The
+// identity-pool role lost the AssumeRole and its EC2 grants on 2026-11-11, and
+// the read role is retired: its setup script is deleted and the role itself
+// must be deleted by hand (CHANGELOG, #1585).
 //
-// The obvious repair — add the Lambda role to the trust and grant it
-// sts:AssumeRole — was rejected deliberately. It would create a standing role
-// able to read EVERY onboarded tenant's instances, assumed by a Lambda behind a
-// public API, growing in reach with each account onboarded. That is the shape of
-// the findings this audit spent its time removing (GHSA-qc2h-6qqf-wcm4's
-// fail-open ownership check, GHSA-7pm4-cqjg-vh2q's open front door).
-//
-// Acting as the caller inverts it: each user reads their own account with their
-// own permissions, this Lambda holds no cross-tenant access at all, and the trust
-// policy already in production is correct as written.
+// What replaces it holds no standing access at all. A caller whose
+// credentials can read EC2 (a portal sign-in, spore-portal-launch in its own
+// account; a CLI user's own keys) reads its own account with them, and IAM,
+// not this Lambda, bounds what it sees. A caller whose credentials cannot (an
+// identity-pool session) gets errNoCallerCredentials, before any EC2 call.
+// This Lambda's own role is never used for these reads.
 
-// errNoCallerCredentials means the request authenticated without usable
-// credentials — the API Gateway IAM path identifies a caller but yields nothing
-// to act with.
+// errNoCallerCredentials means the request carried no credentials that can
+// read instances: none at all (the API Gateway IAM path identifies a caller
+// but yields nothing to act with), or a Cognito identity-pool session, which
+// has no EC2 access by design.
 //
-// Failing here is deliberate. The alternative is falling back to this Lambda's own
-// credentials, which cannot succeed (the trust does not name it) and would be the
-// standing-privilege design if it ever did. An error that names the cause beats a
-// cross-account read that silently returns nothing.
+// Failing here is deliberate. The alternative is this Lambda's own
+// credentials, which would be a standing read of every tenant's instances from
+// behind a public API. An error that names the cause beats a read that
+// silently returns nothing.
 var errNoCallerCredentials = errors.New(
-	"cross-account read requires the caller's credentials; this request authenticated " +
-		"without them (X-AWS-Credentials absent), so there is nothing to act as")
+	"instance reads are made with the caller's own AWS credentials, and this request carried none " +
+		"that can read EC2 (a dashboard sign-in through the Cognito identity pool has no EC2 access); " +
+		"sign in through the portal, or use `spawn list`")
 
-// getCrossAccountRoleARN returns the IAM role ARN assumed for cross-account EC2
-// reads, in the account being read.
-func getCrossAccountRoleARN() string {
-	if v := os.Getenv("SPAWN_DASHBOARD_CROSS_ACCOUNT_ROLE"); v != "" {
-		return v
-	}
-	return "arn:aws:iam::435415984226:role/SpawnDashboardCrossAccountReadRole"
+// identityPoolSessionName is the role session name Cognito identity-pool
+// credentials (GetCredentialsForIdentity) always carry.
+const identityPoolSessionName = "CognitoIdentityCredentials"
+
+// isIdentityPoolSession reports whether arn is a Cognito identity-pool
+// session: arn:aws:sts::<acct>:assumed-role/<role>/CognitoIdentityCredentials.
+func isIdentityPoolSession(arn string) bool {
+	return strings.HasPrefix(arn, "arn:") && strings.Contains(arn, ":assumed-role/") && strings.HasSuffix(arn, "/"+identityPoolSessionName)
 }
 
-// getEC2ClientForRegion builds an EC2 client for region by assuming the
-// cross-account read role with the CALLER's credentials.
+// getEC2ClientForRegion builds an EC2 client for region on the CALLER's
+// credentials.
 //
-// callerCreds comes from the X-AWS-Credentials header the dashboard sends, after
-// getUserFromCredentialsHeader has already validated it against STS — so by the
-// time it reaches here it is a verified identity, not a claim.
-func getEC2ClientForRegion(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, region string) (*ec2.Client, error) {
+// callerCreds comes from the X-AWS-Credentials header, after
+// getUserFromCredentialsHeader has validated it against STS, so it is a
+// verified identity, not a claim.
+func getEC2ClientForRegion(ctx context.Context, callerCreds aws.CredentialsProvider, region string) (*ec2.Client, error) {
 	if callerCreds == nil {
 		return nil, errNoCallerCredentials
 	}
-
-	credsProvider := callerAssumeRoleProvider(cfg, callerCreds)
-
-	crossAccountCfg, err := config.LoadDefaultConfig(ctx,
+	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
-		config.WithCredentialsProvider(credsProvider),
+		config.WithCredentialsProvider(callerCreds),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("load config with cross-account credentials: %w", err)
+		return nil, fmt.Errorf("load config with the caller's credentials: %w", err)
 	}
-	return ec2.NewFromConfig(crossAccountCfg), nil
-}
-
-// callerAssumeRoleProvider assumes SpawnDashboardCrossAccountReadRole AS THE
-// CALLER. STS is called with the caller's credentials, so the AssumeRole is
-// attributed to them. This one line is the whole fix: everything else was
-// already right, including the member-account trust policy.
-//
-// Its own function so the IAM coverage gate can cut exactly this call out of
-// SpawnDashboardLambdaRole's inventory: the Lambda role never makes it, the
-// caller does (internal/iamcoverage principals, #1349). Keep it to the
-// caller-credential AssumeRole; anything else here would be hidden from the gate.
-func callerAssumeRoleProvider(cfg aws.Config, callerCreds aws.CredentialsProvider) *stscreds.AssumeRoleProvider {
-	stsClient := sts.NewFromConfig(cfg, func(o *sts.Options) {
-		o.Credentials = callerCreds
-	})
-	return stscreds.NewAssumeRoleProvider(stsClient, getCrossAccountRoleARN(), func(o *stscreds.AssumeRoleOptions) {
-		// Session name carries the caller, so CloudTrail in the member account
-		// shows which dashboard user read it rather than one shared identity.
-		o.RoleSessionName = "spawn-dashboard-caller"
-	})
+	return ec2.NewFromConfig(cfg), nil
 }

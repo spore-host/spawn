@@ -172,7 +172,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		if instanceID == "" {
 			return errorResponse(400, "Instance ID is required"), nil
 		}
-		return handleGetInstance(ctx, cfg, callerCreds, instanceID, cliIamArn)
+		return handleGetInstance(ctx, callerCreds, instanceID, cliIamArn)
 
 	case path == "/api/sweeps" && method == "GET":
 		return handleListSweeps(ctx, cfg, cliIamArn, teamID)
@@ -201,10 +201,10 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		if instanceID == "" {
 			return errorResponse(400, "Instance ID is required"), nil
 		}
-		return handleTerminateInstance(ctx, cfg, callerCreds, instanceID, cliIamArn)
+		return handleTerminateInstance(instanceID)
 
 	case path == "/api/cost-summary" && method == "GET":
-		return handleGetCostSummary(ctx, cfg, callerCreds, cliIamArn)
+		return handleGetCostSummary(ctx, callerCreds, cliIamArn)
 
 	case path == "/api/cost-history" && method == "GET":
 		days := 30
@@ -256,7 +256,10 @@ func handleListInstances(ctx context.Context, cfg aws.Config, callerCreds aws.Cr
 	}
 
 	// Query all regions in parallel (filtered by IAM user for per-user isolation)
-	instances, err := listInstances(ctx, cfg, callerCreds, cliIamArn, teamID)
+	instances, err := listInstances(ctx, callerCreds, cliIamArn, teamID)
+	if errors.Is(err, errNoCallerCredentials) {
+		return errorResponse(403, err.Error()), nil
+	}
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("Failed to list instances: %v", err)), nil
 	}
@@ -276,9 +279,12 @@ func handleListInstances(ctx context.Context, cfg aws.Config, callerCreds aws.Cr
 }
 
 // handleGetInstance handles GET /api/instances/{id}
-func handleGetInstance(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (events.APIGatewayProxyResponse, error) {
+func handleGetInstance(ctx context.Context, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (events.APIGatewayProxyResponse, error) {
 	// Get single instance (with per-user isolation check)
-	instance, err := getInstance(ctx, cfg, callerCreds, instanceID, cliIamArn)
+	instance, err := getInstance(ctx, callerCreds, instanceID, cliIamArn)
+	if errors.Is(err, errNoCallerCredentials) {
+		return errorResponse(403, err.Error()), nil
+	}
 	if err != nil {
 		return errorResponse(404, fmt.Sprintf("Instance not found: %v", err)), nil
 	}
