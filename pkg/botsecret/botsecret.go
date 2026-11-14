@@ -24,14 +24,18 @@
 // see Field.Open. spore-bot's migration sweep (spore-host/spore-host#611)
 // re-seals legacy values in place once the key exists.
 //
-// Rollout. The key behind DefaultKeyAlias is the switch between the two
-// formats. Until it exists, Seal stores the plaintext (the legacy format every
-// reader, old or new, handles) and logs that once; once it exists, every
-// writer seals. So a writer that ships before the readers that can decrypt
-// writes nothing they cannot read, and the key is created only after those
-// readers are deployed. Only KMS's NotFoundException for the default alias
-// means "not provisioned"; any other failure, or a missing key that was named
-// explicitly with SPORE_BOT_SECRETS_KMS_KEY, fails the write.
+// Fail closed (#1594). Every writer seals, and a write that cannot be sealed
+// fails. That includes the default key being absent: it used to mean "the
+// rollout window", in which Seal stored the plaintext and logged it once per
+// process, so deleting alias/spore-bot-secrets (a tofu variable flip, an
+// accidental delete, a self-hosted stack without the key) silently put every
+// new install's bot token, refresh token and webhook URL in the table in the
+// clear. Storing plaintext is now an explicit, per-process opt-in,
+// SPORE_BOT_ALLOW_UNSEALED_CREDENTIALS=1, honoured only for the default
+// alias's NotFoundException, and logged on every such write with
+// UnsealedLogMarker, so a metric filter can alarm on it. Any other failure,
+// or a missing key named explicitly with SPORE_BOT_SECRETS_KMS_KEY, fails the
+// write whatever the opt-in says.
 package botsecret
 
 import (
@@ -48,7 +52,7 @@ import (
 	"github.com/spore-host/spawn/pkg/security"
 )
 
-// logf reports the once-only notices below. A variable so tests can see them.
+// logf reports the notices below. A variable so tests can see them.
 var logf = log.Printf
 
 // notices remembers which once-only notices have been logged in this process.
@@ -94,6 +98,20 @@ const DefaultKeyAlias = "alias/spore-bot-secrets"
 // EnvKeyID overrides DefaultKeyAlias (key id, key ARN, alias name or alias ARN).
 const EnvKeyID = "SPORE_BOT_SECRETS_KMS_KEY"
 
+// EnvAllowUnsealed, set to exactly "1", lets a write store the plaintext when
+// the default key does not exist (#1594). Off by default: without it, such a
+// write fails. It exists for a self-hosted stack deliberately run without the
+// key, and is honoured for nothing else.
+const EnvAllowUnsealed = "SPORE_BOT_ALLOW_UNSEALED_CREDENTIALS"
+
+// UnsealedLogMarker begins the line logged for every credential stored
+// unsealed under EnvAllowUnsealed. Stable, so a CloudWatch metric filter can
+// match it and alarm.
+const UnsealedLogMarker = "SPORE_BOT_CREDENTIAL_STORED_UNSEALED"
+
+// allowUnsealed reports whether EnvAllowUnsealed opts this process in.
+func allowUnsealed() bool { return os.Getenv(EnvAllowUnsealed) == "1" }
+
 // KeyID returns the KMS key used to seal workspace credentials.
 func KeyID() string {
 	if v := os.Getenv(EnvKeyID); v != "" {
@@ -122,10 +140,11 @@ func (f Field) EncryptionContext(workspaceKey string) map[string]string {
 // fails, and it refuses a result security.IsEncrypted would not recognise,
 // because Open would then hand that value back as if it were the credential.
 //
-// The one case in which Seal returns the plaintext is the rollout window (see
-// the package doc): the key is the default alias and KMS reports that it does
-// not exist. That is the format written before #868, and the format every
-// deployed reader still handles; Seal logs it once per process.
+// Seal never returns the plaintext unless the process opted in with
+// EnvAllowUnsealed and the key is the default alias and KMS reports that it
+// does not exist (see the package doc). Each such write is logged with
+// UnsealedLogMarker. Without the opt-in, that case is an error like any other
+// (#1594).
 func (f Field) Seal(ctx context.Context, kmsClient security.KMSAPI, keyID, workspaceKey, plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
@@ -141,7 +160,13 @@ func (f Field) Seal(ctx context.Context, kmsClient security.KMSAPI, keyID, works
 	}
 	sealed, err := security.EncryptSecret(ctx, kmsClient, keyID, plaintext, f.EncryptionContext(workspaceKey))
 	if err != nil && notProvisioned(keyID, err) {
-		noticeOnce("unsealed", "botsecret: KMS key %s does not exist yet, so workspace credentials are stored unencrypted, as before #868; they are sealed once the key is created", keyID)
+		if !allowUnsealed() {
+			return "", fmt.Errorf("%s not stored: KMS key %s does not exist, and spawn stores no workspace credential unencrypted (#1594). "+
+				"Create the key (self-hosted: deployment/cloudformation/spore-bot.yaml), name another with %s, "+
+				"or, to accept plaintext credentials in the table, set %s=1: %w", f, keyID, EnvKeyID, EnvAllowUnsealed, err)
+		}
+		logf("%s: the %s of %s was stored UNENCRYPTED: KMS key %s does not exist and %s=1 allows it (#1594)",
+			UnsealedLogMarker, f, workspaceKey, keyID, EnvAllowUnsealed)
 		return plaintext, nil
 	}
 	if err != nil {
@@ -154,8 +179,9 @@ func (f Field) Seal(ctx context.Context, kmsClient security.KMSAPI, keyID, works
 }
 
 // notProvisioned reports whether err from sealing under keyID means the
-// default key has not been created yet. A key named with EnvKeyID is a
-// deliberate choice, so its absence is a misconfiguration, not a rollout.
+// default key does not exist: the one failure EnvAllowUnsealed may excuse. A
+// key named with EnvKeyID is a deliberate choice, so its absence is always a
+// misconfiguration.
 func notProvisioned(keyID string, err error) bool {
 	var nf *kmstypes.NotFoundException
 	return keyID == DefaultKeyAlias && errors.As(err, &nf)

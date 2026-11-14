@@ -331,9 +331,9 @@ func (ws *Workspace) IsTeams() bool {
 
 // PutWorkspace writes a workspace registration, replacing any existing one.
 // Every credential field is stored KMS-encrypted; without a KMS client (see
-// WithSecretsKMS) a non-empty credential is an error. The one exception is the
-// rollout window before the credentials key exists, in which the legacy
-// plaintext format is written and logged once (botsecret.Field.Seal).
+// WithSecretsKMS) a non-empty credential is an error, and so is a credentials
+// key that does not exist, unless the process opted in to plaintext with
+// botsecret.EnvAllowUnsealed (botsecret.Field.Seal, #1594).
 //
 // A Teams workspace with a signing secret is refused with
 // ErrTeamsSigningSecret before anything is encrypted or written.

@@ -285,24 +285,73 @@ func notFound() error {
 
 func aws(s string) *string { return &s }
 
-// Before the key exists (the rollout window), a write stores the legacy
-// plaintext format that every deployed reader handles, and says so once. This
-// is what lets the writers ship before the readers that can decrypt.
-func TestSeal_DefaultKeyNotProvisionedWritesLegacyFormatAndLogsOnce(t *testing.T) {
+// The default key's absence fails the write (#1594). It used to store the
+// plaintext and log once per process, so deleting the alias silently put new
+// credentials in the table in the clear.
+func TestSeal_DefaultKeyMissingFailsClosed(t *testing.T) {
 	t.Setenv(EnvKeyID, "")
+	t.Setenv(EnvAllowUnsealed, "")
 	logged := captureNotices(t)
 	f := &fakeKMS{encryptErr: notFound()}
 	for _, fld := range Fields() {
 		item := map[string]types.AttributeValue{}
-		if err := fld.Put(context.Background(), f, "", item, "slack#T1", legacyPlaintexts[fld]); err != nil {
-			t.Fatalf("%s: Put with no key yet = %v, want the legacy write", fld, err)
+		err := fld.Put(context.Background(), f, "", item, "slack#T1", legacyPlaintexts[fld])
+		if err == nil {
+			t.Fatalf("%s: Put with no key stored %q; want an error", fld, fld.Stored(item))
 		}
-		if got := fld.Stored(item); got != legacyPlaintexts[fld] {
-			t.Fatalf("%s: stored %q, want the plaintext (legacy format)", fld, got)
+		for _, want := range []string{DefaultKeyAlias, EnvAllowUnsealed} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error %q does not name %s", fld, err, want)
+			}
+		}
+		if _, set := item[fld.attribute]; set {
+			t.Fatalf("%s: Put stored %q after failing", fld, fld.Stored(item))
 		}
 	}
-	if len(*logged) != 1 || !strings.Contains((*logged)[0], DefaultKeyAlias) {
-		t.Fatalf("logged %q; want one notice naming %s", *logged, DefaultKeyAlias)
+	if len(*logged) != 0 {
+		t.Fatalf("logged %q; a refused write logs nothing", *logged)
+	}
+}
+
+// Only exactly "1" opts in: a typo or "true" must not reopen the plaintext
+// path.
+func TestSeal_AllowUnsealedNeedsExactlyOne(t *testing.T) {
+	t.Setenv(EnvKeyID, "")
+	captureNotices(t)
+	for _, v := range []string{"true", "yes", "0", " 1", "TRUE"} {
+		t.Setenv(EnvAllowUnsealed, v)
+		item := map[string]types.AttributeValue{}
+		if err := BotToken.Put(context.Background(), &fakeKMS{encryptErr: notFound()}, "", item, "slack#T1", legacyPlaintexts[BotToken]); err == nil {
+			t.Errorf("%s=%q: Put stored plaintext; only \"1\" opts in", EnvAllowUnsealed, v)
+		}
+	}
+}
+
+// With the explicit opt-in, a write stores the legacy plaintext format, and
+// every such write is logged with the marker an alarm matches, not once.
+func TestSeal_AllowUnsealedStoresPlaintextAndLogsEveryWrite(t *testing.T) {
+	t.Setenv(EnvKeyID, "")
+	t.Setenv(EnvAllowUnsealed, "1")
+	logged := captureNotices(t)
+	f := &fakeKMS{encryptErr: notFound()}
+	for i := 0; i < 2; i++ {
+		for _, fld := range Fields() {
+			item := map[string]types.AttributeValue{}
+			if err := fld.Put(context.Background(), f, "", item, "slack#T1", legacyPlaintexts[fld]); err != nil {
+				t.Fatalf("%s: Put with the opt-in = %v, want the plaintext write", fld, err)
+			}
+			if got := fld.Stored(item); got != legacyPlaintexts[fld] {
+				t.Fatalf("%s: stored %q, want the plaintext", fld, got)
+			}
+		}
+	}
+	if want := 2 * len(Fields()); len(*logged) != want {
+		t.Fatalf("logged %d lines, want %d (one per unsealed write): %q", len(*logged), want, *logged)
+	}
+	for _, l := range *logged {
+		if !strings.HasPrefix(l, UnsealedLogMarker+":") {
+			t.Errorf("log line %q does not start with %s", l, UnsealedLogMarker)
+		}
 	}
 }
 
@@ -310,6 +359,8 @@ func TestSeal_DefaultKeyNotProvisionedWritesLegacyFormatAndLogsOnce(t *testing.T
 // does not exist is a misconfiguration, and AccessDenied, a disabled key or a
 // throttle are not "not provisioned".
 func TestSeal_OnlyTheDefaultKeysAbsenceFallsBack(t *testing.T) {
+	// Even opted in: the opt-in excuses only the default key's absence.
+	t.Setenv(EnvAllowUnsealed, "1")
 	logged := captureNotices(t)
 	cases := map[string]struct {
 		env string
