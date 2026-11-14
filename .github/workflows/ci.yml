@@ -321,6 +321,20 @@ jobs:
           SPORE_BOT_EVENTS_SYNC: "1"
         run: go test -tags=spore_bot_sync -run 'TestSporeBotEventsVendoredCopyIsCurrent' -count=1 -v .
 
+      # OIDC trust inventory (#1601): infra/iam/github-oidc/ holds the
+      # expected trust of every role a workflow assumes and who may kms:Sign
+      # with the spored signing key. `oidctrust check` holds the files to their
+      # rules (offline); the root test holds the workflows to the files; the
+      # sync step holds spore-host's copy of the same trusts to this one.
+      - name: OIDC trust inventory
+        run: |
+          go -C scripts run ./oidctrust check
+          go test -exec "$RUNNER_TEMP/hermetic-exec" -run 'TestWorkflowsAssumeOnlyInventoriedRolesWithTheirTrustsSub' -count=1 -v .
+      - name: OIDC trust inventory sync (fetches spore-host main)
+        env:
+          OIDC_TRUST_SYNC: "1"
+        run: go test -tags=oidc_trust_sync -run 'TestOIDCTrustsAgreeWithSporeHost' -count=1 -v .
+
       # Nested modules: the root `go test ./...` does NOT descend into a
       # directory with its own go.mod, so their tests would otherwise never run
       # in CI (#136). Build, vet, and test each one.

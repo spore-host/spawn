@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test fails on any workflow without a
   read-only top-level block, on any write in a workflow that runs on pull
   requests, and on `id-token: write` in a job that uses no OIDC token.
+- The trust policies of the two AWS roles spawn's workflows assume, and who
+  may sign with the spored signing key, are now written down in
+  `infra/iam/github-oidc/` (#1601). The release role, which holds `kms:Sign`
+  on the key every instance trusts, was hand-managed with its trust in no
+  file. CI checks the expected trusts (one exact ref or environment, or a
+  `v*` tag pattern; `aud` pinned), that every workflow assumes only a listed
+  role in the trigger or environment its trust names, that only the release
+  role runs `aws kms sign`, and that spore-host's copy agrees.
+  `go -C scripts run ./oidctrust live` compares `aws iam get-role`,
+  `aws kms get-key-policy` and spawn's tag rulesets against it, read-only;
+  the README there says what to run and how to close what it finds.
 
 ## [0.165.0] - 2026-11-13
 

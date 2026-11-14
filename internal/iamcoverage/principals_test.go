@@ -775,6 +775,10 @@ func TestEveryMainPackageIsAPrincipal(t *testing.T) {
 		// TestEveryLambdaCallIsGrantedByTheCIRole reads every subcommand it can
 		// invoke and checks each against scripts/setup-lambda-deploy-ci-role.sh.
 		"scripts/deploylambdas": "the CI Lambda deployer (#1445), gated against its role by its own test",
+		// Compares files an operator fetched (get-role, get-key-policy, the
+		// rulesets) with infra/iam/github-oidc; reads files only, calls no AWS
+		// or GitHub API (#1601).
+		"scripts/oidctrust": "the OIDC trust inventory checker (#1601), which calls no AWS API",
 	}
 	var found []string
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {

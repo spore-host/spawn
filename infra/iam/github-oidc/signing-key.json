@@ -1,0 +1,27 @@
+{
+  "_about": "The spored signing key (#1601): the KMS key whose public half is compiled into spawn as pkg/sporedinstall.SigningKeyPEM, and which signs every spored binary, spored manifest and bootstrap body the release publishes. Whoever can call kms:Sign on it can make an artifact every spawn instance accepts as authentic. scripts/oidctrust compares a live key policy against `signers` (README.md).",
+  "key_arn": "arn:aws:kms:us-east-1:966362334030:key/7b28df72-c92f-4d0c-97e3-7696e04bafd3",
+  "alias": "alias/spored-signing",
+  "account": "966362334030",
+  "variables": [
+    "vars.SPORED_SIGNING_KEY_ID"
+  ],
+  "signers": [
+    "arn:aws:iam::966362334030:role/GitHubActions-spore-host-release"
+  ],
+  "why": "Only the release role signs. The key policy may delegate to IAM (the account root principal), as the default key policy does, but then it must also hold the Deny below, or any principal in 966362334030 whose identity policy allows kms:Sign (or kms:*) on this key can sign spored.",
+  "required_deny": {
+    "Sid": "OnlyTheReleaseRoleSigns",
+    "Effect": "Deny",
+    "Principal": {
+      "AWS": "*"
+    },
+    "Action": "kms:Sign",
+    "Resource": "*",
+    "Condition": {
+      "ArnNotEquals": {
+        "aws:PrincipalArn": "arn:aws:iam::966362334030:role/GitHubActions-spore-host-release"
+      }
+    }
+  }
+}
