@@ -200,6 +200,24 @@ jobs:
               echo "::error::the KMS signature of $name does not verify against the key compiled into spawn; every launch by this release would retire itself at boot (#1415)"
               exit 1
             fi
+            # The manifest signature (#1597): the .sig covers the bytes alone, so
+            # this binds them to their name and version. The installers rebuild
+            # exactly this text (pkg/sporedinstall ManifestText; the printf
+            # format is held to it by TestReleaseSignsTheSporedManifest).
+            printf 'spored-manifest-v1\nname=%s\nversion=%s\nsha256=%s\n' "$name" "$VERSION" "$(cat "$out/$name.sha256")" > "$out/$name.manifest"
+            openssl dgst -sha256 -binary "$out/$name.manifest" > "$out/$name.manifest.digest"
+            aws kms sign \
+              --key-id "$SPORED_SIGNING_KEY_ID" \
+              --message-type DIGEST \
+              --signing-algorithm ECDSA_SHA_256 \
+              --message "fileb://$out/$name.manifest.digest" \
+              --query Signature --output text \
+              > "$out/$name.msig"
+            openssl base64 -d -A -in "$out/$name.msig" > "$out/$name.msig.der"
+            if ! openssl dgst -sha256 -verify "$out/signing-key.pem" -signature "$out/$name.msig.der" "$out/$name.manifest" >/dev/null; then
+              echo "::error::the manifest signature of $name does not verify against the key compiled into spawn; every launch by this release would retire itself at boot (#1597)"
+              exit 1
+            fi
           done
           # Every bucket in SPAWN_BINARY_BUCKETS, us-east-1 (the fallback) included:
           # a regional copy left stale and unsigned once beat the fallback and
@@ -209,7 +227,7 @@ jobs:
           # shellcheck disable=SC2016 # $1/$2 expand in xargs' bash, not here
           for bucket in "${BUCKETS[@]}"; do
             for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
-              for f in "$name" "$name.sha256" "$name.sig"; do
+              for f in "$name" "$name.sha256" "$name.sig" "$name.msig"; do
                 printf '%s\0%s\0' "$out/$f" "s3://${bucket}/spawn/versions/${VERSION}/$f"
               done
             done
@@ -230,7 +248,7 @@ jobs:
           for bucket in "${BUCKETS[@]}"; do
             mkdir -p "$back/$bucket"
             for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
-              for f in "$name" "$name.sha256" "$name.sig"; do
+              for f in "$name" "$name.sha256" "$name.sig" "$name.msig"; do
                 printf '%s\0%s\0' "s3://${bucket}/spawn/versions/${VERSION}/$f" "$back/$bucket/$f"
               done
             done
@@ -238,7 +256,7 @@ jobs:
           bad=0
           for bucket in "${BUCKETS[@]}"; do
             for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
-              for f in "$name" "$name.sha256" "$name.sig"; do
+              for f in "$name" "$name.sha256" "$name.sig" "$name.msig"; do
                 if ! cmp -s "$out/$f" "$back/$bucket/$f"; then
                   echo "::error::s3://${bucket}/spawn/versions/${VERSION}/$f is not the object just published (#1415)"
                   bad=1
@@ -365,7 +383,7 @@ jobs:
           # shellcheck disable=SC2016 # $1/$2 expand in xargs' bash, not here
           for bucket in "${BUCKETS[@]}"; do
             for name in spored-linux-amd64 spored-linux-arm64 spored-windows-amd64.exe; do
-              for f in "$name" "$name.sha256" "$name.sig"; do
+              for f in "$name" "$name.sha256" "$name.sig" "$name.msig"; do
                 printf '%s\0%s\0' "$out/$f" "s3://${bucket}/spawn/current/$f"
               done
             done

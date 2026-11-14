@@ -756,6 +756,15 @@ func fullBootPinned(t *testing.T, cfg BootstrapConfig, failSystemctl, pin, publi
 	srv.put("eu-west-1", publish+"/spored-linux-amd64", spored)
 	srv.put("eu-west-1", publish+"/spored-linux-amd64.sha256", []byte(hex.EncodeToString(sum[:])+"\n"))
 	srv.put("eu-west-1", publish+"/spored-linux-amd64.sig", []byte(base64.StdEncoding.EncodeToString(sig)+"\n"))
+	// A versioned spored carries the release's manifest signature (#1597).
+	if _, v, ok := strings.Cut(publish, "spawn/versions/"); ok {
+		md := sha256.Sum256([]byte(sporedinstall.ManifestText("spored-linux-amd64", v, hex.EncodeToString(sum[:]))))
+		msig, err := ecdsa.SignASN1(rand.Reader, priv, md[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.put("eu-west-1", publish+"/spored-linux-amd64.msig", []byte(base64.StdEncoding.EncodeToString(msig)+"\n"))
+	}
 
 	script, err := buildLinuxBootstrap(cfg, "", pin, BootstrapBody())
 	if err != nil {

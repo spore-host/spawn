@@ -28,16 +28,27 @@ function Get-Ec2Region {
 $region = Get-Ec2Region
 if (-not $region) { Write-Output 'WARNING: could not detect region, using us-east-1'; $region = 'us-east-1' }
 
+function Assert-SpawnAmazonSigned([string]$Path) {
+  $s = Get-AuthenticodeSignature -FilePath $Path
+  if ($s.Status -ne 'Valid') { throw "spawn: refusing $Path - its Authenticode signature is $($s.Status), not Valid (#1598)" }
+  $subject = $s.SignerCertificate.Subject
+  if ($subject -notmatch '(^|,\s*)O="?Amazon') { throw "spawn: refusing $Path - signed by '$subject', not Amazon (#1598)" }
+}
+
 $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
 if (-not (Test-Path $aws)) {
   $msi = "$env:TEMP\AWSCLIV2.msi"
   Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2.msi' -OutFile $msi -UseBasicParsing
+  # Amazon-signed or not run at all (#1598).
+  Assert-SpawnAmazonSigned $msi
   Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
 }
 
 $sporeSigVerify = $true
 $sporeKeyX = '399a389db5f9da5230fef6cf41d6b08725eb846f9c02d63950a7a4f98f4f19b0'
 $sporeKeyY = '47caa02e93174ca04e61736f19bdb703211892bacb078afca48b982bf3f42554'
+# The release whose manifest signature must cover the binary (#1597), or ''.
+$sporeExpectVersion = ''
 
 function ConvertFrom-SporeHex([string]$h) {
   $b = New-Object byte[] ($h.Length / 2)
@@ -65,16 +76,9 @@ function ConvertFrom-SporeDerSignature([byte[]]$der) {
   return ,$out
 }
 
-# Verify one downloaded spored.exe. Throws on any failure; returns nothing on success.
-function Test-SporeBinary([string]$exe, [string]$shaFile, [string]$sigFile) {
-  $want = (((Get-Content -Raw -Path $shaFile).Trim()) -split '\s+')[0].ToLowerInvariant()
-  if ($want.Length -ne 64) { throw "malformed .sha256 ($want)" }
-  $sha = [System.Security.Cryptography.SHA256]::Create()
-  $fs = [System.IO.File]::OpenRead($exe)
-  try { $digest = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
-  $got = (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
-  if ($got -ne $want) { throw "checksum mismatch (got $got, published $want)" }
-  if (-not $sporeSigVerify) { return }
+# Verify an ECDSA P-256 signature (base64 DER in $sigFile) over SHA-256 $digest
+# against the spore.host key. Throws when it does not verify.
+function Assert-SporeSignature([byte[]]$digest, [string]$sigFile, [string]$what) {
   $der = [Convert]::FromBase64String((Get-Content -Raw -Path $sigFile).Trim())
   $sig = ConvertFrom-SporeDerSignature $der
   $params = New-Object System.Security.Cryptography.ECParameters
@@ -85,8 +89,28 @@ function Test-SporeBinary([string]$exe, [string]$shaFile, [string]$sigFile) {
   $params.Q = $q
   $ec = [System.Security.Cryptography.ECDsa]::Create($params)
   try {
-    if (-not $ec.VerifyHash($digest, $sig)) { throw 'signature does not verify against the spore.host key' }
+    if (-not $ec.VerifyHash($digest, $sig)) { throw "$what does not verify against the spore.host key" }
   } finally { $ec.Dispose() }
+}
+
+# Verify one downloaded spored.exe. Throws on any failure; returns nothing on success.
+function Test-SporeBinary([string]$exe, [string]$shaFile, [string]$sigFile, [string]$msigFile) {
+  $want = (((Get-Content -Raw -Path $shaFile).Trim()) -split '\s+')[0].ToLowerInvariant()
+  if ($want.Length -ne 64) { throw "malformed .sha256 ($want)" }
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $fs = [System.IO.File]::OpenRead($exe)
+  try { $digest = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
+  $got = (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
+  if ($got -ne $want) { throw "checksum mismatch (got $got, published $want)" }
+  if (-not $sporeSigVerify) { return }
+  Assert-SporeSignature $digest $sigFile 'signature'
+  if (-not $sporeExpectVersion) { return }
+  # The .sig covers the bytes alone; the manifest binds them to this name and
+  # version, so an older signed spored at this release's path is refused (#1597).
+  $nl = [string][char]10
+  $manifest = 'spored-manifest-v1' + $nl + 'name=spored-windows-amd64.exe' + $nl + 'version=' + $sporeExpectVersion + $nl + 'sha256=' + $got + $nl
+  $md = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($manifest))
+  Assert-SporeSignature $md $msigFile "the manifest signature for spored-windows-amd64.exe $sporeExpectVersion"
 }
 
 # Try each source in order. A source counts only if its binary, .sha256 and (when
@@ -107,7 +131,7 @@ $sources = @(
 )
 foreach ($src in $sources) {
   $cand = Join-Path $tmp 'spored.exe'
-  Remove-Item -Force -ErrorAction SilentlyContinue $cand, "$cand.sha256", "$cand.sig"
+  Remove-Item -Force -ErrorAction SilentlyContinue $cand, "$cand.sha256", "$cand.sig", "$cand.msig"
   & $aws s3 cp $src.u $cand --region $src.r 2>$null
   if ($LASTEXITCODE -ne 0) { continue }
   & $aws s3 cp ($src.u + '.sha256') "$cand.sha256" --region $src.r 2>$null
@@ -115,9 +139,13 @@ foreach ($src in $sources) {
   if ($sporeSigVerify) {
     & $aws s3 cp ($src.u + '.sig') "$cand.sig" --region $src.r 2>$null
     if ($LASTEXITCODE -ne 0) { Write-Output "spawn: no .sig at $($src.u) - skipping this source"; continue }
+    if ($sporeExpectVersion) {
+      & $aws s3 cp ($src.u + '.msig') "$cand.msig" --region $src.r 2>$null
+      if ($LASTEXITCODE -ne 0) { Write-Output "spawn: no .msig at $($src.u) - skipping this source (#1597)"; continue }
+    }
   }
   try {
-    Test-SporeBinary $cand "$cand.sha256" "$cand.sig"
+    Test-SporeBinary $cand "$cand.sha256" "$cand.sig" "$cand.msig"
   } catch {
     Write-Output "spawn: REFUSING spored from $($src.u): $_"
     continue

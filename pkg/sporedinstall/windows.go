@@ -69,11 +69,17 @@ func WindowsInstallScriptFor(keyPEM, version string, readsLaunchConfig bool) (st
 	if !readsLaunchConfig {
 		sources += ",\n" + windowsFrozenSources
 	}
+	expect := ""
 	if version != "" {
 		if ReleaseVersion(version) != version {
 			return "", fmt.Errorf("spored version %q is not a spawn release", version)
 		}
 		sources = strings.ReplaceAll(windowsVersionedSources, "__VERSION__", version)
+		// A versioned install from ManifestFloor on is bound to its name and
+		// version by the release's manifest signature (#1597).
+		if versionAtLeast(version, ManifestFloor) {
+			expect = version
+		}
 	}
 	sigVerify := "$false"
 	keyX, keyY := "", ""
@@ -89,6 +95,8 @@ func WindowsInstallScriptFor(keyPEM, version string, readsLaunchConfig bool) (st
 		"__KEY_X__", keyX,
 		"__KEY_Y__", keyY,
 		"__SOURCES__", sources,
+		"__EXPECT_VERSION__", expect,
+		"__MANIFEST_HEADER__", manifestHeader,
 	).Replace(windowsInstallTemplate), nil
 }
 
@@ -142,6 +150,8 @@ const windowsInstallTemplate = `
 $sporeSigVerify = __SIG_VERIFY__
 $sporeKeyX = '__KEY_X__'
 $sporeKeyY = '__KEY_Y__'
+# The release whose manifest signature must cover the binary (#1597), or ''.
+$sporeExpectVersion = '__EXPECT_VERSION__'
 
 function ConvertFrom-SporeHex([string]$h) {
   $b = New-Object byte[] ($h.Length / 2)
@@ -169,16 +179,9 @@ function ConvertFrom-SporeDerSignature([byte[]]$der) {
   return ,$out
 }
 
-# Verify one downloaded spored.exe. Throws on any failure; returns nothing on success.
-function Test-SporeBinary([string]$exe, [string]$shaFile, [string]$sigFile) {
-  $want = (((Get-Content -Raw -Path $shaFile).Trim()) -split '\s+')[0].ToLowerInvariant()
-  if ($want.Length -ne 64) { throw "malformed .sha256 ($want)" }
-  $sha = [System.Security.Cryptography.SHA256]::Create()
-  $fs = [System.IO.File]::OpenRead($exe)
-  try { $digest = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
-  $got = (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
-  if ($got -ne $want) { throw "checksum mismatch (got $got, published $want)" }
-  if (-not $sporeSigVerify) { return }
+# Verify an ECDSA P-256 signature (base64 DER in $sigFile) over SHA-256 $digest
+# against the spore.host key. Throws when it does not verify.
+function Assert-SporeSignature([byte[]]$digest, [string]$sigFile, [string]$what) {
   $der = [Convert]::FromBase64String((Get-Content -Raw -Path $sigFile).Trim())
   $sig = ConvertFrom-SporeDerSignature $der
   $params = New-Object System.Security.Cryptography.ECParameters
@@ -189,8 +192,28 @@ function Test-SporeBinary([string]$exe, [string]$shaFile, [string]$sigFile) {
   $params.Q = $q
   $ec = [System.Security.Cryptography.ECDsa]::Create($params)
   try {
-    if (-not $ec.VerifyHash($digest, $sig)) { throw 'signature does not verify against the spore.host key' }
+    if (-not $ec.VerifyHash($digest, $sig)) { throw "$what does not verify against the spore.host key" }
   } finally { $ec.Dispose() }
+}
+
+# Verify one downloaded spored.exe. Throws on any failure; returns nothing on success.
+function Test-SporeBinary([string]$exe, [string]$shaFile, [string]$sigFile, [string]$msigFile) {
+  $want = (((Get-Content -Raw -Path $shaFile).Trim()) -split '\s+')[0].ToLowerInvariant()
+  if ($want.Length -ne 64) { throw "malformed .sha256 ($want)" }
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $fs = [System.IO.File]::OpenRead($exe)
+  try { $digest = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
+  $got = (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
+  if ($got -ne $want) { throw "checksum mismatch (got $got, published $want)" }
+  if (-not $sporeSigVerify) { return }
+  Assert-SporeSignature $digest $sigFile 'signature'
+  if (-not $sporeExpectVersion) { return }
+  # The .sig covers the bytes alone; the manifest binds them to this name and
+  # version, so an older signed spored at this release's path is refused (#1597).
+  $nl = [string][char]10
+  $manifest = '__MANIFEST_HEADER__' + $nl + 'name=spored-windows-amd64.exe' + $nl + 'version=' + $sporeExpectVersion + $nl + 'sha256=' + $got + $nl
+  $md = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($manifest))
+  Assert-SporeSignature $md $msigFile "the manifest signature for spored-windows-amd64.exe $sporeExpectVersion"
 }
 
 # Try each source in order. A source counts only if its binary, .sha256 and (when
@@ -208,7 +231,7 @@ __SOURCES__
 )
 foreach ($src in $sources) {
   $cand = Join-Path $tmp 'spored.exe'
-  Remove-Item -Force -ErrorAction SilentlyContinue $cand, "$cand.sha256", "$cand.sig"
+  Remove-Item -Force -ErrorAction SilentlyContinue $cand, "$cand.sha256", "$cand.sig", "$cand.msig"
   & $aws s3 cp $src.u $cand --region $src.r 2>$null
   if ($LASTEXITCODE -ne 0) { continue }
   & $aws s3 cp ($src.u + '.sha256') "$cand.sha256" --region $src.r 2>$null
@@ -216,9 +239,13 @@ foreach ($src in $sources) {
   if ($sporeSigVerify) {
     & $aws s3 cp ($src.u + '.sig') "$cand.sig" --region $src.r 2>$null
     if ($LASTEXITCODE -ne 0) { Write-Output "spawn: no .sig at $($src.u) - skipping this source"; continue }
+    if ($sporeExpectVersion) {
+      & $aws s3 cp ($src.u + '.msig') "$cand.msig" --region $src.r 2>$null
+      if ($LASTEXITCODE -ne 0) { Write-Output "spawn: no .msig at $($src.u) - skipping this source (#1597)"; continue }
+    }
   }
   try {
-    Test-SporeBinary $cand "$cand.sha256" "$cand.sig"
+    Test-SporeBinary $cand "$cand.sha256" "$cand.sig" "$cand.msig"
   } catch {
     Write-Output "spawn: REFUSING spored from $($src.u): $_"
     continue
@@ -284,11 +311,13 @@ function Get-Ec2Region {
 }
 $region = Get-Ec2Region
 if (-not $region) { Write-Output 'WARNING: could not detect region, using us-east-1'; $region = 'us-east-1' }
-
+` + WindowsAmazonSignedFunc + `
 $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
 if (-not (Test-Path $aws)) {
   $msi = "$env:TEMP\AWSCLIV2.msi"
   Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2.msi' -OutFile $msi -UseBasicParsing
+  # Amazon-signed or not run at all (#1598).
+  Assert-SpawnAmazonSigned $msi
   Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
 }
 `
@@ -299,3 +328,37 @@ if (-not $sporedInstalled) { exit 1 }
 & $exe service start
 Write-Output 'spored installed and started.'
 `
+
+// versionAtLeast reports whether release a (X.Y.Z) is b or newer. A field that
+// is not a number counts as newer, as in the bash installer's spore_version_ge,
+// so a malformed version is held to the newer rules.
+func versionAtLeast(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		x, y := field(pa, i), field(pb, i)
+		if x < 0 || y < 0 {
+			return true
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return true
+}
+
+func field(p []string, i int) int {
+	if i >= len(p) {
+		return 0
+	}
+	n := 0
+	if p[i] == "" {
+		return -1
+	}
+	for _, r := range p[i] {
+		if r < '0' || r > '9' {
+			return -1
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}

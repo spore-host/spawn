@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/spore-host/spawn/pkg/sporedinstall"
 )
 
 // spored is published to spawn/versions/<v>/ BEFORE GoReleaser makes the CLI
@@ -339,7 +341,15 @@ func TestReleasePublishesTheSignedVersionedSpored(t *testing.T) {
 			if err != nil || !ecdsa.VerifyASN1(&keys.key.PublicKey, sum[:], der) {
 				t.Errorf("%s: %s.sig %q does not verify against the compiled-in key", bucket, name, sig)
 			}
-			for _, f := range []string{name, name + ".sha256", name + ".sig"} {
+			// The manifest signature binds the bytes to the name and version
+			// (#1597), over exactly the text the installers rebuild.
+			msig, _ := sb.object(bucket, "spawn/versions/9.9.9/"+name+".msig")
+			mder, err := base64.StdEncoding.DecodeString(strings.TrimSpace(msig))
+			md := sha256.Sum256([]byte(sporedinstall.ManifestText(name, "9.9.9", hexString(sum[:]))))
+			if err != nil || !ecdsa.VerifyASN1(&keys.key.PublicKey, md[:], mder) {
+				t.Errorf("%s: %s.msig %q does not verify over the manifest of %s 9.9.9 (#1597)", bucket, name, msig, name)
+			}
+			for _, f := range []string{name, name + ".sha256", name + ".sig", name + ".msig"} {
 				want = append(want, bucket+"/spawn/versions/9.9.9/"+f)
 			}
 		}
@@ -465,7 +475,7 @@ func TestReleaseUpdatesLatestOnlyOnceTheReleaseIsPublished(t *testing.T) {
 			}
 			for _, bucket := range sb.buckets() {
 				for n := range sporedDist {
-					for _, f := range []string{n, n + ".sha256", n + ".sig"} {
+					for _, f := range []string{n, n + ".sha256", n + ".sig", n + ".msig"} {
 						v, _ := sb.object(bucket, "spawn/versions/9.9.9/"+f)
 						if got, ok := sb.object(bucket, "spawn/current/"+f); !ok || got != v {
 							t.Errorf("%s/spawn/current/%s is %q (present %v), want the published versioned %s", bucket, f, got, ok, f)

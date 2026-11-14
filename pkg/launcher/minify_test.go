@@ -172,7 +172,14 @@ func TestMinifyShellKeepsData(t *testing.T) {
 // gzipped bytes; the margin had 101 to spare, so the bare bootstrap
 // (8067) was 3 over it after compacting the shell. Same reasoning as above:
 // it lands in the published body, not a release launch's stub.
-const bootstrapGzipBudget = 8*1024 + 896 + 16
+//
+// Raised by 160 for #1597, in review: the verified spored install now also
+// checks the release's manifest signature, which binds the binary to its name
+// and version (one printf, one fetch, one openssl verify), about 168 gzipped
+// bytes; the margin had 13 to spare after the version comparison moved out of
+// the shell into Go (PinScriptFor). It lands in the published body; a release
+// launch's stub gains one variable.
+const bootstrapGzipBudget = 8*1024 + 896 + 16 + 160
 
 // bootstrapGzipMargin is the headroom under bootstrapGzipBudget the bare
 // bootstrap must keep (#1422). It reached 10 bytes before anything flagged
