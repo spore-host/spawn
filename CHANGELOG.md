@@ -53,6 +53,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   web sign-in to that user's CLI identity, sweeps, watches and teams. Such a
   caller is now resolved from a verified email claim on every request; IAM
   user ARNs, which are per-person, are still cached.
+- Writing a chat workspace credential (`spawn notify workspace add`, the
+  dashboard's Slack OAuth install, token refresh) now fails when the KMS key
+  `alias/spore-bot-secrets` does not exist, instead of storing the bot token,
+  refresh token, signing secret or webhook URL unencrypted with one log line
+  per process (#1594). A deployment that deliberately runs without the key
+  must set `SPORE_BOT_ALLOW_UNSEALED_CREDENTIALS=1`. Each write it then lets
+  through is logged with `SPORE_BOT_CREDENTIAL_STORED_UNSEALED`, which a
+  metric filter can alarm on. A key named with `SPORE_BOT_SECRETS_KMS_KEY`
+  that does not exist, and any other KMS failure, still fail the write.
+- The self-hosting template `deployment/cloudformation/spore-bot.yaml` no
+  longer puts the bot's app-level secrets (`SLACK_SIGNING_SECRET`,
+  `BOT_OAUTH_SECRET`, `SPORE_SLACK_CLIENT_SECRET`, `TEAMS_APP_SECRET`,
+  `TWILIO_AUTH_TOKEN`) in the function's environment, where anyone with
+  `lambda:GetFunctionConfiguration` could read them (#1591). The stack writes
+  them into one Secrets Manager secret, passes its ARN as
+  `BOT_APP_SECRETS_ARN`, and grants `secretsmanager:GetSecretValue` on that
+  secret alone. The bot must be a build that reads `BOT_APP_SECRETS_ARN`
+  (spore-host/spore-host#740). Deploy that build first, or in the same stack
+  update.
 
 ## [0.165.0] - 2026-11-13
 

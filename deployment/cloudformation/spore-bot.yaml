@@ -24,15 +24,28 @@ Description: 'spore-bot — Slack/Teams/Discord/SMS chat interface for instance 
 # AWS call.
 #
 # Workspace credentials (#868). The stack creates the KMS key
-# alias/spore-bot-secrets; once it exists, every writer (the spawn CLI, the
-# bot) stores credentials encrypted, and before it exists they store them in
-# the old plaintext format. So on an existing stack, update the bot's code to a
+# alias/spore-bot-secrets, and every writer (the spawn CLI, the bot) stores
+# credentials encrypted with it. Since spawn#1594 the spawn writers refuse to
+# store one when the key does not exist, unless the writing process sets
+# SPORE_BOT_ALLOW_UNSEALED_CREDENTIALS=1 (each such write is then logged with
+# SPORE_BOT_CREDENTIAL_STORED_UNSEALED). So on an existing stack, update the bot's code to a
 # build that can decrypt (spore-host/spore-host#611) BEFORE, or in the same
 # update as, the change that creates the key: upload the new zip under a NEW
 # LambdaCodeKey, so CloudFormation sees the code change. Upgrade the spawn CLI
 # too: an older CLI cannot use an encrypted bot token (`notify register
 # --user <email>`). The hourly SealLegacyCredentials schedule then re-encrypts
 # the existing plaintext values in place; there is no manual migration step.
+#
+# App-level secrets (spawn#1591). SlackSigningSecret, BotOAuthSecret,
+# SlackClientSecret, TeamsAppSecret and TwilioAuthToken are NoEcho parameters
+# that the stack writes into ONE Secrets Manager secret (BotAppSecrets, a JSON
+# object keyed by the env var names the bot reads), never into the function's
+# environment, which anyone with lambda:GetFunctionConfiguration can read. The
+# function gets BOT_APP_SECRETS_ARN and secretsmanager:GetSecretValue on that
+# secret only. The bot must be a build that loads BOT_APP_SECRETS_ARN
+# (spore-host/spore-host#740); deploy that build BEFORE, or in the same update
+# as, this template, or the bot starts with no app-level secrets and fails
+# closed (Slack signature checks, OAuth state, Teams and SMS all refuse).
 #
 # Secrets are NoEcho parameters. On a stack UPDATE pass each one with
 # UsePreviousValue=true (or re-supply it): a parameter omitted from an update
@@ -314,6 +327,26 @@ Resources:
         - Key: Application
           Value: spore-bot
 
+  # ── Secrets Manager: app-level secrets (spawn#1591) ──────────────────────────
+  # One JSON object, keyed by the env var each value used to be. The values
+  # are NoEcho parameters; they must not contain a double quote or a backslash,
+  # which would break the JSON (Slack, Teams and Twilio secrets do not).
+
+  BotAppSecrets:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub '${AWS::StackName}/app-secrets'
+      Description: spore-bot app-level secrets (Slack signing and client secrets, OAuth state key, Teams app secret, Twilio auth token)
+      SecretString: !Sub |
+        {"SLACK_SIGNING_SECRET":"${SlackSigningSecret}","BOT_OAUTH_SECRET":"${BotOAuthSecret}","SPORE_SLACK_CLIENT_SECRET":"${SlackClientSecret}","TEAMS_APP_SECRET":"${TeamsAppSecret}","TWILIO_AUTH_TOKEN":"${TwilioAuthToken}"}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: spore-bot
+
   # ── Lambda ────────────────────────────────────────────────────────────────────
 
   SporeBotFunction:
@@ -351,17 +384,15 @@ Resources:
           BOT_CONNECT_CODE_TTL_HOURS: !Ref ConnectCodeTTLHours
           BOT_SLASH_COMMAND: !Ref SlashCommand
           DISCORD_PUBLIC_KEY: !Ref DiscordPublicKey
-          SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
-          BOT_OAUTH_SECRET: !Ref BotOAuthSecret
           SPORE_SLACK_CLIENT_ID: !Ref SlackClientId
-          SPORE_SLACK_CLIENT_SECRET: !Ref SlackClientSecret
           SPORE_OAUTH_SUCCESS_URL: !Ref OAuthSuccessUrl
           TEAMS_APP_ID: !Ref TeamsAppId
-          TEAMS_APP_SECRET: !Ref TeamsAppSecret
           TEAMS_TENANT_ID: !Ref TeamsTenantId
           TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
-          TWILIO_AUTH_TOKEN: !Ref TwilioAuthToken
           TWILIO_NUMBER_SPORE: !Ref TwilioNumberSpore
+          # The five app-level secrets, as one Secrets Manager secret
+          # (spawn#1591), not as environment variables.
+          BOT_APP_SECRETS_ARN: !Ref BotAppSecrets
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref BotRegistryTable
@@ -400,6 +431,11 @@ Resources:
                     - spore-bot-signing-secret
                     - spore-bot-bot-token
                     - spore-bot-incoming-webhook-url
+            # The app-level secrets (spawn#1591): this one secret only.
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref BotAppSecrets
             - Effect: Allow
               Action:
                 - sts:AssumeRole
