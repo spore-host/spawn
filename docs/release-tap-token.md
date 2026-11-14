@@ -2,8 +2,9 @@
 
 The release workflow (`.github/workflows/release.yaml`) runs GoReleaser, whose
 last phase pushes the updated formula/manifest to the tap repos so `brew upgrade`
-/ `scoop update` serve the new version. That push authenticates with two repo
-secrets on `spore-host/spawn`:
+/ `scoop update` serve the new version. That push authenticates with two
+**org** secrets (selected-repository visibility; spawn is one of the
+repositories that can read them):
 
 - `HOMEBREW_TAP_GITHUB_TOKEN` → pushes to `spore-host/homebrew-tap`
 - `SCOOP_BUCKET_GITHUB_TOKEN` → pushes to `spore-host/scoop-bucket`
@@ -26,7 +27,12 @@ access).
 1. GitHub → Settings → Developer settings → **Fine-grained tokens** → **Generate new token**.
 2. **Resource owner:** `spore-host`.
 3. **Repository access → Only select repositories:** `spore-host/homebrew-tap`
-   **and** `spore-host/scoop-bucket` (both).
+   for `HOMEBREW_TAP_GITHUB_TOKEN`; mint a second token with only
+   `spore-host/scoop-bucket` for `SCOOP_BUCKET_GITHUB_TOKEN`. Never include
+   `spore-host/spawn`: a token that can write spawn can push a `v*` tag, and
+   with it reach the spored signing key (#1602). The expected scope of each is
+   in [`infra/github-tokens/tokens.json`](../infra/github-tokens/tokens.json),
+   which CI holds the workflows to.
 4. **Permissions → Repository permissions → Contents: Read and write.** Nothing
    else (Metadata:read is auto-added — fine). This is all GoReleaser's
    clone→commit→push needs.
@@ -37,15 +43,16 @@ access).
 
 ## Install the token (either you or hand it to the assistant)
 
-Set both secrets on `spore-host/spawn` to the new PAT:
+Set each org secret to its token, keeping its current repository list (read
+it with `gh api orgs/spore-host/actions/secrets/<NAME>/repositories`):
 
 ```bash
-printf '%s' "<the-new-PAT>" | gh secret set HOMEBREW_TAP_GITHUB_TOKEN --repo spore-host/spawn
-printf '%s' "<the-new-PAT>" | gh secret set SCOOP_BUCKET_GITHUB_TOKEN --repo spore-host/spawn
+printf '%s' "<the-homebrew-tap-PAT>" | gh secret set HOMEBREW_TAP_GITHUB_TOKEN --org spore-host --visibility selected --repos spawn,truffle,lagotto,calque,spore-host-mcp
+printf '%s' "<the-scoop-bucket-PAT>" | gh secret set SCOOP_BUCKET_GITHUB_TOKEN --org spore-host --visibility selected --repos spawn,truffle,lagotto,calque,spore-host-mcp
 ```
 
-(One PAT scoped to both repos can back both secrets; or mint two if you prefer
-per-tap isolation.)
+A GitHub App minted per run would remove the expiry problem altogether; see
+[`infra/github-tokens/README.md`](../infra/github-tokens/README.md).
 
 ## Verify
 
