@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/spore-host/spawn/internal/shellcheckgate"
@@ -32,6 +33,14 @@ func TestCmdScripts_Shellcheck(t *testing.T) {
 	t.Run("app DCV command", func(t *testing.T) {
 		shellcheckgate.Check(t, "cmd.buildDCVUserDataWithInit",
 			dec(t, buildDCVUserData("/opt/paraview/bin/paraview --data '/data/my set'", "console")))
+	})
+	t.Run("app DCV install, pinned (#1620)", func(t *testing.T) {
+		// The pinned path renders nothing until installer-pins.yml has run,
+		// so check it with stand-in pins.
+		shellcheckgate.Check(t, "cmd.dcvInstallBlockWith", "#!/bin/bash\n"+dcvInstallBlockWith(dcvPins{
+			version: dcvVersion, sha256x8664: strings.Repeat("a", 64), sha256aarch64: strings.Repeat("b", 64),
+			keyFingerprints: strings.Repeat("C", 40) + " " + strings.Repeat("D", 40),
+		}))
 	})
 	t.Run("app desktop", func(t *testing.T) {
 		shellcheckgate.Check(t, "cmd.buildDesktopDCVUserData", dec(t, buildDesktopDCVUserData("console")))

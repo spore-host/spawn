@@ -877,10 +877,41 @@ chmod +x %s
 
 // Amazon DCV version installed at boot. The CloudFront layout is
 // <majorMinor>/Servers/nice-dcv-<version>-amzn2023-<arch>.tgz. Bump both together.
+//
+// The pins below (#1620) are the tarballs' sha256s for dcvPinVersion and the
+// primary fingerprints of the DCV signing key (NICE-GPG-KEY, sorted, space-
+// separated). They are written by .github/workflows/installer-pins.yml
+// through scripts/installerpin, never by hand: it downloads the key and both
+// tarballs, requires every RPM inside to verify against that key, and opens a
+// PR. Empty until its first run, and while empty the boot installs as before
+// (key import and rpm -K only). Once set, the boot installs nothing unless the
+// key's fingerprints and the tarball's sha256 are the pinned ones. Bumping
+// dcvVersion without them fails TestInstallerPinsAreWellFormed until the
+// workflow re-pins.
 const (
 	dcvVersion           = "2025.0-20103"
 	dcvVersionMajorMinor = "2025.0"
+
+	dcvPinVersion       = ""
+	dcvTGZSHA256x86_64  = ""
+	dcvTGZSHA256aarch64 = ""
+	dcvKeyFingerprints  = ""
 )
+
+const dcvOrigin = "https://d1uj6qtbmh3dt5.cloudfront.net"
+
+// dcvPins is the pinned DCV artifacts (#1620); the zero value is "not pinned".
+type dcvPins struct {
+	version, sha256x8664, sha256aarch64, keyFingerprints string
+}
+
+func currentDCVPins() dcvPins {
+	return dcvPins{dcvPinVersion, dcvTGZSHA256x86_64, dcvTGZSHA256aarch64, dcvKeyFingerprints}
+}
+
+func (p dcvPins) set() bool {
+	return p.version != "" && p.sha256x8664 != "" && p.sha256aarch64 != "" && p.keyFingerprints != ""
+}
 
 // dcvInstallBlock returns an idempotent bash snippet that installs the Amazon DCV
 // server on an AL2023 base at boot (spore-host#286/#389). The AWS GPU DLAMI base
@@ -890,7 +921,28 @@ const (
 // install is skipped. Uses indexed verbs so the version appears in several
 // places without repeating args; the caller injects the result as one %s, so no
 // bash '%' expansion leaks into the outer Sprintf template.
-func dcvInstallBlock() string {
+func dcvInstallBlock() string { return dcvInstallBlockWith(currentDCVPins()) }
+
+// dcvInstallBlockWith is dcvInstallBlock for the given pins, so the pinned
+// path is tested before the workflow has pinned anything.
+func dcvInstallBlockWith(p dcvPins) string {
+	pinVars, keyCheck, tgzCheck := "", "", ""
+	if p.set() {
+		pinVars = fmt.Sprintf(`  # Pinned by .github/workflows/installer-pins.yml (#1620).
+  DCV_KEY_FPRS='%s'
+  case "${DCV_MACHINE}" in
+    x86_64) DCV_TGZ_SHA256='%s' ;;
+    aarch64) DCV_TGZ_SHA256='%s' ;;
+    *) DCV_TGZ_SHA256='' ;;
+  esac
+`, p.keyFingerprints, p.sha256x8664, p.sha256aarch64)
+		keyCheck = `  elif [ "$(gpg --batch --show-keys --with-colons /tmp/dcv-key.asc 2>/dev/null | awk -F: '$1 == "pub" { p = 1; next } p && $1 == "fpr" { print $10; p = 0 }' | sort | paste -sd ' ' -)" != "${DCV_KEY_FPRS}" ]; then
+    echo "WARNING: the Amazon DCV signing key is not the pinned one (${DCV_KEY_FPRS}); not installing DCV — the DCV session will not start"
+`
+		tgzCheck = `  elif [ -z "${DCV_TGZ_SHA256}" ] || ! printf '%s  /tmp/dcv.tgz\n' "${DCV_TGZ_SHA256}" | sha256sum -c --status -; then
+    echo "WARNING: ${DCV_TGZ} is not the pinned sha256 (${DCV_TGZ_SHA256:-none for ${DCV_MACHINE}}); not installing it — the DCV session will not start"
+`
+	}
 	return fmt.Sprintf(`# Install Amazon DCV if not already present (spore-host#286/#389). The AWS GPU
 # DLAMI base has the NVIDIA driver but no DCV. DCV is free on EC2 (self-licenses
 # via S3). Idempotent — a pre-baked base with DCV already installed skips this.
@@ -900,14 +952,20 @@ if ! command -v dcv >/dev/null 2>&1; then
   # GL/X libs DCV virtual sessions render against (NVIDIA GL comes via nice-dcv-gl).
   dnf install -y mesa-dri-drivers mesa-libGL glx-utils xterm >/dev/null 2>&1 || true
   DCV_TGZ="nice-dcv-%[1]s-amzn2023-${DCV_MACHINE}.tgz"
-  # The packages run as root, so they install only once their signatures
+%[4]s  # The packages run as root, so they install only once their signatures
   # verify against Amazon's DCV key (#1598): the key import, and every RPM's
   # rpm -K, must succeed, and dnf checks them again; any failure installs
   # nothing. The import used to be "|| true" and dnf does not check a local
-  # package by default, so a tampered tarball would have installed.
-  if ! rpm --import https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY >/dev/null 2>&1; then
+  # package by default, so a tampered tarball would have installed. Once
+  # pinned (#1620), the key's fingerprints and the tarball's sha256 must also
+  # be the pinned ones.
+  if ! curl -fsSL %[3]s/NICE-GPG-KEY -o /tmp/dcv-key.asc; then
+    echo "WARNING: could not download the Amazon DCV signing key; not installing DCV unverified — the DCV session will not start"
+%[5]s  elif ! rpm --import /tmp/dcv-key.asc >/dev/null 2>&1; then
     echo "WARNING: could not import the Amazon DCV signing key; not installing DCV unverified — the DCV session will not start"
-  elif curl -fsSL "https://d1uj6qtbmh3dt5.cloudfront.net/%[2]s/Servers/${DCV_TGZ}" -o /tmp/dcv.tgz; then
+  elif ! curl -fsSL "%[3]s/%[2]s/Servers/${DCV_TGZ}" -o /tmp/dcv.tgz; then
+    echo "WARNING: could not download Amazon DCV %[1]s — the DCV session will not start"
+%[6]s  else
     mkdir -p /tmp/dcv && tar -xzf /tmp/dcv.tgz -C /tmp/dcv --strip-components=1
     DCV_SIGS=$(rpm -K /tmp/dcv/*.rpm 2>&1) || DCV_SIGS="${DCV_SIGS}
 rpm -K failed"
@@ -923,12 +981,10 @@ rpm -K failed"
       fi
       systemctl enable dcvserver >/dev/null 2>&1 || true
     fi
-    rm -rf /tmp/dcv /tmp/dcv.tgz
-  else
-    echo "WARNING: could not download Amazon DCV %[1]s — the DCV session will not start"
   fi
+  rm -rf /tmp/dcv /tmp/dcv.tgz /tmp/dcv-key.asc
 fi
-`, dcvVersion, dcvVersionMajorMinor)
+`, dcvVersion, dcvVersionMajorMinor, dcvOrigin, pinVars, keyCheck, tgzCheck)
 }
 
 // buildDCVUserDataWithInit is the shared user-data core: update spored, install

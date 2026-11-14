@@ -282,7 +282,7 @@ func WindowsStandaloneScript(keyPEM string) (string, error) {
 	return windowsStandalonePreamble + core + windowsStandaloneEpilogue, nil
 }
 
-const windowsStandalonePreamble = `<#
+var windowsStandalonePreamble = `<#
 .SYNOPSIS
   Install spored on an existing Windows EC2 instance, verified.
 
@@ -311,14 +311,11 @@ function Get-Ec2Region {
 }
 $region = Get-Ec2Region
 if (-not $region) { Write-Output 'WARNING: could not detect region, using us-east-1'; $region = 'us-east-1' }
-` + WindowsAmazonSignedFunc + `
+` + WindowsInstallerFuncs + `
 $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
 if (-not (Test-Path $aws)) {
   $msi = "$env:TEMP\AWSCLIV2.msi"
-  Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2.msi' -OutFile $msi -UseBasicParsing
-  # Amazon-signed or not run at all (#1598).
-  Assert-SpawnAmazonSigned $msi
-  Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
+` + windowsAWSCLIMSIDownload(WindowsAWSCLIMSIPin(), "", "  ") + `  Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
 }
 `
 

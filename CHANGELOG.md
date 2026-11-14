@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The Windows bootstrap and the Amazon DCV install can now require exact
+  sha256s for what they run as SYSTEM/root (#1620), on top of the signature
+  checks of #1598: the AWS CLI MSI, the SSM agent setup (now a pinned
+  version, from the regional bucket or AWS's global copy), and each DCV
+  tarball, plus the DCV signing key's fingerprints, checked before the key is
+  imported. A new weekly workflow, `.github/workflows/installer-pins.yml`,
+  downloads each installer at its origin, requires a Valid Amazon Authenticode
+  signature on a Windows runner and every DCV RPM to verify against the DCV
+  key, and opens a PR with the pins; a changed DCV key is called out in it.
+  The pins are empty until its first run, and while empty both installs behave
+  as before; once set, a mismatch installs nothing. The MSI pin moves to the
+  AWS CLI release the Linux bootstrap pins, a run behind it. `install-spored.ps1`
+  defines the new check and uses the MSI pin once it exists.
+
 ## [0.166.0] - 2026-11-14
 
 <<<<<<< HEAD
