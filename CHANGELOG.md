@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `go -C scripts run ./oidctrust live` compares `aws iam get-role`,
   `aws kms get-key-policy` and spawn's tag rulesets against it, read-only;
   the README there says what to run and how to close what it finds.
+- The three cross-repository tokens the release holds
+  (`HOMEBREW_TAP_GITHUB_TOKEN`, `SCOOP_BUCKET_GITHUB_TOKEN`,
+  `DOCS_SYNC_TOKEN`) now have a written expected scope,
+  `infra/github-tokens/tokens.json` (#1602): a fine-grained token on one
+  target repository each, never `spore-host/spawn`, with Contents write and
+  nothing more. A push, tag or dispatch made with such a token triggers
+  workflows, so one that could write spawn could push a `v*` tag and reach the
+  release's spored signing. CI fails when a workflow reads an unlisted
+  secret, reads a token outside the steps listed for it (a job or workflow
+  `env:` included), or reads one on a pull request. GitHub cannot show a
+  token's scope, so the README there says how the owner checks the live
+  tokens, and proposes dropping `DOCS_SYNC_TOKEN` and moving the tap tokens to
+  a GitHub App. `docs/release-tap-token.md` now says one token per tap and
+  that these are org secrets.
 
 ## [0.165.0] - 2026-11-13
 
