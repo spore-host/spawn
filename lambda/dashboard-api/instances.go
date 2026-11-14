@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -32,13 +31,14 @@ var awsRegions = []string{
 // listInstances queries all regions in parallel and returns spawn-managed instances.
 // When teamID is non-empty, instances tagged with spawn:team-id=teamID are merged with
 // the caller's personal instances (deduplicated by instance ID).
-// callerCreds is the caller's own credentials, threaded through so cross-account
-// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
-// the request authenticated without usable credentials, in which case
-// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
-// which the member-account trust does not name, and which would be a standing
-// cross-tenant read path if it did.
-func listInstances(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, cliIamArn, teamID string) ([]InstanceInfo, error) {
+// callerCreds is the caller's own credentials: EC2 is read with them, in the
+// caller's own account, never with this Lambda's role (#815, #1585). nil when
+// the request carried none that can read EC2, which refuses with
+// errNoCallerCredentials before any call.
+func listInstances(ctx context.Context, callerCreds aws.CredentialsProvider, cliIamArn, teamID string) ([]InstanceInfo, error) {
+	if callerCreds == nil {
+		return nil, errNoCallerCredentials
+	}
 	var wg sync.WaitGroup
 	// Buffer twice the regions to hold both personal and team results per region
 	bufSize := len(awsRegions)
@@ -54,8 +54,8 @@ func listInstances(ctx context.Context, cfg aws.Config, callerCreds aws.Credenti
 		go func(r string) {
 			defer wg.Done()
 
-			// Get EC2 client for region with cross-account credentials
-			ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, r)
+			// EC2 client for the region, on the caller's credentials
+			ec2Client, err := getEC2ClientForRegion(ctx, callerCreds, r)
 			if err != nil {
 				errorsChan <- fmt.Errorf("region %s: %w", r, err)
 				return
@@ -131,13 +131,14 @@ func listInstances(ctx context.Context, cfg aws.Config, callerCreds aws.Credenti
 }
 
 // getInstance gets a single instance by ID
-// callerCreds is the caller's own credentials, threaded through so cross-account
-// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
-// the request authenticated without usable credentials, in which case
-// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
-// which the member-account trust does not name, and which would be a standing
-// cross-tenant read path if it did.
-func getInstance(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (*InstanceInfo, error) {
+// callerCreds is the caller's own credentials: EC2 is read with them, in the
+// caller's own account, never with this Lambda's role (#815, #1585). nil when
+// the request carried none that can read EC2, which refuses with
+// errNoCallerCredentials before any call.
+func getInstance(ctx context.Context, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (*InstanceInfo, error) {
+	if callerCreds == nil {
+		return nil, errNoCallerCredentials
+	}
 	// Try all regions in parallel until we find the instance
 	var wg sync.WaitGroup
 	instanceChan := make(chan *InstanceInfo, 1)
@@ -158,7 +159,7 @@ func getInstance(ctx context.Context, cfg aws.Config, callerCreds aws.Credential
 			foundMutex.Unlock()
 
 			// Get EC2 client for region
-			ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, r)
+			ec2Client, err := getEC2ClientForRegion(ctx, callerCreds, r)
 			if err != nil {
 				return
 			}
@@ -274,95 +275,22 @@ func convertReservationsToInstances(reservations []types.Reservation, region, ac
 	return instances
 }
 
-// handleTerminateInstance handles DELETE /api/instances/{id}
-// callerCreds is the caller's own credentials, threaded through so cross-account
-// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
-// the request authenticated without usable credentials, in which case
-// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
-// which the member-account trust does not name, and which would be a standing
-// cross-tenant read path if it did.
-func handleTerminateInstance(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, instanceID, cliIamArn string) (events.APIGatewayProxyResponse, error) {
-	// Find the instance across regions, verify ownership, then terminate
-	var foundRegion string
-	for _, region := range awsRegions {
-		ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, region)
-		if err != nil {
-			continue
-		}
-
-		result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: []string{instanceID},
-		})
-		if err != nil {
-			continue
-		}
-
-		if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
-			continue
-		}
-
-		instance := result.Reservations[0].Instances[0]
-		ownerTag := getTagValue(instance.Tags, "spawn:iam-user")
-		if ownerTag != cliIamArn {
-			return errorResponse(403, "Access denied"), nil
-		}
-
-		foundRegion = region
-		if err := terminateCancellingSpot(ctx, ec2Client, instance); err != nil {
-			if isEC2Denied(err) {
-				return errorResponse(403, terminateDeniedMessage(instanceID)), nil
-			}
-			return errorResponse(500, fmt.Sprintf("Failed to terminate instance: %v", err)), nil
-		}
-		break
-	}
-
-	if foundRegion == "" {
-		return errorResponse(404, "Instance not found or access denied"), nil
-	}
-
-	return successResponse(map[string]interface{}{
-		"success":     true,
-		"message":     fmt.Sprintf("Instance %s terminated", instanceID),
-		"instance_id": instanceID,
-		"region":      foundRegion,
-	})
+// handleTerminateInstance handles DELETE /api/instances/{id}.
+//
+// The dashboard does not terminate instances (owner decision, spawn#1349): the
+// 403 names `spawn terminate <id>`, which runs as the user. It used to look the
+// instance up and call TerminateInstances on SpawnDashboardCrossAccountReadRole,
+// which was always denied by design; with that role retired (#1585) and EC2
+// read on the caller's own credentials, the same call could now succeed for a
+// caller whose credentials allow it, so it is not made at all.
+func handleTerminateInstance(instanceID string) (events.APIGatewayProxyResponse, error) {
+	return errorResponse(403, terminateDeniedMessage(instanceID)), nil
 }
 
-// terminateAPI is the slice of the EC2 client terminateCancellingSpot uses.
-type terminateAPI interface {
-	CancelSpotInstanceRequests(ctx context.Context, in *ec2.CancelSpotInstanceRequestsInput, optFns ...func(*ec2.Options)) (*ec2.CancelSpotInstanceRequestsOutput, error)
-	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
-}
-
-// terminateCancellingSpot terminates the instance, cancelling its Spot request
-// first. A --spot launch with a stop/hibernate lifecycle gets a PERSISTENT
-// request (spawn#922), which reopens when its instance is terminated and makes
-// EC2 launch a replacement. Cancelling never terminates anything, and cancelling
-// a one-time request is harmless, so any request id the instance carries is
-// cancelled. As in `spawn terminate`, an instance whose PERSISTENT request
-// (spawn:spot-request-type=persistent) cannot be cancelled is not terminated —
-// that would launch a replacement — and the error names the request to cancel.
-// A failed cancel of a one-time request is only logged: it closes with its
-// instance.
-func terminateCancellingSpot(ctx context.Context, api terminateAPI, instance types.Instance) error {
-	instanceID := aws.ToString(instance.InstanceId)
-	if reqID := aws.ToString(instance.SpotInstanceRequestId); reqID != "" {
-		if _, err := api.CancelSpotInstanceRequests(ctx, &ec2.CancelSpotInstanceRequestsInput{
-			SpotInstanceRequestIds: []string{reqID},
-		}); err != nil && !strings.Contains(err.Error(), "InvalidSpotInstanceRequestID.NotFound") {
-			if getTagValue(instance.Tags, "spawn:spot-request-type") == "persistent" {
-				return fmt.Errorf("not terminating %s: its persistent spot request %s could not be "+
-					"cancelled, and terminating would launch a replacement — cancel the request, then retry: %w",
-					instanceID, reqID, err)
-			}
-			log.Printf("warning: could not cancel %s's one-time spot request %s: %v", instanceID, reqID, err)
-		}
-	}
-	_, err := api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
-		InstanceIds: []string{instanceID},
-	})
-	return err
+// terminateDeniedMessage is what the dashboard says to a terminate request.
+func terminateDeniedMessage(instanceID string) string {
+	return fmt.Sprintf("Terminating from the dashboard is not available (spawn#1349). "+
+		"Terminate it from the CLI: spawn terminate %s", instanceID)
 }
 
 // getTagValue extracts a tag value by key
@@ -373,23 +301,6 @@ func getTagValue(tags []types.Tag, key string) string {
 		}
 	}
 	return ""
-}
-
-// isEC2Denied reports whether err is EC2 refusing the call for lack of
-// permission.
-func isEC2Denied(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "UnauthorizedOperation") || strings.Contains(msg, "AccessDenied")
-}
-
-// terminateDeniedMessage is what the dashboard says when the member account's
-// read role refuses the terminate, which it does by design today: every
-// signed-in dashboard user can assume that role directly, so a terminate grant
-// on it would let any of them terminate any spore in the account (#1344,
-// spawn#1349). The CLI terminates as the user.
-func terminateDeniedMessage(instanceID string) string {
-	return fmt.Sprintf("Terminating from the dashboard is not available for this account yet (spawn#1349). "+
-		"Terminate it from the CLI: spawn terminate %s", instanceID)
 }
 
 // withheldTag reports whether a tag is left out of the API response. spored

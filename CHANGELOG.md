@@ -103,6 +103,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test fails on any workflow without a
   read-only top-level block, on any write in a workflow that runs on pull
   requests, and on `id-token: write` in a job that uses no OIDC token.
+- dashboard-api no longer assumes `SpawnDashboardCrossAccountReadRole` (#1585).
+  That role, in 435415984226, trusted the Cognito identity-pool role, which
+  every Google, GitHub or Globus sign-in receives. Any of them could assume it
+  from the browser and list every tenant's instances there, and the
+  dashboard's `spawn:iam-user` filter was the only isolation. Instance reads
+  (`/api/instances`, `/api/instances/{id}`, `/api/cost-summary`) are now made
+  with the caller's own credentials in the caller's own account, so IAM bounds
+  what each caller sees. An identity-pool session, whose role has no EC2
+  access since 2026-11-11, gets a 403 that names the portal and `spawn list`.
+  `lambda/dashboard-api/scripts/setup-cross-account-role.sh` is removed, and
+  so is the `SPAWN_DASHBOARD_CROSS_ACCOUNT_ROLE` override. Terminating from the
+  dashboard stays refused, now without any EC2 call: it answers 403 naming
+  `spawn terminate <id>` (#1349). The browser's own AssumeRole into the role is
+  spore-host/spore-host#742. **Live step:** delete the role from each account
+  that has it (see the PR).
 
 ## [0.165.0] - 2026-11-13
 

@@ -289,6 +289,13 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 	accountID := *identity.Account
 	accountBase36 := intToBase36(accountID)
 
+	// A Cognito identity-pool session's role has no EC2 access (#1585), so it
+	// is not acted as: the instance routes refuse with errNoCallerCredentials
+	// rather than make a denied call in every region.
+	if isIdentityPoolSession(userID) {
+		callerCreds = nil
+	}
+
 	// Authenticated is not entitled: the verified account must be onboarded or
 	// allow-listed (entitlement.go) before any route, cache row or portal-role
 	// shortcut. Fails closed, and a refused caller gets no provider.

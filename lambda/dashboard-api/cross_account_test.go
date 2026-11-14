@@ -5,103 +5,110 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
-// Cross-account reads must be made AS THE CALLER (#815).
-//
-// The member-account role's trust names `Cognito_SpawnDashboard_Auth_Role`, and
-// that role carries `sts:AssumeRole` scoped to exactly the one role ARN. Both
-// halves of the design were already deployed and correct; only the code was
-// wrong — main.go built one aws.Config from the Lambda's own credentials and
-// passed it everywhere, so the AssumeRole was attributed to the Lambda. Measured
-// with simulate-principal-policy:
-//
-//	Cognito_SpawnDashboard_Auth_Role -> allowed
-//	SpawnDashboardLambdaRole         -> implicitDeny
-//
-// which is why the dashboard's cross-account instance listing has never worked,
-// and why the fix needed no IAM change at all.
+// Instance reads are made with the caller's own credentials, in the caller's
+// own account (#815, #1585). There is no role to assume:
+// SpawnDashboardCrossAccountReadRole, which every identity-pool sign-in could
+// assume from the browser, is retired.
 
-// Without caller credentials, a cross-account read must REFUSE.
-//
-// The tempting fallback is this Lambda's own credentials. That cannot succeed
-// (the trust does not name it) and, if the trust were widened to make it succeed,
-// would create a standing role able to read every onboarded tenant's instances
-// from behind a public API — the shape this audit spent its time removing.
-func TestCrossAccountReadRefusesWithoutCallerCredentials(t *testing.T) {
-	_, err := getEC2ClientForRegion(context.Background(), aws.Config{}, nil, "us-east-1")
-	if err == nil {
-		t.Fatal("getEC2ClientForRegion succeeded with no caller credentials; it must refuse rather " +
-			"than fall back to this Lambda's role")
-	}
+// Without caller credentials, an instance read must REFUSE, not fall back to
+// this Lambda's role, which would be a standing read of every tenant.
+func TestInstanceReadRefusesWithoutCallerCredentials(t *testing.T) {
+	_, err := getEC2ClientForRegion(context.Background(), nil, "us-east-1")
 	if !errors.Is(err, errNoCallerCredentials) {
-		t.Errorf("error is not errNoCallerCredentials, so a caller cannot tell this apart from a "+
-			"transport failure: %v", err)
+		t.Fatalf("getEC2ClientForRegion with no caller credentials: %v, want errNoCallerCredentials", err)
 	}
 	for _, want := range []string{"caller", "credentials"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
 	}
+	// Each route refuses before fanning out over the regions.
+	if _, err := listInstances(context.Background(), nil, "arn:aws:iam::1:user/a", ""); !errors.Is(err, errNoCallerCredentials) {
+		t.Errorf("listInstances: %v", err)
+	}
+	if _, err := getInstance(context.Background(), nil, "i-1", "arn:aws:iam::1:user/a"); !errors.Is(err, errNoCallerCredentials) {
+		t.Errorf("getInstance: %v", err)
+	}
+	if _, err := calculateInstanceCosts(context.Background(), nil, "arn:aws:iam::1:user/a"); !errors.Is(err, errNoCallerCredentials) {
+		t.Errorf("calculateInstanceCosts: %v", err)
+	}
 }
 
-// With caller credentials, a client is built.
-func TestCrossAccountReadBuildsAClientFromCallerCredentials(t *testing.T) {
+// With caller credentials, the client signs with exactly those: no AssumeRole,
+// no other identity.
+func TestInstanceReadUsesTheCallersCredentials(t *testing.T) {
 	creds := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
-		return aws.Credentials{AccessKeyID: "AKIATEST", SecretAccessKey: "s", SessionToken: "t"}, nil
+		return aws.Credentials{AccessKeyID: "AKIACALLER", SecretAccessKey: "s", SessionToken: "t"}, nil
 	})
-	c, err := getEC2ClientForRegion(context.Background(), aws.Config{}, creds, "eu-west-1")
+	c, err := getEC2ClientForRegion(context.Background(), creds, "eu-west-1")
 	if err != nil {
 		t.Fatalf("getEC2ClientForRegion with caller credentials: %v", err)
 	}
-	if c == nil {
-		t.Fatal("returned a nil client with no error")
+	got, err := c.Options().Credentials.Retrieve(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessKeyID != "AKIACALLER" {
+		t.Errorf("client signs as %q, want the caller's AKIACALLER", got.AccessKeyID)
+	}
+	if r := c.Options().Region; r != "eu-west-1" {
+		t.Errorf("client region %q", r)
 	}
 }
 
-// The Lambda's own credentials must not be used for the AssumeRole.
-//
-// Source-level because the distinction is which credentials the STS client
-// carries, and that is not observable from the returned client. Anchored on the
-// assignment, not the identifier (rule 3).
-func TestAssumeRoleUsesTheCallerNotTheLambda(t *testing.T) {
-	src := readDashboardFile(t, "cross_account.go")
-
-	if !strings.Contains(src, "o.Credentials = callerCreds") {
-		t.Error("the STS client is not built with the caller's credentials, so the AssumeRole is " +
-			"attributed to this Lambda — which the member-account trust does not name (#815)")
+// The read role is gone from the code, not just unused: no AssumeRole
+// provider, no role ARN, no override variable (#1585).
+func TestNoCrossAccountReadRoleRemains(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A nil-check must gate it, or a nil provider silently becomes "the Lambda's
-	// default credentials" rather than a refusal.
-	if !strings.Contains(src, "if callerCreds == nil") {
-		t.Error("there is no nil guard on callerCreds; a nil provider would fall through to the " +
-			"ambient credential chain, i.e. this Lambda's role")
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		src := readDashboardFile(t, n)
+		for _, banned := range []string{"stscreds", "AssumeRole(", "NewAssumeRoleProvider", "SPAWN_DASHBOARD_CROSS_ACCOUNT_ROLE", "role/SpawnDashboardCrossAccountReadRole"} {
+			if strings.Contains(src, banned) {
+				t.Errorf("%s still contains %q: dashboard-api reads EC2 only with the caller's own credentials", n, banned)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join("scripts", "setup-cross-account-role.sh")); err == nil {
+		t.Error("scripts/setup-cross-account-role.sh still exists: it creates the retired read role")
 	}
 }
 
-// callerAssumeRoleProvider is cut out of the IAM coverage gate's inventory for
-// SpawnDashboardLambdaRole, because its AssumeRole runs as the caller (#1349).
-// So it must stay exactly that: an STS client on the caller's credentials and
-// the assume-role provider. Any other client built in it would be hidden from
-// the gate.
-func TestCallerAssumeRoleProviderBuildsOnlyTheCallersSTSClient(t *testing.T) {
-	body := funcBody(t, readDashboardFile(t, "cross_account.go"), "func callerAssumeRoleProvider(")
-	got := regexp.MustCompile(`\b(\w+)\.(New\w*)\(`).FindAllStringSubmatch(body, -1)
-	var ctors []string
-	for _, m := range got {
-		ctors = append(ctors, m[1]+"."+m[2])
+// An identity-pool session is never acted as: its role has no EC2 access.
+func TestIsIdentityPoolSession(t *testing.T) {
+	for in, want := range map[string]bool{
+		"arn:aws:sts::966362334030:assumed-role/Cognito_SpawnDashboard_Auth_Role/CognitoIdentityCredentials": true,
+		"arn:aws:sts::111111111111:assumed-role/spore-portal-launch/alice":                                   false,
+		"arn:aws:iam::111111111111:user/CognitoIdentityCredentials":                                          false,
+		"": false,
+	} {
+		if got := isIdentityPoolSession(in); got != want {
+			t.Errorf("isIdentityPoolSession(%q) = %v, want %v", in, got, want)
+		}
 	}
-	if strings.Join(ctors, ",") != "sts.NewFromConfig,stscreds.NewAssumeRoleProvider" {
-		t.Errorf("callerAssumeRoleProvider builds %v; want only sts.NewFromConfig then "+
-			"stscreds.NewAssumeRoleProvider (internal/iamcoverage cuts this function)", ctors)
+}
+
+// Terminate is not done from the dashboard (spawn#1349, permanent): the 403
+// names the CLI, and the handler takes no credentials, so it can make no call.
+func TestTerminateIsRefusedAndNamesTheCLI(t *testing.T) {
+	resp, err := handleTerminateInstance("i-0abc")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, "o.Credentials = callerCreds") {
-		t.Error("callerAssumeRoleProvider's STS client is not on the caller's credentials")
+	if resp.StatusCode != 403 || !strings.Contains(resp.Body, "spawn terminate i-0abc") {
+		t.Errorf("status %d body %q; want 403 naming `spawn terminate i-0abc`", resp.StatusCode, resp.Body)
 	}
 }
 

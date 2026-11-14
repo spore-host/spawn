@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -66,14 +67,15 @@ var instancePricing = map[string]float64{
 }
 
 // handleGetCostSummary handles GET /api/cost-summary.
-// callerCreds is the caller's own credentials, threaded through so cross-account
-// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
-// the request authenticated without usable credentials, in which case
-// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
-// which the member-account trust does not name, and which would be a standing
-// cross-tenant read path if it did.
-func handleGetCostSummary(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, cliIamArn string) (events.APIGatewayProxyResponse, error) {
-	cost, err := calculateInstanceCosts(ctx, cfg, callerCreds, cliIamArn)
+// callerCreds is the caller's own credentials: EC2 is read with them, in the
+// caller's own account, never with this Lambda's role (#815, #1585). nil when
+// the request carried none that can read EC2, which refuses with
+// errNoCallerCredentials before any call.
+func handleGetCostSummary(ctx context.Context, callerCreds aws.CredentialsProvider, cliIamArn string) (events.APIGatewayProxyResponse, error) {
+	cost, err := calculateInstanceCosts(ctx, callerCreds, cliIamArn)
+	if errors.Is(err, errNoCallerCredentials) {
+		return errorResponse(403, err.Error()), nil
+	}
 	if err != nil {
 		return errorResponse(500, fmt.Sprintf("Failed to calculate costs: %v", err)), nil
 	}
@@ -81,19 +83,20 @@ func handleGetCostSummary(ctx context.Context, cfg aws.Config, callerCreds aws.C
 	return successResponse(CostSummaryAPIResponse{Success: true, Cost: *cost})
 }
 
-// callerCreds is the caller's own credentials, threaded through so cross-account
-// EC2 reads are made AS the caller rather than as this Lambda (#815). nil when
-// the request authenticated without usable credentials, in which case
-// getEC2ClientForRegion refuses rather than falling back to this Lambda's role —
-// which the member-account trust does not name, and which would be a standing
-// cross-tenant read path if it did.
-func calculateInstanceCosts(ctx context.Context, cfg aws.Config, callerCreds aws.CredentialsProvider, cliIamArn string) (*CostSummary, error) {
+// callerCreds is the caller's own credentials: EC2 is read with them, in the
+// caller's own account, never with this Lambda's role (#815, #1585). nil when
+// the request carried none that can read EC2, which refuses with
+// errNoCallerCredentials before any call.
+func calculateInstanceCosts(ctx context.Context, callerCreds aws.CredentialsProvider, cliIamArn string) (*CostSummary, error) {
+	if callerCreds == nil {
+		return nil, errNoCallerCredentials
+	}
 	breakdown := make(map[string]TypeCost)
 	totalHourly := 0.0
 	totalCount := 0
 
 	for _, region := range awsRegions {
-		ec2Client, err := getEC2ClientForRegion(ctx, cfg, callerCreds, region)
+		ec2Client, err := getEC2ClientForRegion(ctx, callerCreds, region)
 		if err != nil {
 			continue
 		}

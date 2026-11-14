@@ -1,6 +1,7 @@
 package iamcoverage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -119,6 +120,38 @@ func shellPolicy(file string) func(*testing.T) *Policy {
 	return func(t *testing.T) *Policy {
 		t.Helper()
 		return mustPolicy(t)(ParseShellPolicies(filepath.Join(repoRoot, file)))
+	}
+}
+
+// cliCommandPolicy is a policy granting exactly the actions the generated CLI
+// reference (cliDocPath) lists for command: what a spawn user must already
+// hold to run it. For code that acts with a user's own credentials.
+func cliCommandPolicy(command string) func(*testing.T) *Policy {
+	return func(t *testing.T) *Policy {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(repoRoot, cliDocPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		prefix := "| `" + command + "` | "
+		for _, line := range strings.Split(string(b), "\n") {
+			if !strings.HasPrefix(line, prefix) {
+				continue
+			}
+			var actions []string
+			for _, a := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(line, prefix), " |"), ",") {
+				if a = strings.Trim(strings.TrimSpace(a), "`"); a != "" {
+					actions = append(actions, a)
+				}
+			}
+			doc, _ := json.Marshal(map[string]any{
+				"Version":   "2012-10-17",
+				"Statement": []any{map[string]any{"Effect": "Allow", "Action": actions, "Resource": "*"}},
+			})
+			return mustPolicy(t)(ParsePolicyJSON(cliDocPath+" "+command, string(doc)))
+		}
+		t.Fatalf("%s has no row for %q", cliDocPath, command)
+		return nil
 	}
 }
 
@@ -333,17 +366,16 @@ var principals = []principal{
 		}}},
 	},
 	{
-		// EC2 reads in a member account are made AS THE CALLER (#815): the
-		// caller's credentials assume SpawnDashboardCrossAccountReadRole. That
-		// AssumeRole is the caller's, not SpawnDashboardLambdaRole's, so its one
-		// function is cut (#1349); the caller's own role is the dashboard's
-		// Cognito role, provisioned outside this repository.
+		// EC2 is read with the CALLER's own credentials, in the caller's own
+		// account (#815, #1585), never with SpawnDashboardLambdaRole and with no
+		// role assumed. spore.host provisions no policy for that caller; what it
+		// needs is what a spawn user already holds to run `spawn list`, as the
+		// generated CLI reference records it, so that is the policy checked.
 		name:  "dashboard-api",
 		build: build{dir: "lambda/dashboard-api", pkg: ".", goos: []string{"linux"}},
-		cuts:  []string{"github.com/spore-host/spawn/lambda/dashboard-api.callerAssumeRoleProvider"},
 		contexts: []credContext{
-			{name: "member account", services: []string{"ec2"}, variants: []variant{
-				{"SpawnDashboardCrossAccountReadRole", shellPolicy("lambda/dashboard-api/scripts/setup-cross-account-role.sh")},
+			{name: "caller's own credentials", services: []string{"ec2"}, variants: []variant{
+				{"the caller's `spawn list` grants", cliCommandPolicy("spawn list")},
 			}},
 			{name: "function role", variants: []variant{
 				{"SpawnDashboardLambdaRole", shellPolicy("lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh")},
