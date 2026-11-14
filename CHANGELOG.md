@@ -118,6 +118,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn terminate <id>` (#1349). The browser's own AssumeRole into the role is
   spore-host/spore-host#742. **Live step:** delete the role from each account
   that has it (see the PR).
+- The sweep orchestrator now refuses, before calling STS, to assume
+  `SpawnSweepCrossAccountRole` in an account no sweep may act in, whatever the
+  sweep record names (#1584): an `aws_account_id` that is not a 12-digit
+  account ID, a forbidden account (942542972736), or the orchestrator's own
+  control-plane account. All three of its `AssumeRole` sites (single-region,
+  multi-region and cancel) go through one checked path, and a test fails any
+  new direct call. The record's writer is still not bound to the account it
+  names; that is #1631.
 
 ## [0.165.0] - 2026-11-13
 

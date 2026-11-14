@@ -427,19 +427,12 @@ func downloadParams(ctx context.Context, s3Key string, forceDownload bool) (*Par
 }
 
 func createCrossAccountEC2Client(ctx context.Context, region, accountID string) (*ec2.Client, error) {
-	roleARN := fmt.Sprintf(crossAccountRole, accountID)
-	log.Printf("Assuming role: %s", roleARN)
-
-	result, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
-		RoleArn:         aws.String(roleARN),
-		RoleSessionName: aws.String("spawn-sweep-orchestrator"),
-		DurationSeconds: aws.Int32(3600),
-	})
+	log.Printf("Assuming the sweep role in account %s", accountID)
+	creds, err := assumeSweepRole(ctx, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("assume role failed: %w", err)
 	}
 
-	creds := result.Credentials
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
 		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
@@ -1097,14 +1090,8 @@ func max(a, b int) int {
 // initializeRegionalOrchestrator creates EC2 clients for all regions in the sweep
 func initializeRegionalOrchestrator(ctx context.Context, state *SweepRecord) (*RegionalOrchestrator, error) {
 	// Assume cross-account role once
-	roleARN := fmt.Sprintf(crossAccountRole, state.AWSAccountID)
-	log.Printf("Assuming role: %s", roleARN)
-
-	result, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
-		RoleArn:         aws.String(roleARN),
-		RoleSessionName: aws.String("spawn-sweep-orchestrator"),
-		DurationSeconds: aws.Int32(3600),
-	})
+	log.Printf("Assuming the sweep role in account %s", state.AWSAccountID)
+	creds, err := assumeSweepRole(ctx, state.AWSAccountID)
 	if err != nil {
 		return nil, fmt.Errorf("assume role failed: %w", err)
 	}
@@ -1112,12 +1099,12 @@ func initializeRegionalOrchestrator(ctx context.Context, state *SweepRecord) (*R
 	orchestrator := &RegionalOrchestrator{
 		ec2Clients:  make(map[string]*ec2.Client),
 		accountID:   state.AWSAccountID,
-		credentials: result.Credentials,
+		credentials: creds,
 	}
 
 	// Create EC2 client for each region
 	for region := range state.RegionStatus {
-		client, err := createEC2ClientWithCredentials(ctx, region, state.AWSAccountID, result.Credentials)
+		client, err := createEC2ClientWithCredentials(ctx, region, state.AWSAccountID, creds)
 		if err != nil {
 			log.Printf("WARNING: Failed to create EC2 client for region %s: %v", region, err)
 			log.Printf("Region %s may be restricted or unavailable. Params in this region will be marked as failed.", region)
