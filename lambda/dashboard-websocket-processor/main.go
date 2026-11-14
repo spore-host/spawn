@@ -97,14 +97,14 @@ func handler(ctx context.Context, event events.DynamoDBEvent) error {
 			continue
 		}
 
-		// Publish to relevant connections
+		// Publish to the owner's connections only. A record without a user_id
+		// goes to nobody (#1600): it used to go to every connection.
+		if userID == "" {
+			fmt.Printf("Warning: dropping %s event with no user_id: it has no owner to send it to\n", eventType)
+			continue
+		}
 		staleConnections := []string{}
-		for _, conn := range connections {
-			// Filter by user ID
-			if userID != "" && conn.UserID != userID {
-				continue // Skip connections for different users
-			}
-
+		for _, conn := range recipientsFor(connections, userID) {
 			// Publish to connection
 			err := publishToConnection(ctx, mgmtClient, conn.ConnectionID, messageJSON)
 			if err != nil {
@@ -130,6 +130,27 @@ func handler(ctx context.Context, event events.DynamoDBEvent) error {
 	}
 
 	return nil
+}
+
+// recipientsFor returns the connections a record owned by userID may be sent
+// to: those of that user, and none at all when the record names no user.
+//
+// Fails closed. The record is the whole NewImage (account ID, params location,
+// progress), so "no owner" must mean "no recipient", never "every recipient":
+// a legacy schedule, a manual write, or a future writer that omits user_id
+// would otherwise broadcast one tenant's sweep to every open dashboard (#1600).
+// A connection with no user_id matches nothing for the same reason.
+func recipientsFor(connections []Connection, userID string) []Connection {
+	if userID == "" {
+		return nil
+	}
+	var out []Connection
+	for _, c := range connections {
+		if c.UserID != "" && c.UserID == userID {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // parseStreamRecord extracts event type, data, and user ID from a DynamoDB stream record

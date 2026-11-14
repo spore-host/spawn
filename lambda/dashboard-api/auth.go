@@ -67,6 +67,21 @@ func portalAccountFromARN(userARN string) (string, bool) {
 	return "", false
 }
 
+// isAssumedRoleSession reports whether id is an STS assumed-role ARN.
+//
+// Such an ARN never keys the user-account cache, for reading or for writing
+// (#1589). It names a role session, not a person: every Cognito identity-pool
+// user arrives as
+// arn:aws:sts::<acct>:assumed-role/Cognito_SpawnDashboard_Auth_Role/CognitoIdentityCredentials,
+// one fixed session name for all of them, so a row written for one web user
+// would hand that user's cli_iam_arn (their sweeps, watches, cost history and
+// teams) to every later sign-in. An assumed-role caller is therefore resolved
+// afresh on every request, from a verified email claim, as the portal-role
+// path already is.
+func isAssumedRoleSession(id string) bool {
+	return strings.HasPrefix(id, "arn:") && strings.Contains(id, ":assumed-role/")
+}
+
 // getUserFromRequest extracts user identity from API Gateway request
 // Returns: userID, cliIamArn, accountBase36, error
 // getUserFromRequest identifies the caller and, when the request carried
@@ -118,10 +133,15 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 		return "", "", "", nil, fmt.Errorf("unable to determine user identity from request")
 	}
 
-	// Check if user account info is cached in DynamoDB
-	cached, err := getUserAccount(ctx, cfg, userID)
-	if err != nil {
-		return "", "", "", nil, fmt.Errorf("failed to query user account cache: %w", err)
+	// Check if user account info is cached in DynamoDB. Never for an
+	// assumed-role session, which many users share (#1589).
+	var cached *UserAccountRecord
+	if !isAssumedRoleSession(userID) {
+		var err error
+		cached, err = getUserAccount(ctx, cfg, userID)
+		if err != nil {
+			return "", "", "", nil, fmt.Errorf("failed to query user account cache: %w", err)
+		}
 	}
 
 	// If cached, update last access and return
@@ -196,10 +216,11 @@ func getUserFromRequest(ctx context.Context, cfg aws.Config, request events.APIG
 		email, _ = extractEmailFromRequest(request)
 	}
 
-	err = createUserAccountWithIdentity(ctx, cfg, userID, cliIamArn, identityType, accountID, accountBase36, email)
-	if err != nil {
-		// Log error but don't fail the request
-		log.Printf("warning: failed to cache user account: %v", err)
+	if !isAssumedRoleSession(userID) {
+		if err := createUserAccountWithIdentity(ctx, cfg, userID, cliIamArn, identityType, accountID, accountBase36, email); err != nil {
+			// Log error but don't fail the request
+			log.Printf("warning: failed to cache user account: %v", err)
+		}
 	}
 
 	return userID, cliIamArn, accountBase36, nil, nil
@@ -285,10 +306,15 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 		return userID, account, accountBase36, callerCreds, nil
 	}
 
-	// Check cache
-	cached, err := getUserAccount(ctx, cfg, userID)
-	if err != nil {
-		return "", "", "", callerCreds, fmt.Errorf("failed to query user account cache: %w", err)
+	// Check the cache: never for an assumed-role session, whose ARN every
+	// identity-pool user shares (#1589); those are resolved from a verified
+	// email claim on every request.
+	var cached *UserAccountRecord
+	if !isAssumedRoleSession(userID) {
+		cached, err = getUserAccount(ctx, cfg, userID)
+		if err != nil {
+			return "", "", "", callerCreds, fmt.Errorf("failed to query user account cache: %w", err)
+		}
 	}
 
 	if cached != nil {
@@ -345,8 +371,10 @@ func getUserFromCredentialsHeader(ctx context.Context, cfg aws.Config, request e
 		email, _ = extractEmailFromRequest(request)
 	}
 
-	if err := createUserAccountWithIdentity(ctx, cfg, userID, cliIamArn, identityType, accountID, accountBase36, email); err != nil {
-		log.Printf("warning: failed to cache user account: %v", err)
+	if !isAssumedRoleSession(userID) {
+		if err := createUserAccountWithIdentity(ctx, cfg, userID, cliIamArn, identityType, accountID, accountBase36, email); err != nil {
+			log.Printf("warning: failed to cache user account: %v", err)
+		}
 	}
 
 	return userID, cliIamArn, accountBase36, callerCreds, nil
