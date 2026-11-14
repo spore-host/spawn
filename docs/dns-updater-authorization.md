@@ -36,30 +36,30 @@ and paid for by spore.host.
 
 ## Where the entitled set comes from
 
-#835 proposed the `spore-portal-accounts` table. It holds **0 items**, so a lookup
-against it would authorize nobody.
+An account may register when it is in `DNS_ALLOWED_ACCOUNTS`, or when the portal
+account registry **`spore-portal-accounts`** has a row for it that is not
+`offboarded` (#1611). That is the same rule dashboard-api applies to every caller
+(`lambda/dashboard-api/entitlement.go`). The table is keyed on `accountId`, so the
+lookup is a single `GetItem` by the verified account ID that projects `accountId`
+and `status` only. The answer is cached per account for 5 minutes (1 minute for a
+refusal). A failed read is not cached, and it refuses unless `DNS_ALLOWED_ACCOUNTS`
+lists the account.
 
-The populated registry is **`spawn-user-accounts`** (3 items). It is keyed on
-`user_id` with GSIs on `cli_iam_arn` and `email`, none of which the updater knows —
-it knows an account ID — so the lookup is a `Scan` projecting the single
-`aws_account_id` attribute, cached for 5 minutes per container. The table holds one
-item per onboarded identity and is small by nature.
+Until #1611 the lookup was a `Scan` of `spawn-user-accounts`. That table is keyed
+on `user_id` with GSIs on `cli_iam_arn` and `email`, so it cannot be read by
+account. The `Scan` grant was never on the live role, so from v0.164.0 every
+registration logged "account registry unreadable" and fell back to the static
+list. A newly onboarded account would have been refused under enforce. There was
+also a weaker point: dashboard-api writes `spawn-user-accounts` itself on a
+caller's first request, and before #1605 it did so for any caller.
 
-Two traps found while implementing this, both worth keeping in mind for any other
-consumer of that table:
-
-- **`account_base36` is not reliably the encoding of `aws_account_id`.** The `cli`
-  row for 435415984226 stores `c8s8u`, which decodes to 20565246. Derive base36
-  from the verified account ID (`encodeAccountID`); never read it from the
-  registry.
-- **An account with live records is not in the registry.** The zone serves four A
-  records under `c0zxr0ao.spore.host` — `keel-skx`, `keel-zen4`, `keel-zen5`,
-  `loop-l12-esc` — and `c0zxr0ao` decodes to an account absent from
-  `spawn-user-accounts`. Shipping this enforcing would have taken those four hosts
-  off the air.
-
-So the entitled set is the union of the registry and `DNS_ALLOWED_ACCOUNTS`, and
-enforcement is staged.
+One trap from the old registry still applies to any consumer of these tables:
+**an account with live records is in neither registry.** The zone serves four A
+records under `c0zxr0ao.spore.host` (`keel-skx`, `keel-zen4`, `keel-zen5`,
+`loop-l12-esc`), and `c0zxr0ao` decodes to an account that is not registered.
+That account must be in `DNS_ALLOWED_ACCOUNTS`. Ownership questions always derive
+base36 from the verified account ID (`encodeAccountID`) and never read it from a
+registry.
 
 ## Environment variables
 
@@ -67,7 +67,7 @@ enforcement is staged.
 |---|---|---|
 | `DNS_AUTHZ_MODE` | *(unset = enforce)* | `audit` logs a would-be refusal (account or record ownership) and continues. Anything else, including unset, makes a refusal a 403. |
 | `DNS_ALLOWED_ACCOUNTS` | *(empty)* | Comma-separated account IDs entitled without a registry entry. Malformed entries are reported, not silently dropped. |
-| `DNS_ACCOUNTS_TABLE` | `spawn-user-accounts` | The registry to read. |
+| `DNS_ACCOUNTS_TABLE` | `spore-portal-accounts` | The registry to read (keyed on `accountId`). |
 
 Enforce is the default. `update-function-code` does not touch environment
 variables and `--environment` *replaces* the whole map, so an unset variable is
@@ -102,43 +102,51 @@ reaper's DNS teardown and its lease expiry.
 
 ## The IAM grant
 
-`SpawnDNSLambdaExecutionRole` gets one inline policy, `SpawnDNSAccountRegistryRead`:
+`SpawnDNSLambdaExecutionRole` gets two inline policies, written by
+`scripts/deploy-custom-dns.sh`. The first is `SpawnDNSAccountRegistryRead`:
 
 ```json
 {
   "Sid": "ReadAccountRegistryForCallerAuthorization",
   "Effect": "Allow",
-  "Action": "dynamodb:Scan",
-  "Resource": "arn:aws:dynamodb:us-east-1:966362334030:table/spawn-user-accounts",
+  "Action": "dynamodb:GetItem",
+  "Resource": "arn:aws:dynamodb:us-east-1:966362334030:table/spore-portal-accounts",
   "Condition": {
-    "StringEquals": { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
-    "ForAllValues:StringEquals": { "dynamodb:Attributes": ["aws_account_id"] }
+    "ForAllValues:StringEquals": { "dynamodb:Attributes": ["accountId", "status"] },
+    "Null": { "dynamodb:Attributes": "false" }
   }
 }
 ```
 
-The `dynamodb:Select` pin is load-bearing, not belt-and-braces:
-`ForAllValues:StringEquals` is satisfied by an **empty** set, so a `Scan` naming no
-attributes at all passes the `dynamodb:Attributes` condition and returns every
-field of every item. Pinning `Select` is what makes a full-table read a denial.
-Same family as `ForAllValues:StringNotEquals` on `aws:TagKeys` being defeated by
-one innocuous tag key.
+The `Null` check is load-bearing. `ForAllValues:StringEquals` is satisfied by an
+**empty** set, so a `GetItem` with no `ProjectionExpression` (which returns the
+whole row, including the account's onboarding role and ExternalId) would pass the
+attribute condition alone. The Scan this replaced pinned `dynamodb:Select` for the
+same reason, but that key exists only on Query and Scan. The request
+(`registryGetItemInput`) and the grant are held together by
+`lambda/dns-updater/registry_grant_test.go`.
 
-It follows that the handler must set `Select` **explicitly** rather than letting
-DynamoDB infer it from `ProjectionExpression`: a condition key the request does not
-carry evaluates as absent and the condition fails, so inferring it would leave the
-grant denying its own only caller — in production and nowhere else.
+The second is `SpawnDNSAccountRegistryKMS`: `kms:Decrypt` on the table's
+customer-managed key, with `kms:ViaService` set to `dynamodb.us-east-1.amazonaws.com`
+and `kms:EncryptionContext:aws:dynamodb:tableName` set to `spore-portal-accounts`.
+The script reads the key ARN from the table. DynamoDB decrypts an item with the
+caller's permissions, so without this grant the `GetItem` fails.
 
-Simulated with `iam simulate-custom-policy` (2026-10-11):
+The script's earlier version granted `dynamodb:Scan` on `spawn-user-accounts`
+under the same policy name. `put-role-policy` replaces it.
 
-| request | decision |
+Cases to simulate (`iam simulate-principal-policy` on the role) after applying:
+
+| request | expected |
 |---|---|
-| `Scan`, `Select=SPECIFIC_ATTRIBUTES`, `Attributes=[aws_account_id]` | `allowed` |
-| `Scan` also projecting `email` | `implicitDeny` |
-| `Scan` with `Select=ALL_ATTRIBUTES` | `implicitDeny` |
-| `Scan` with no condition context at all | `implicitDeny` |
-| `Scan` of a different table | `implicitDeny` |
-| `GetItem` / `PutItem` / `DeleteTable` on the registry | `implicitDeny` |
+| `GetItem` on the registry, `dynamodb:Attributes=[accountId,status]` | `allowed` |
+| `GetItem` on the registry, `dynamodb:Attributes=[accountId]` | `allowed` |
+| `GetItem` also projecting `onboardRoleArn` (or any other attribute) | `implicitDeny` |
+| `GetItem` with no `dynamodb:Attributes` context | `implicitDeny` |
+| `Scan` / `Query` / `PutItem` on the registry | `implicitDeny` |
+| `GetItem` on `spawn-user-accounts` | `implicitDeny` |
+| `kms:Decrypt` on the key, via DynamoDB, tableName = the registry | `allowed` |
+| `kms:Decrypt` on the key with no `kms:ViaService` | `implicitDeny` |
 
 ## The two live steps
 

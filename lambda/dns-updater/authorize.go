@@ -38,41 +38,56 @@ import (
 //     relying solely on a policy nobody will notice being widened again, and so
 //     the entitled set can be a registry rather than a literal list.
 //
-// WHICH registry, and the hazard in picking one. #835 proposed
-// `spore-portal-accounts`; it holds zero items, so a lookup against it would
-// authorize nobody. `spawn-user-accounts` is the populated one (3 items, carrying
-// aws_account_id). But the live spore.host zone has four A records under
-// c0zxr0ao.spore.host — keel-skx, keel-zen4, keel-zen5, loop-l12-esc — and
-// c0zxr0ao decodes to an account that is NOT in that table. So the obvious
-// implementation of this issue, shipped enforcing, would have broken DNS for four
-// running hosts on their next registration. Hence DNS_AUTHZ_MODE below: this
-// first deployed in audit, so the logs could say who actually calls. It now
-// defaults to enforce (record ownership, ownership.go, made audit-by-default a
-// hole in every account rather than only an entitlement gap); an account that
-// must keep registering without being in the registry goes in
-// DNS_ALLOWED_ACCOUNTS, and DNS_AUTHZ_MODE=audit is the explicit way back.
+// WHICH registry. The entitled accounts are the portal's account registry,
+// `spore-portal-accounts` (keyed on accountId), the same source dashboard-api
+// checks every caller against (lambda/dashboard-api/entitlement.go), plus
+// DNS_ALLOWED_ACCOUNTS. One GetItem by the verified account ID answers it,
+// projecting only the key and status (#1611).
 //
-// Note also that the table's own account_base36 attribute is NOT reliably the
-// encoding of its aws_account_id (one row stores "c8s8u", which decodes to
-// 20565246), so ownership questions must derive base36 from the verified account
-// ID — as encodeAccountID and alias_owner.go already do — and never read it from
-// the registry.
+// It used to be a Scan of `spawn-user-accounts`, which is keyed on user_id
+// and so cannot be read by account. That had two defects. The grant the Scan
+// needed was never on the live role, so every registration logged the
+// registry unreadable and fell back to DNS_ALLOWED_ACCOUNTS, and a newly
+// onboarded account was refused under enforce. And spawn-user-accounts is
+// written by dashboard-api on a caller's first request, so for as long as
+// that Lambda wrote a row for any caller (before #1605) any caller could have
+// entitled itself. The portal registry is written by the portal's onboarding.
+//
+// The live zone holds records for an account in neither registry (the four A
+// records under c0zxr0ao.spore.host); that account is entitled with
+// DNS_ALLOWED_ACCOUNTS, as before. DNS_AUTHZ_MODE=audit is the explicit way
+// back.
+//
+// The registry's own fields are never used for ownership: ownership questions
+// derive base36 from the verified account ID (encodeAccountID, alias_owner.go).
 
-// registryTableDefault is the populated account registry. Overridable so the
-// portal's table can take over once it holds anything.
-const registryTableDefault = "spawn-user-accounts"
+// registryTableDefault is the portal account registry. DNS_ACCOUNTS_TABLE
+// overrides it.
+const registryTableDefault = "spore-portal-accounts"
 
-// accountIDAttr is the only attribute this function reads. Named here because the
-// IAM grant restricts the Scan to it via the dynamodb:Attributes condition key, so
-// the two have to agree: projecting anything else is denied, not just impolite.
-const accountIDAttr = "aws_account_id"
+// Registry item attributes. These are the only two this function reads, and
+// the IAM grant (scripts/deploy-custom-dns.sh, SpawnDNSAccountRegistryRead)
+// pins dynamodb:Attributes to exactly them, so the two lists must agree.
+// Projecting anything else is denied, which matters because the row also
+// holds the account's onboarding role and ExternalId.
+const (
+	registryKeyAttr    = "accountId"
+	registryStatusAttr = "status"
+	statusOffboarded   = "offboarded"
+)
 
-// allowlistTTL caches the resolved set for the life of a warm container. Account
-// entitlement changes when someone onboards, not per request, and a DNS write
-// happens on instance launch and teardown — so a few minutes of staleness costs an
-// onboarding user one retry, while re-scanning per request would put a DynamoDB
-// call in the path of every launch.
-const allowlistTTL = 5 * time.Minute
+// registryAttributes is what the GetItem projects, in the order the IAM
+// grant lists them.
+var registryAttributes = []string{registryKeyAttr, registryStatusAttr}
+
+// entitledTTL and notEntitledTTL cache one account's answer for the life of a
+// warm container. Entitlement changes when someone onboards, not per request,
+// and a DNS write happens on instance launch and teardown, so a few minutes of
+// staleness costs an onboarding user one retry. A refusal is cached for less.
+const (
+	entitledTTL    = 5 * time.Minute
+	notEntitledTTL = time.Minute
+)
 
 // authzModeEnforce and authzModeAudit are the values of DNS_AUTHZ_MODE. Only
 // audit lets a refused request through (logged); anything else, including
@@ -85,16 +100,22 @@ const (
 var (
 	dynamoClient *dynamodb.Client
 
-	allowlistMu     sync.Mutex
-	allowlistCache  map[string]struct{}
-	allowlistExpiry time.Time
+	entitlementMu    sync.Mutex
+	entitlementCache = map[string]entitlementEntry{}
 
-	// scanAccountRegistry is a variable so tests can substitute the lookup. The
-	// behaviour being gated is what authorizeCaller DOES with each answer —
-	// success, failure, and empty — and none of those are reachable through a real
-	// DynamoDB client in a unit test.
-	scanAccountRegistry = scanAccountRegistryLive
+	reportRejectedOnce sync.Once
+
+	// lookupRegistryAccount is a variable so tests can substitute the lookup.
+	// The behaviour being gated is what authorizeCaller DOES with each answer
+	// (a row, no row, an offboarded row, an error), and none of those are
+	// reachable through a real DynamoDB client in a unit test.
+	lookupRegistryAccount = lookupRegistryAccountLive
 )
+
+type entitlementEntry struct {
+	ok      bool
+	expires time.Time
+}
 
 // authzEnforced reports whether a refusal should be fatal: always, unless
 // DNS_AUTHZ_MODE is exactly "audit".
@@ -156,138 +177,109 @@ func isAccountID(s string) bool {
 	return true
 }
 
-// scanAccountRegistryLive reads the entitled account IDs out of the registry table.
-//
-// A Scan, not a Query: the table is keyed on user_id with GSIs on cli_iam_arn and
-// email, and this function knows only an account ID — none of those. The table
-// holds one item per onboarded identity, so it is small by nature (3 today), and
-// the result is cached per container. ProjectionExpression keeps the read to the
-// one attribute, which also keeps it inside what the IAM grant permits.
-//
-// The same account appears more than once (one row per identity_type), so the
-// result is a set.
-func scanAccountRegistryLive(ctx context.Context) (map[string]struct{}, error) {
+// registryTable is the registry the updater reads.
+func registryTable() string {
+	if t := os.Getenv("DNS_ACCOUNTS_TABLE"); t != "" {
+		return t
+	}
+	return registryTableDefault
+}
+
+// registryGetItemInput is the one request the updater makes of the registry:
+// a GetItem by the verified account ID, projecting registryAttributes.
+// ConsistentRead is left off: an eventually consistent read is all the grant
+// needs to allow, and onboarding is not a race worth a strongly consistent one.
+func registryGetItemInput(table, accountID string) *dynamodb.GetItemInput {
+	return &dynamodb.GetItemInput{
+		TableName:            aws.String(table),
+		Key:                  map[string]ddbtypes.AttributeValue{registryKeyAttr: &ddbtypes.AttributeValueMemberS{Value: accountID}},
+		ProjectionExpression: aws.String("#k, #s"),
+		// Both through names: status is a DynamoDB reserved word.
+		ExpressionAttributeNames: map[string]string{"#k": registryKeyAttr, "#s": registryStatusAttr},
+	}
+}
+
+// lookupRegistryAccountLive reads accountID's registry row: whether there is
+// one, and its status.
+func lookupRegistryAccountLive(ctx context.Context, accountID string) (bool, string, error) {
 	if dynamoClient == nil {
-		return nil, fmt.Errorf("account registry client not initialised")
+		return false, "", fmt.Errorf("account registry client not initialised")
 	}
-	table := os.Getenv("DNS_ACCOUNTS_TABLE")
-	if table == "" {
-		table = registryTableDefault
-	}
-
-	out := map[string]struct{}{}
-	var start map[string]ddbtypes.AttributeValue
-	for {
-		page, err := dynamoClient.Scan(ctx, &dynamodb.ScanInput{
-			TableName:            aws.String(table),
-			ProjectionExpression: aws.String(accountIDAttr),
-			// Select is set EXPLICITLY, not left for DynamoDB to infer from the
-			// presence of ProjectionExpression.
-			//
-			// The IAM grant pins dynamodb:Select to SPECIFIC_ATTRIBUTES, because
-			// that is the only thing stopping ForAllValues:StringEquals on
-			// dynamodb:Attributes being satisfied vacuously by a request naming no
-			// attributes at all. A condition key that the request does not carry
-			// evaluates as absent and the condition fails — so inferring Select
-			// server-side would leave the grant denying its own only caller, and
-			// it would fail in production and nowhere else. Simulated: allowed with
-			// this pair, implicitDeny with Select=ALL_ATTRIBUTES, with a second
-			// projected attribute, and with no context at all.
-			Select:            ddbtypes.SelectSpecificAttributes,
-			ExclusiveStartKey: start,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("scan %s: %w", table, err)
-		}
-		for _, item := range page.Items {
-			av, ok := item[accountIDAttr]
-			if !ok {
-				continue
-			}
-			s, ok := av.(*ddbtypes.AttributeValueMemberS)
-			if !ok || !isAccountID(s.Value) {
-				continue
-			}
-			out[s.Value] = struct{}{}
-		}
-		if len(page.LastEvaluatedKey) == 0 {
-			break
-		}
-		start = page.LastEvaluatedKey
-	}
-	return out, nil
-}
-
-// allowedAccounts returns the entitled set, from cache when warm.
-//
-// A failed lookup is NOT cached: caching it would turn one throttled Scan into
-// five minutes of refusals for every caller.
-func allowedAccounts(ctx context.Context) (map[string]struct{}, error) {
-	allowlistMu.Lock()
-	defer allowlistMu.Unlock()
-
-	if allowlistCache != nil && time.Now().Before(allowlistExpiry) {
-		return allowlistCache, nil
-	}
-
-	merged, rejected := extraAllowedAccounts()
-	for _, bad := range rejected {
-		fmt.Printf("DNS_ALLOWED_ACCOUNTS: ignoring %q — not a 12-digit AWS account ID, so the "+
-			"account it was meant to entitle is NOT entitled\n", bad)
-	}
-	registry, err := scanAccountRegistry(ctx)
+	table := registryTable()
+	out, err := dynamoClient.GetItem(ctx, registryGetItemInput(table, accountID))
 	if err != nil {
-		// Only tolerable when the static allowlist alone can answer the question.
-		// Otherwise the caller decides what to do with the error; it is not this
-		// function's place to decide that an unreadable registry means "allow".
-		if len(merged) == 0 {
-			return nil, err
-		}
-		fmt.Printf("warning: account registry unreadable (%v); falling back to DNS_ALLOWED_ACCOUNTS (%d entries)\n",
-			err, len(merged))
-		return merged, nil
+		return false, "", fmt.Errorf("get %s from %s: %w", accountID, table, err)
 	}
-	for id := range registry {
-		merged[id] = struct{}{}
+	if out.Item == nil {
+		return false, "", nil
 	}
-
-	allowlistCache, allowlistExpiry = merged, time.Now().Add(allowlistTTL)
-	return merged, nil
+	status := ""
+	if v, ok := out.Item[registryStatusAttr].(*ddbtypes.AttributeValueMemberS); ok {
+		status = v.Value
+	}
+	return true, status, nil
 }
 
-// resetAllowlistCache drops the cached set. For tests.
+// resetAllowlistCache drops every cached answer. For tests.
 func resetAllowlistCache() {
-	allowlistMu.Lock()
-	defer allowlistMu.Unlock()
-	allowlistCache, allowlistExpiry = nil, time.Time{}
+	entitlementMu.Lock()
+	defer entitlementMu.Unlock()
+	entitlementCache = map[string]entitlementEntry{}
+}
+
+// registryEntitles reports whether the registry entitles accountID, from cache
+// when warm. A failed lookup is NOT cached: caching it would turn one
+// throttled read into minutes of refusals.
+func registryEntitles(ctx context.Context, accountID string) (bool, error) {
+	entitlementMu.Lock()
+	e, ok := entitlementCache[accountID]
+	entitlementMu.Unlock()
+	if ok && time.Now().Before(e.expires) {
+		return e.ok, nil
+	}
+	found, status, err := lookupRegistryAccount(ctx, accountID)
+	if err != nil {
+		return false, err
+	}
+	entitled := found && status != statusOffboarded
+	ttl := entitledTTL
+	if !entitled {
+		ttl = notEntitledTTL
+	}
+	entitlementMu.Lock()
+	entitlementCache[accountID] = entitlementEntry{ok: entitled, expires: time.Now().Add(ttl)}
+	entitlementMu.Unlock()
+	return entitled, nil
 }
 
 // authorizeCaller reports whether the SigV4-verified account may register DNS at
 // all, and why not when it may not.
 //
-// Fails closed on every uncertainty, including the one that looks like success: a
-// lookup that returns zero accounts has broken rather than proved that nobody is
-// entitled (CLAUDE.md rule 4 — a discovery finding nothing is a failure). The
-// registry is known to hold items; an empty answer means the table name is wrong,
-// or it was emptied, or the projection stopped matching. Reading that as "deny
-// everyone" is correct but reading it as "allow everyone" would be the same
-// fail-open this file exists to remove.
+// DNS_ALLOWED_ACCOUNTS answers first, with no DynamoDB call; then the
+// registry. Fails closed on every uncertainty: an account that is not 12
+// digits, a registry that cannot be read, no row, an offboarded row.
 func authorizeCaller(ctx context.Context, accountID string) (bool, string) {
 	if !isAccountID(accountID) {
 		return false, fmt.Sprintf("verified caller account %q is not a 12-digit account ID", accountID)
 	}
-	allowed, err := allowedAccounts(ctx)
+	static, rejected := extraAllowedAccounts()
+	reportRejectedOnce.Do(func() {
+		for _, bad := range rejected {
+			fmt.Printf("DNS_ALLOWED_ACCOUNTS: ignoring %q — not a 12-digit AWS account ID, so the "+
+				"account it was meant to entitle is NOT entitled\n", bad)
+		}
+	})
+	if _, ok := static[accountID]; ok {
+		return true, ""
+	}
+	entitled, err := registryEntitles(ctx, accountID)
 	if err != nil {
-		return false, fmt.Sprintf("could not resolve the entitled accounts (%v) — refusing rather "+
-			"than assuming entitlement", err)
+		return false, fmt.Sprintf("could not read account %s from %s (%v) and it is not in "+
+			"DNS_ALLOWED_ACCOUNTS — refusing rather than assuming entitlement", accountID, registryTable(), err)
 	}
-	if len(allowed) == 0 {
-		return false, "the entitled-account lookup returned nothing at all; the registry is known " +
-			"to hold items, so this is a broken lookup rather than an empty allowlist"
-	}
-	if _, ok := allowed[accountID]; !ok {
-		return false, fmt.Sprintf("account %s is not registered in %s and is not in "+
-			"DNS_ALLOWED_ACCOUNTS", accountID, registryTableDefault)
+	if !entitled {
+		return false, fmt.Sprintf("account %s is not onboarded in %s (no row, or offboarded) and is not in "+
+			"DNS_ALLOWED_ACCOUNTS", accountID, registryTable())
 	}
 	return true, ""
 }

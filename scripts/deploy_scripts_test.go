@@ -389,14 +389,18 @@ func commandNear(lines []string, idx int, fn string) bool {
 	return false
 }
 
-// Attribute-scoped DynamoDB grants must also pin dynamodb:Select.
+// Attribute-scoped DynamoDB grants must also refuse a request naming no
+// attributes.
 //
 // ForAllValues:StringEquals is satisfied by an EMPTY set, so a request naming no
 // attributes at all passes an `ForAllValues:StringEquals dynamodb:Attributes`
-// condition and reads every field of every item. Pinning Select to
-// SPECIFIC_ATTRIBUTES is what turns that from a loophole into a denial — the same
-// family as ForAllValues:StringNotEquals on aws:TagKeys being defeated by one
-// innocuous tag key. Simulated both ways before this gate was written.
+// condition and reads every field of every item. For a Query or Scan, pinning
+// dynamodb:Select to SPECIFIC_ATTRIBUTES is what turns that from a loophole into
+// a denial — the same family as ForAllValues:StringNotEquals on aws:TagKeys being
+// defeated by one innocuous tag key. Simulated both ways before this gate was
+// written. dynamodb:Select exists only on Query and Scan, so a GetItem grant
+// (dns-updater's since #1611) refuses the empty case with
+// "Null": {"dynamodb:Attributes": "false"} instead.
 func TestAttributeScopedDynamoGrantsPinSelect(t *testing.T) {
 	checked := 0
 	for _, f := range shellScripts(t) {
@@ -405,11 +409,19 @@ func TestAttributeScopedDynamoGrantsPinSelect(t *testing.T) {
 			continue
 		}
 		checked++
-		if !strings.Contains(s, `"dynamodb:Select": "SPECIFIC_ATTRIBUTES"`) {
-			t.Errorf("%s scopes a DynamoDB grant with dynamodb:Attributes but does not pin "+
-				"dynamodb:Select to SPECIFIC_ATTRIBUTES. ForAllValues is true for an empty set, "+
-				"so a Scan naming no attributes satisfies the condition and returns every "+
-				"field of every item — the attribute scoping is decorative without it.", f)
+		pinsSelect := strings.Contains(s, `"dynamodb:Select": "SPECIFIC_ATTRIBUTES"`)
+		requiresAttributes := strings.Contains(s, `"Null": { "dynamodb:Attributes": "false" }`)
+		if !pinsSelect && !requiresAttributes {
+			t.Errorf("%s scopes a DynamoDB grant with dynamodb:Attributes but neither pins "+
+				"dynamodb:Select to SPECIFIC_ATTRIBUTES (Query/Scan) nor requires the key with "+
+				`"Null": { "dynamodb:Attributes": "false" } (GetItem). ForAllValues is true for an `+
+				"empty set, so a request naming no attributes satisfies the condition and returns "+
+				"every field — the attribute scoping is decorative without one of them.", f)
+		}
+		// A Scan or Query grant needs the Select pin specifically: the Null
+		// check alone does not stop Select=ALL_ATTRIBUTES alongside a projection.
+		if (strings.Contains(s, `"dynamodb:Scan"`) || strings.Contains(s, `"dynamodb:Query"`)) && !pinsSelect {
+			t.Errorf("%s grants an attribute-scoped Scan or Query without pinning dynamodb:Select", f)
 		}
 	}
 	// Rule 4: an empty discovery is reported, not silently passed. This gate was
