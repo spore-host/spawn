@@ -170,12 +170,18 @@ func TestConnectTunnelsBytesToTheVettedAddress(t *testing.T) {
 	mu.Lock()
 	clock = clock.Add(time.Minute)
 	mu.Unlock()
-	// "hello" rides in the same write as the CONNECT, as a TLS ClientHello
-	// often does: the proxy must not drop bytes it has already buffered.
+	// The ClientHello, and "hello" after it, ride in the same write as the
+	// CONNECT, as a TLS client's first flight often does: the proxy must not
+	// drop bytes it has already buffered, and forwards the hello unchanged.
+	ch := clientHelloFor(t, "efa-installer.amazonaws.com")
 	resp, c, br := rawRequest(t, addr,
-		"CONNECT efa-installer.amazonaws.com:443 HTTP/1.1\r\nHost: efa-installer.amazonaws.com:443\r\n\r\nhello")
+		"CONNECT efa-installer.amazonaws.com:443 HTTP/1.1\r\nHost: efa-installer.amazonaws.com:443\r\n\r\n"+string(ch)+"hello")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT status %d, want 200", resp.StatusCode)
+	}
+	echoed := make([]byte, len(ch))
+	if _, err := io.ReadFull(br, echoed); err != nil || !bytes.Equal(echoed, ch) {
+		t.Fatalf("the ClientHello was not forwarded unchanged: %v", err)
 	}
 	got := make([]byte, 5)
 	if _, err := io.ReadFull(br, got); err != nil || string(got) != "hello" {
@@ -194,12 +200,13 @@ func TestConnectTunnelsBytesToTheVettedAddress(t *testing.T) {
 		t.Errorf("LastActivity = %v, want the accept time %v", p.LastActivity(), clock)
 	}
 	_ = c.Close()
-	waitFor(t, func() bool { return strings.Contains(logs.String(), "bytes_up=10") })
+	up := fmt.Sprintf("bytes_up=%d", len(ch)+10)
+	waitFor(t, func() bool { return strings.Contains(logs.String(), up) })
 	if s := p.Stats(); s.Accepted != 1 || s.Refused != 0 {
 		t.Errorf("stats %+v, want 1 accepted, 0 refused", s)
 	}
 	line := logs.String()
-	for _, want := range []string{`method=CONNECT`, `host="efa-installer.amazonaws.com"`, `port="443"`, `verdict=allowed`, `bytes_up=10`, `bytes_down=10`} {
+	for _, want := range []string{`method=CONNECT`, `host="efa-installer.amazonaws.com"`, `port="443"`, `verdict=allowed`, up, fmt.Sprintf("bytes_down=%d", len(ch)+10)} {
 		if !strings.Contains(line, want) {
 			t.Errorf("log %q lacks %q", line, want)
 		}
@@ -509,9 +516,13 @@ func TestIdleTunnelIsClosed(t *testing.T) {
 	fn := newFakeNet(echoServer(t))
 	fn.set("efa-installer.amazonaws.com", "52.94.233.129")
 	_, addr, _ := startProxy(t, fn, Config{IdleTimeout: 100 * time.Millisecond})
-	resp, _, br := rawRequest(t, addr, "CONNECT efa-installer.amazonaws.com:443 HTTP/1.1\r\nHost: x\r\n\r\n")
+	ch := clientHelloFor(t, "efa-installer.amazonaws.com")
+	resp, _, br := rawRequest(t, addr, "CONNECT efa-installer.amazonaws.com:443 HTTP/1.1\r\nHost: x\r\n\r\n"+string(ch))
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if _, err := io.ReadFull(br, make([]byte, len(ch))); err != nil {
+		t.Fatalf("the ClientHello was not echoed: %v", err)
 	}
 	start := time.Now()
 	if _, err := br.ReadByte(); err == nil {
@@ -530,7 +541,11 @@ func TestBytesRefreshActivity(t *testing.T) {
 	clock := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
 	now := func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
 	p, addr, _ := startProxy(t, fn, Config{Now: now})
-	_, c, br := rawRequest(t, addr, "CONNECT efa-installer.amazonaws.com:443 HTTP/1.1\r\nHost: x\r\n\r\n")
+	ch := clientHelloFor(t, "efa-installer.amazonaws.com")
+	_, c, br := rawRequest(t, addr, "CONNECT efa-installer.amazonaws.com:443 HTTP/1.1\r\nHost: x\r\n\r\n"+string(ch))
+	if _, err := io.ReadFull(br, make([]byte, len(ch))); err != nil {
+		t.Fatalf("the ClientHello was not echoed: %v", err)
+	}
 	accepted := p.LastActivity()
 
 	mu.Lock()

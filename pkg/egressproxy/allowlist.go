@@ -4,8 +4,9 @@
 //
 // It speaks two things, both limited to the hosts in [Allowlist]:
 //
-//   - HTTPS CONNECT to port 443, tunnelled byte for byte. TLS is never
-//     terminated or inspected; the client verifies the origin's certificate.
+//   - HTTPS CONNECT to port 443, tunnelled byte for byte once the client's
+//     TLS ClientHello names the CONNECT host (its server_name, #1595; sni.go).
+//     TLS is never terminated; the client verifies the origin's certificate.
 //   - Plain-HTTP forwarding of an absolute-URI GET or HEAD to port 80, which
 //     Ubuntu's EC2 apt mirrors need: they are http:// by default.
 //

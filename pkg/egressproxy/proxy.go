@@ -1,6 +1,7 @@
 package egressproxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -367,13 +368,28 @@ func (p *Proxy) tunnel(w http.ResponseWriter, r *http.Request, host, port string
 		return
 	}
 	defer func() { _ = client.Close() }()
+
+	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		p.refused.Add(1)
+		p.logLine(r, host, port, "refused", "client gone", 0, 0, start)
+		return
+	}
+	// The ClientHello must name the CONNECT host (#1595, sni.go). The client
+	// may have sent it, or part of it, right behind the CONNECT, already
+	// buffered in brw. Read with the header timeout: a client that connects
+	// and sends nothing holds a slot no longer than one that sends no request.
+	buffered := &io.LimitedReader{R: brw, N: int64(brw.Reader.Buffered())}
+	_ = client.SetReadDeadline(time.Now().Add(p.cfg.HeaderTimeout))
+	hello, helloBytes, herr := readClientHello(io.MultiReader(buffered, client))
+	_ = client.SetReadDeadline(time.Time{})
+	if why := helloRefusal(host, hello, herr); why != "" {
+		p.refused.Add(1)
+		p.logLine(r, host, port, "refused", why, 0, 0, start)
+		return
+	}
 	p.accepted.Add(1)
 	p.touch()
 
-	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		p.logLine(r, host, port, "allowed", "client gone", 0, 0, start)
-		return
-	}
 	cc := &activeConn{Conn: client, p: p}
 	cc.extend()
 	up.(*activeConn).extend()
@@ -383,9 +399,9 @@ func (p *Proxy) tunnel(w http.ResponseWriter, r *http.Request, host, port string
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// The client may have sent bytes (its TLS ClientHello) right behind
-		// the CONNECT, already buffered in brw.
-		upBytes, _ = copyBuf(up, io.MultiReader(io.LimitReader(brw, int64(brw.Reader.Buffered())), cc))
+		// The ClientHello read above goes first, unchanged, then whatever was
+		// left in brw, then the client's stream.
+		upBytes, _ = copyBuf(up, io.MultiReader(bytes.NewReader(helloBytes), buffered, cc))
 		closeWrite(up)
 	}()
 	downBytes, _ = copyBuf(cc, up)

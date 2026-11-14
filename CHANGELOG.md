@@ -81,6 +81,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   EC2's `GetPasswordData` uses. The command history holds only a public key
   and ciphertext.
 
+- The egress proxy (`--no-public-ip --bootstrap-egress proxy`) now reads a
+  CONNECT tunnel's TLS ClientHello before forwarding any of it. It refuses the
+  tunnel unless the hello's server name (SNI) is the CONNECT host (#1595).
+  The allowlisted HTTPS hosts sit behind shared CloudFront edges, so a client
+  could `CONNECT awscli.amazonaws.com:443`, then ask the edge for any other
+  distribution and reach it through the proxy. The proxy also refuses a hello
+  with no server name, one using encrypted ClientHello, and a tunnel that does
+  not start with TLS. TLS is still not terminated: the hello is forwarded
+  unchanged. A tunnel that sends no hello is closed after the header timeout.
+  Proxies pick this up when they are next launched or upgraded to this
+  spored.
+
 ## [0.164.0] - 2026-11-12
 
 ### Security
