@@ -5,15 +5,19 @@ on:
     tags:
       - 'v*'
 
+# Read-only by default (#1599); each job grants what it writes. Before, these
+# writes were granted to the whole workflow, so every job got them.
 permissions:
-  contents: write
-  id-token: write   # keyless cosign signing (Fulcio/Rekor) + spored KMS OIDC + provenance
-  attestations: write   # actions/attest-build-provenance (SLSA)
+  contents: read
 
 jobs:
   goreleaser:
     name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # the GitHub release and its assets (GoReleaser)
+      id-token: write       # keyless cosign signing (Fulcio/Rekor) + the release role's OIDC + provenance
+      attestations: write   # actions/attest-build-provenance (SLSA)
     env:
       # Every region spawn publishes spored and the bootstrap body to.
       SPAWN_BINARY_BUCKETS: >-
