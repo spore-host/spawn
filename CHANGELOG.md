@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokens, and proposes dropping `DOCS_SYNC_TOKEN` and moving the tap tokens to
   a GitHub App. `docs/release-tap-token.md` now says one token per tap and
   that these are org secrets.
+- The dashboard's live updates no longer broadcast a sweep record that names
+  no `user_id` to every open dashboard: such a record now goes to nobody, and
+  a connection with no user matches nothing (#1600). The record carries the
+  sweep's account ID, params location and progress.
+- The dashboard API no longer reads or writes its user-account cache under an
+  STS assumed-role ARN (#1589). Every Cognito identity-pool user arrives under
+  the same session ARN, so one cached row would have resolved every later
+  web sign-in to that user's CLI identity, sweeps, watches and teams. Such a
+  caller is now resolved from a verified email claim on every request; IAM
+  user ARNs, which are per-person, are still cached.
 
 ## [0.165.0] - 2026-11-13
 
