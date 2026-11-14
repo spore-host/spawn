@@ -72,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret alone. The bot must be a build that reads `BOT_APP_SECRETS_ARN`
   (spore-host/spore-host#740). Deploy that build first, or in the same stack
   update.
+- spored no longer writes a spot-interruption or completion webhook URL to its
+  log (#1592). Slack, Teams and most queue webhooks authorise a POST by the
+  token in the URL, so the URL is the credential, and spored logged it in full
+  on every POST, success included, and inside the transport error a failed
+  POST returns. It now logs only the URL's scheme and host. The lagotto
+  poller's equivalent is spore-host/lagotto#316.
 
 ## [0.165.0] - 2026-11-13
 
