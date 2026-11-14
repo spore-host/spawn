@@ -198,8 +198,9 @@ func TestWorkflowsAssumeOnlyInventoriedRolesWithTheirTrustsSub(t *testing.T) {
 	}
 	assumedIn := map[string]map[string]bool{} // role -> workflow paths
 	assumptions, signs := 0, 0
-	for _, f := range oidcWorkflowFiles(t) {
-		w := readOIDCWorkflow(t, f)
+	for _, path := range oidcWorkflowFiles(t) {
+		w := readOIDCWorkflow(t, path)
+		f := filepath.ToSlash(path) // used_by names it with "/" on Windows too
 		for id, j := range w.Jobs {
 			var assumed []oidcRole
 			for _, s := range j.Steps {
