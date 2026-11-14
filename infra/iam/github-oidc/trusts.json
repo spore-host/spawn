@@ -1,0 +1,65 @@
+{
+  "_about": "Expected GitHub Actions OIDC trust policies for every AWS role a spore-host/spawn workflow assumes (#1601), in the format of spore-host/spore-host infra/iam/github-oidc/trusts.json (spore-host#709), which lists the same two roles with the same trusts. Neither role's trust is applied from this file: compare a live `aws iam get-role` against it with scripts/oidctrust (README.md). No account may appear here that spawn's forbiddenTrustAccounts refuses (942542972736).",
+  "roles": [
+    {
+      "role": "GitHubActions-spore-host-release",
+      "account": "966362334030",
+      "role_arn": "arn:aws:iam::966362334030:role/GitHubActions-spore-host-release",
+      "variables": [],
+      "used_by": [
+        "spore-host/spawn:.github/workflows/release.yaml"
+      ],
+      "codified_in": null,
+      "why": "spawn's release, run by pushing a v* tag. It holds kms:Sign on the spored signing key (signing-key.json), so it is the authenticity root of every spored and bootstrap body. A tag push's sub is ref:refs/tags/<tag>, so the one wildcard allowed is the tag name, under StringLike. Anyone who can create a v* tag in spawn can assume this role, so a tag ruleset must restrict v* creation (README.md).",
+      "trust": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Federated": "arn:aws:iam::966362334030:oidc-provider/token.actions.githubusercontent.com"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+              "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+              },
+              "StringLike": {
+                "token.actions.githubusercontent.com:sub": "repo:spore-host/spawn:ref:refs/tags/v*"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "role": "GitHubActions-spawn-lambda-deploy",
+      "account": "966362334030",
+      "role_arn": "arn:aws:iam::966362334030:role/GitHubActions-spawn-lambda-deploy",
+      "variables": [],
+      "used_by": [
+        "spore-host/spawn:.github/workflows/deploy-lambdas.yaml"
+      ],
+      "codified_in": "spore-host/spawn:scripts/setup-lambda-deploy-ci-role.sh",
+      "why": "Approval-gated Lambda deploy. The job runs in the production environment (required reviewer, v* tags only), so the sub names the environment, not a ref.",
+      "trust": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Federated": "arn:aws:iam::966362334030:oidc-provider/token.actions.githubusercontent.com"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+              "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                "token.actions.githubusercontent.com:sub": "repo:spore-host/spawn:environment:production"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
