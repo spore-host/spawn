@@ -599,7 +599,19 @@ Resources:
                     - ec2:DescribeAddresses
                     # #1300 role sweep: every enabled region; read-only.
                     - ec2:DescribeRegions
+                    # #1621 session key-pair sweep; read-only.
+                    - ec2:DescribeKeyPairs
                   Resource: '*'
+                # #1621: delete only a nested head's session key pair, never a
+                # user's workstation key (spawn:purpose=ssh-key).
+                - Effect: Allow
+                  Action:
+                    - ec2:DeleteKeyPair
+                  Resource: '*'
+                  Condition:
+                    StringEquals:
+                      ec2:ResourceTag/spawn:managed: 'true'
+                      ec2:ResourceTag/spawn:purpose: ssh-key-session
                 # The destructive half, on the same tag rail as TerminateInstances.
                 # CreateTags lets the sweep stamp a spawn-managed resource with its
                 # first-seen time; tag-conditioned, so it cannot adopt a resource

@@ -205,9 +205,21 @@ Resources:
                   - ec2:DescribeAddresses
                   # The #1300 role sweep checks every enabled region; read-only.
                   - ec2:DescribeRegions
+                  # The #1621 session key-pair sweep; read-only.
+                  - ec2:DescribeKeyPairs
                 # trivy:ignore:AVD-AWS-0057 -- Resource * required (neither Describe
                 # has a resource-level ARN); these are read-only.
                 Resource: '*'
+              # #1621: delete only a nested head's session key pair. A user's
+              # workstation key (spawn:purpose=ssh-key) is denied, not skipped.
+              - Effect: Allow
+                Action:
+                  - ec2:DeleteKeyPair
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ec2:ResourceTag/spawn:managed: 'true'
+                    ec2:ResourceTag/spawn:purpose: ssh-key-session
               # The destructive half, on the same tag rail as TerminateInstances
               # above. Both are ec2: actions so ec2:ResourceTag is the correct
               # SERVICE key — unlike #665, where that key on an ssm: action was a

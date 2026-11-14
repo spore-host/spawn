@@ -44,6 +44,16 @@ var ManagedTagCondition = map[string]map[string]string{
 	"StringEquals": {"ec2:ResourceTag/spawn:managed": "true"},
 }
 
+// SessionKeyTagCondition is ManagedTagCondition narrowed to the key pairs a
+// nested-spawn head imports for one session (pkg/keypairsweep.PurposeSession),
+// so the reaper can never delete a user's long-lived workstation key (#1621).
+var SessionKeyTagCondition = map[string]map[string]string{
+	"StringEquals": {
+		"ec2:ResourceTag/spawn:managed": "true",
+		"ec2:ResourceTag/spawn:purpose": "ssh-key-session",
+	},
+}
+
 // ManagedSSMTagCondition is the same rail for ssm:* actions.
 //
 // It exists separately because a condition key belongs to the service of the
@@ -181,8 +191,22 @@ func ScanSelfStatements() []Statement {
 				// enabled in the account for an instance holding a role's
 				// profile, not only the scanned ones. Read-only.
 				"ec2:DescribeRegions",
+				// The session key-pair sweep (#1621, pkg/keypairsweep).
+				// DescribeKeyPairs has no resource-level permissions.
+				"ec2:DescribeKeyPairs",
 			},
 			Resource: "*",
+		},
+		{
+			// The session key-pair sweep's delete (#1621): only a key pair
+			// tagged spawn:purpose=ssh-key-session, which a nested-spawn head
+			// imports for one session. A user's workstation key
+			// (spawn:purpose=ssh-key) is denied here, not merely skipped by the
+			// sweep. ec2:ResourceTag on an ec2: action: the service's own key.
+			Effect:    "Allow",
+			Action:    []string{"ec2:DeleteKeyPair"},
+			Resource:  "*",
+			Condition: SessionKeyTagCondition,
 		},
 		{
 			// The destructive half of the #685 sweep, tag-gated on the same rail

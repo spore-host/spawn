@@ -31,6 +31,7 @@ import (
 	smithy "github.com/aws/smithy-go"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/elasticip"
+	"github.com/spore-host/spawn/pkg/keypairsweep"
 	"github.com/spore-host/spawn/pkg/launchconfig"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
@@ -1068,16 +1069,28 @@ func (c *Client) CheckKeyPairExists(ctx context.Context, region, keyName string)
 // ImportKeyPair imports a public key to AWS EC2, tagging it spawn:managed so
 // `spawn cleanup`/`resources` can find it (#258). ImportKeyPair supports
 // tag-on-create, so no separate CreateTags call is needed.
+//
+// spawn:purpose says which kind of key it is (#1621). A key imported by a
+// --nested-spawn head is that head's, for one session: its private half lives
+// on the head and dies with it, so it is tagged keypairsweep.PurposeSession,
+// and the TTL reaper and `spawn cleanup --session-keys` delete it once
+// nothing uses it. Any other caller is importing a workstation's long-lived
+// key, reused by every launch from that machine: keypairsweep.PurposeWorkstation,
+// which neither ever touches.
 func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publicKey []byte) error {
 	ec2Client := c.regionalEC2(region)
 
+	purpose := keypairsweep.PurposeWorkstation
+	if _, userARN, err := c.GetCallerIdentityInfo(ctx); err == nil {
+		purpose = keyPairPurposeFor(userARN)
+	}
 	input := &ec2.ImportKeyPairInput{
 		KeyName:           aws.String(keyName),
 		PublicKeyMaterial: publicKey,
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeKeyPair,
-				Tags:         c.managedResourceTags(ctx, map[string]string{"spawn:purpose": "ssh-key"}),
+				Tags:         c.managedResourceTags(ctx, map[string]string{"spawn:purpose": purpose}),
 			},
 		},
 	}
@@ -1091,6 +1104,17 @@ func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publ
 	}
 
 	return nil
+}
+
+// keyPairPurposeFor is the spawn:purpose of a key pair the caller userARN
+// imports: a session key for a --nested-spawn role session, else a
+// workstation key. An unknown caller gets the workstation purpose, the one no
+// sweep deletes.
+func keyPairPurposeFor(userARN string) string {
+	if _, nested := NestedSpawnRoleFromCallerARN(userARN); nested {
+		return keypairsweep.PurposeSession
+	}
+	return keypairsweep.PurposeWorkstation
 }
 
 func contains(s, substr string) bool {
