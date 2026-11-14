@@ -92,7 +92,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. A tunnel that sends no hello is closed after the header timeout.
   Proxies pick this up when they are next launched or upgraded to this
   spored.
-### Security
 
 - spored's release signature is now bound to the binary's name and version
   (#1597). The `.sig` beside each spored covers its bytes alone, and the
