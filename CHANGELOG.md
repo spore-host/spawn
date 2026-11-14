@@ -141,6 +141,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ec2:DescribeSecurityGroups` and `ec2:DeleteSecurityGroup`
   (docs/reference/cli-iam-actions.md).
 
+### Security
+
+- Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
+  read-only, and grants writes only on the job that needs them (#1599). CI had
+  no `permissions:` block, so its token was whatever the org default was, and
+  the release workflow granted `contents: write`, `id-token: write` and
+  `attestations: write` to the whole workflow, so any job added without its
+  own block would have inherited them; the release job holds them now. A
+  test fails on any workflow without a
+  read-only top-level block, on any write in a workflow that runs on pull
+  requests, and on `id-token: write` in a job that uses no OIDC token.
+
 ## [0.165.0] - 2026-11-13
 
 ### Added
