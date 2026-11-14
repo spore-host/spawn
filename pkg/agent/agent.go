@@ -2059,12 +2059,15 @@ func (a *Agent) emitSpotInterruptionWebhook(info *provider.InterruptionInfo) {
 	postWebhook("Spot webhook", cfg.SpotWebhookURL, timeout, payload)
 }
 
-// postWebhook marshals payload and POSTs it to url, best-effort, time-boxed by
+// postWebhook marshals payload and POSTs it to target, best-effort, time-boxed by
 // timeout. Any failure — marshal, build, timeout, DNS, non-2xx — is logged at
 // most and dropped; the caller (spot/completion webhook) must never block the
 // lifecycle action it precedes on a slow or dead endpoint. label prefixes log
 // lines so spored.log can distinguish which webhook fired.
-func postWebhook(label, url string, timeout time.Duration, payload any) {
+//
+// The URL is never logged, nor any error quoting it: it is the credential
+// (#1592). Only its scheme and host are (webhookEndpoint).
+func postWebhook(label, target string, timeout time.Duration, payload any) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("%s: marshal failed, dropping: %v", label, err)
@@ -2074,9 +2077,10 @@ func postWebhook(label, url string, timeout time.Duration, payload any) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	where := webhookEndpoint(target)
+	req, err := http.NewRequestWithContext(ctx, "POST", target, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("%s: request build failed, dropping: %v", label, err)
+		log.Printf("%s: request build for %s failed, dropping: %v", label, where, redactURLError(err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -2084,15 +2088,15 @@ func postWebhook(label, url string, timeout time.Duration, payload any) {
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("%s: POST to %s failed, dropping (best-effort): %v", label, url, err)
+		log.Printf("%s: POST to %s failed, dropping (best-effort): %v", label, where, redactURLError(err))
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		log.Printf("%s: endpoint %s returned %d, dropping (best-effort)", label, url, resp.StatusCode)
+		log.Printf("%s: endpoint %s returned %d, dropping (best-effort)", label, where, resp.StatusCode)
 		return
 	}
-	log.Printf("%s: notice POSTed to %s", label, url)
+	log.Printf("%s: notice POSTed to %s", label, where)
 }
 
 // completionWebhookPayload is the fixed, stable on-node fact-struct spored
