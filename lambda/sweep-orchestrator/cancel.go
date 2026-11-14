@@ -13,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 )
 
@@ -87,17 +86,13 @@ func sweepRegions(state *SweepRecord) []string {
 // assumeMemberClients assumes SpawnSweepCrossAccountRole once and returns an
 // EC2 client for every region the sweep's members can be in.
 func assumeMemberClients(ctx context.Context, state *SweepRecord) (map[string]memberEC2API, error) {
-	result, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
-		RoleArn:         aws.String(fmt.Sprintf(crossAccountRole, state.AWSAccountID)),
-		RoleSessionName: aws.String("spawn-sweep-orchestrator"),
-		DurationSeconds: aws.Int32(3600),
-	})
+	creds, err := assumeSweepRole(ctx, state.AWSAccountID)
 	if err != nil {
 		return nil, fmt.Errorf("assume role failed: %w", err)
 	}
 	clients := map[string]memberEC2API{}
 	for _, region := range sweepRegions(state) {
-		c, err := createEC2ClientWithCredentials(ctx, region, state.AWSAccountID, result.Credentials)
+		c, err := createEC2ClientWithCredentials(ctx, region, state.AWSAccountID, creds)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 client for %s: %w", region, err)
 		}
