@@ -170,7 +170,7 @@ instances):
 | `spawn team list` | `dynamodb:GetItem`, `dynamodb:Query` |
 | `spawn team remove` | `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:UpdateItem` |
 | `spawn team show` | `dynamodb:GetItem`, `dynamodb:Query` |
-| `spawn terminate` | `ec2:CancelSpotInstanceRequests`, `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:TerminateInstances`, `fsx:DescribeFileSystems`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
+| `spawn terminate` | `ec2:CancelSpotInstanceRequests`, `ec2:DeleteSecurityGroup`, `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DescribeSecurityGroups`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:TerminateInstances`, `fsx:DescribeFileSystems`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
 | `spawn upgrade-spored` | `ec2:CreateTags`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
 | `spawn validate` | `dynamodb:DescribeTable`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `lambda:GetFunction`, `s3:ListBucket` |
 | `spawn version` | none |
@@ -209,7 +209,7 @@ instances):
 | `ec2:CreateVolume` | `spawn snapshot mount` |
 | `ec2:DeleteKeyPair` | `spawn cleanup` |
 | `ec2:DeletePlacementGroup` | `spawn array retry`, `spawn cleanup`, `spawn launch` |
-| `ec2:DeleteSecurityGroup` | `spawn cleanup`, `spawn egress-proxy delete` |
+| `ec2:DeleteSecurityGroup` | `spawn cleanup`, `spawn egress-proxy delete`, `spawn terminate` |
 | `ec2:DeleteSnapshot` | `spawn ami delete` |
 | `ec2:DeleteTags` | `spawn dns delete` |
 | `ec2:DeleteVolume` | `spawn cleanup` |
@@ -224,7 +224,7 @@ instances):
 | `ec2:DescribePlacementGroups` | `spawn array retry`, `spawn cleanup`, `spawn footprint`, `spawn launch`, `spawn orphans`, `spawn pool create`, `spawn resources` |
 | `ec2:DescribeRegions` | `spawn ami create`, `spawn app launch`, `spawn app url`, `spawn array cancel`, `spawn array collect`, `spawn array logs`, `spawn array retry`, `spawn array status`, `spawn cleanup`, `spawn connect`, `spawn cost`, `spawn create-ami`, `spawn dns delete`, `spawn dns list`, `spawn dns register`, `spawn egress-proxy delete`, `spawn egress-proxy status`, `spawn egress-proxy upgrade`, `spawn extend`, `spawn footprint`, `spawn hibernate`, `spawn instance-config`, `spawn launch`, `spawn list`, `spawn logs`, `spawn orphans`, `spawn plugin install`, `spawn plugin list`, `spawn plugin remove`, `spawn plugin status`, `spawn pool create`, `spawn resources`, `spawn resume`, `spawn service`, `spawn start`, `spawn status`, `spawn stop`, `spawn sweep resume`, `spawn task diagnose`, `spawn task status`, `spawn terminate`, `spawn upgrade-spored`, `spawn validate` |
 | `ec2:DescribeRouteTables` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn egress-proxy upgrade`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
-| `ec2:DescribeSecurityGroups` | `spawn app launch`, `spawn connect`, `spawn egress-proxy delete`, `spawn egress-proxy status`, `spawn egress-proxy upgrade`, `spawn image import`, `spawn launch`, `spawn resume`, `spawn sweep resume` |
+| `ec2:DescribeSecurityGroups` | `spawn app launch`, `spawn connect`, `spawn egress-proxy delete`, `spawn egress-proxy status`, `spawn egress-proxy upgrade`, `spawn image import`, `spawn launch`, `spawn resume`, `spawn sweep resume`, `spawn terminate` |
 | `ec2:DescribeSnapshots` | `spawn ami snapshots`, `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn snapshot create`, `spawn sweep resume`, `spawn task run` |
 | `ec2:DescribeSpotPriceHistory` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn service`, `spawn slurm estimate`, `spawn slurm submit`, `spawn status`, `spawn sweep resume`, `spawn task run` |
 | `ec2:DescribeSubnets` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn doctor`, `spawn egress-proxy upgrade`, `spawn image import`, `spawn launch`, `spawn pool create`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |

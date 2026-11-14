@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spore-host/libs/i18n"
@@ -150,6 +151,17 @@ func terminateSingle(ctx context.Context, identifier string) error {
 	// its local mint step but has nothing to deprovision).
 	removeHostIdentityForIP(instance.PublicIP)
 
+	// A Windows launch's own security group, spawn-windows-<name>, goes with
+	// the instance (#1623). Read before the terminate: a terminated instance
+	// soon stops reporting its groups.
+	var windowsGroups []string
+	if instance.Tags["spawn:os"] == "windows" {
+		if windowsGroups, err = client.InstanceWindowsSecurityGroups(ctx, instance.Region, instance.InstanceID); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  could not read %s's security groups (%v); the TTL reaper deletes its spawn-windows group once unused\n",
+				instance.InstanceID, err)
+		}
+	}
+
 	if err := terminateWithFlush(ctx, client.RunShellScript, client.Terminate, instance, os.Stderr); err != nil {
 		return fmt.Errorf("failed to terminate instance: %w", err)
 	}
@@ -159,12 +171,36 @@ func terminateSingle(ctx context.Context, identifier string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "   Region:   %s\n", instance.Region)
 	_, _ = fmt.Fprintf(os.Stdout, "\nThe instance is shutting down and will be destroyed.\n")
 
+	if len(windowsGroups) > 0 {
+		deleteWindowsGroups(ctx, client, instance.Region, instance.InstanceID, windowsGroups)
+	}
+
 	// Name any FSx filesystem this instance held a lease on (spawn#613). Purely
 	// informational — terminate does not delete filesystems.
 	if notice := fsxLeaseNoticeFor(ctx, client, *instance, "terminate"); notice != "" {
 		_, _ = fmt.Fprint(os.Stdout, notice)
 	}
 	return nil
+}
+
+// windowsGroupWait bounds how long terminate waits for a Windows instance to
+// reach terminated before deleting its security group.
+const windowsGroupWait = 10 * time.Minute
+
+// deleteWindowsGroups is terminate's named deleter for the per-instance
+// Windows security group (#1623). Best-effort: the instance is already
+// terminating, so a failure here is reported, never returned, and the TTL
+// reaper deletes an unused spawn-windows group after an hour.
+func deleteWindowsGroups(ctx context.Context, client *aws.Client, region, instanceID string, groups []string) {
+	fmt.Fprintf(os.Stderr, "Waiting for %s to terminate, to delete its security group %s...\n", instanceID, strings.Join(groups, ", "))
+	deleted, err := client.DeleteSecurityGroupsAfterTerminate(ctx, region, instanceID, groups, windowsGroupWait)
+	for _, id := range deleted {
+		_, _ = fmt.Fprintf(os.Stdout, "Deleted security group %s\n", id)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  %v\n   The TTL reaper deletes an unused spawn-windows group after an hour; or: aws ec2 delete-security-group --group-id <id> --region %s\n",
+			err, region)
+	}
 }
 
 func terminateJobArray(ctx context.Context) error {

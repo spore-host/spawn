@@ -222,7 +222,7 @@ func (c *Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vp
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags:         LifecycleTags(groupName, "windows", time.Now()),
+				Tags:         LifecycleTags(groupName, WindowsSecurityGroupPurpose, time.Now()),
 			},
 		},
 	})
