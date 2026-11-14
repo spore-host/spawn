@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.165.0] - 2026-11-13
+
 ### Added
 
 - `spawn launch --imds-hop-limit N` sets the IMDSv2 PUT response hop limit
@@ -13927,7 +13929,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.164.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.165.0...HEAD
+[0.165.0]: https://github.com/spore-host/spawn/compare/v0.164.0...v0.165.0
 [0.164.0]: https://github.com/spore-host/spawn/compare/v0.163.2...v0.164.0
 [0.163.2]: https://github.com/spore-host/spawn/compare/v0.163.1...v0.163.2
 [0.163.1]: https://github.com/spore-host/spawn/compare/v0.163.0...v0.163.1
