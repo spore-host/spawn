@@ -349,26 +349,27 @@ aws iam put-role-policy \
 rm /tmp/spawn-lambda-policy.json
 info "IAM policy attached"
 
-# The account-registry read, for caller AUTHORIZATION (#835).
+# The account-registry read, for caller AUTHORIZATION (#835, #1611).
 #
 # Its own inline policy rather than another statement in the one above, so that
 # the single grant allowing this function to read customer records can be audited
-# and revoked on its own.
+# and revoked on its own. put-role-policy replaces the document, so this also
+# retires the Scan of spawn-user-accounts that earlier versions granted.
 #
-# Scoped three ways, and the third one is load-bearing:
+# One GetItem by the verified account ID (lambda/dns-updater/authorize.go,
+# registryGetItemInput), scoped three ways:
 #
-#   - to the one table;
-#   - to the one attribute, via the dynamodb:Attributes condition key (a
-#     DynamoDB key on a dynamodb: action — the pairing that #665 got wrong by
-#     putting ec2:ResourceTag on an ssm: action and earning a silent implicit
-#     deny);
-#   - to Select=SPECIFIC_ATTRIBUTES, WITHOUT which the attribute scoping does
-#     nothing. ForAllValues:StringEquals is true for an EMPTY set, so a Scan that
-#     names no attributes at all satisfies it and returns every field of every
-#     item. This is the same trap as ForAllValues:StringNotEquals on aws:TagKeys
-#     being defeated by one innocuous tag. Pinning Select is what makes a
-#     full-table read a denial rather than a loophole.
-DNS_ACCOUNTS_TABLE="${DNS_ACCOUNTS_TABLE:-spawn-user-accounts}"
+#   - to the one table, the portal registry keyed on accountId;
+#   - to the two attributes the updater projects, via dynamodb:Attributes (a
+#     DynamoDB key on a dynamodb: action, the pairing #665 got wrong by putting
+#     ec2:ResourceTag on an ssm: action and earning a silent implicit deny). The
+#     row also holds the account's onboarding role and ExternalId;
+#   - to a request that names its attributes at all. ForAllValues:StringEquals
+#     is true for an EMPTY set, so a GetItem with no ProjectionExpression (which
+#     returns the whole item) would satisfy the attribute condition alone. The
+#     Null check makes the key's absence a denial. (dynamodb:Select, the pin the
+#     Scan used, is a Query/Scan key; GetItem does not carry it.)
+DNS_ACCOUNTS_TABLE="${DNS_ACCOUNTS_TABLE:-spore-portal-accounts}"
 cat > /tmp/spawn-dns-registry-policy.json <<EOF
 {
   "Version": "2012-10-17",
@@ -376,11 +377,11 @@ cat > /tmp/spawn-dns-registry-policy.json <<EOF
     {
       "Sid": "ReadAccountRegistryForCallerAuthorization",
       "Effect": "Allow",
-      "Action": "dynamodb:Scan",
+      "Action": "dynamodb:GetItem",
       "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${DNS_ACCOUNTS_TABLE}",
       "Condition": {
-        "StringEquals": { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
-        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["aws_account_id"] }
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["accountId", "status"] },
+        "Null": { "dynamodb:Attributes": "false" }
       }
     }
   ]
@@ -392,6 +393,45 @@ aws iam put-role-policy \
   --policy-document file:///tmp/spawn-dns-registry-policy.json
 rm /tmp/spawn-dns-registry-policy.json
 info "Account-registry read policy attached (table: $DNS_ACCOUNTS_TABLE)"
+
+# The portal registry is encrypted with a customer-managed KMS key, and DynamoDB
+# decrypts with the caller's permissions, so the GetItem above also needs
+# kms:Decrypt on that key, through DynamoDB, for that table only. The key is read
+# from the table, not configured (as setup-dashboard-lambda-role.sh does for
+# dashboard-api's identical read). With an AWS-owned key no grant is needed.
+REGISTRY_KEY_ARN=$(aws dynamodb describe-table --table-name "$DNS_ACCOUNTS_TABLE" \
+  --query 'Table.SSEDescription.KMSMasterKeyArn' --output text 2>/dev/null || echo "") # swallow-ok: reported below
+[ "$REGISTRY_KEY_ARN" = "None" ] && REGISTRY_KEY_ARN=""
+if [ -n "$REGISTRY_KEY_ARN" ]; then
+  cat > /tmp/spawn-dns-registry-kms-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AccountRegistryDecrypt",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "${REGISTRY_KEY_ARN}",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "dynamodb.${REGION}.amazonaws.com",
+          "kms:EncryptionContext:aws:dynamodb:tableName": "${DNS_ACCOUNTS_TABLE}"
+        }
+      }
+    }
+  ]
+}
+EOF
+  aws iam put-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-name "SpawnDNSAccountRegistryKMS" \
+    --policy-document file:///tmp/spawn-dns-registry-kms-policy.json
+  rm /tmp/spawn-dns-registry-kms-policy.json
+  info "Account-registry key grant attached ($REGISTRY_KEY_ARN)"
+else
+  warn "$DNS_ACCOUNTS_TABLE has no customer-managed key (or does not exist): no KMS grant."
+  warn "The updater then entitles only DNS_ALLOWED_ACCOUNTS; an unreadable registry refuses."
+fi
 echo ""
 
 # Step 4: Create or update Lambda function

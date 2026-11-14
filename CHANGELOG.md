@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The DNS updater can read its account registry again, so an account
+  onboarded in the portal can register DNS without being added to
+  `DNS_ALLOWED_ACCOUNTS` by hand (#1611). Every registration since v0.164.0
+  had logged the registry as unreadable: the function's role lacked the
+  `Scan` the lookup needed, and the lookup scanned `spawn-user-accounts`,
+  which cannot be read by account. It now makes one `GetItem` by the verified
+  account ID on `spore-portal-accounts` (projecting `accountId` and `status`;
+  an `offboarded` row is refused), the registry dashboard-api already
+  entitles callers from. `scripts/deploy-custom-dns.sh` grants exactly that
+  `GetItem`, plus `kms:Decrypt` on the table's key through DynamoDB, and the
+  grant replaces the old `Scan` under the same policy name.
+  `DNS_ACCOUNTS_TABLE` now defaults to `spore-portal-accounts`.
+
 ### Security
 
 - Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
@@ -78,6 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on every POST, success included, and inside the transport error a failed
   POST returns. It now logs only the URL's scheme and host. The lagotto
   poller's equivalent is spore-host/lagotto#316.
+
+- Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
+  read-only, and grants writes only on the job that needs them (#1599). CI had
+  no `permissions:` block, so its token was whatever the org default was, and
+  the release workflow granted `contents: write`, `id-token: write` and
+  `attestations: write` to the whole workflow, so any job added without its
+  own block would have inherited them; the release job holds them now. A
+  test fails on any workflow without a
+  read-only top-level block, on any write in a workflow that runs on pull
+  requests, and on `id-token: write` in a job that uses no OIDC token.
 
 ## [0.165.0] - 2026-11-13
 

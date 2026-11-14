@@ -17,23 +17,32 @@ import (
 // lookup is substituted and what authorizeCaller DOES with each possible answer is
 // asserted — including the answer that looks like success (an empty set).
 
-// stubRegistry replaces the live Scan for the duration of a test.
+// stubRegistry replaces the live GetItem for the duration of a test: each id
+// in ids has an active registry row, and err (when set) is every lookup's
+// answer.
 func stubRegistry(t *testing.T, ids []string, err error) {
 	t.Helper()
-	prev := scanAccountRegistry
-	scanAccountRegistry = func(context.Context) (map[string]struct{}, error) {
+	rows := map[string]string{}
+	for _, id := range ids {
+		rows[id] = "active"
+	}
+	stubRegistryRows(t, rows, err)
+}
+
+// stubRegistryRows is stubRegistry with each row's status.
+func stubRegistryRows(t *testing.T, rows map[string]string, err error) {
+	t.Helper()
+	prev := lookupRegistryAccount
+	lookupRegistryAccount = func(_ context.Context, id string) (bool, string, error) {
 		if err != nil {
-			return nil, err
+			return false, "", err
 		}
-		out := map[string]struct{}{}
-		for _, id := range ids {
-			out[id] = struct{}{}
-		}
-		return out, nil
+		st, ok := rows[id]
+		return ok, st, nil
 	}
 	resetAllowlistCache()
 	t.Cleanup(func() {
-		scanAccountRegistry = prev
+		lookupRegistryAccount = prev
 		resetAllowlistCache()
 	})
 }
@@ -67,14 +76,17 @@ func TestAuthorizeCallerFailsClosed(t *testing.T) {
 		}
 	})
 
-	// CLAUDE.md rule 4: a discovery that finds nothing has broken, not proved the
-	// set empty. Reading zero rows as "deny everyone" is safe; the failure mode
-	// being gated is a future refactor reading it as "no restrictions configured".
-	t.Run("empty discovery", func(t *testing.T) {
+	t.Run("no row", func(t *testing.T) {
 		stubRegistry(t, nil, nil)
 		if ok, _ := authorizeCaller(context.Background(), "435415984226"); ok {
-			t.Error("an empty registry authorized the caller — an empty allowlist is a broken " +
-				"lookup, not a permissive one")
+			t.Error("an account with no registry row was authorized")
+		}
+	})
+
+	t.Run("offboarded", func(t *testing.T) {
+		stubRegistryRows(t, map[string]string{"435415984226": "offboarded"}, nil)
+		if ok, _ := authorizeCaller(context.Background(), "435415984226"); ok {
+			t.Error("an offboarded account was authorized")
 		}
 	})
 
@@ -165,21 +177,22 @@ func TestUnreadableRegistryOnlyFallsBackToAnExplicitAllowlist(t *testing.T) {
 	})
 }
 
-// A failed lookup must not be cached, or one throttled Scan becomes five minutes
-// of outage for every caller.
+// A failed lookup must not be cached, or one throttled read becomes minutes of
+// outage for that account; a success is cached, so a warm container does not
+// read the registry per request.
 func TestAFailedLookupIsNotCached(t *testing.T) {
-	prev := scanAccountRegistry
-	t.Cleanup(func() { scanAccountRegistry = prev; resetAllowlistCache() })
+	prev := lookupRegistryAccount
+	t.Cleanup(func() { lookupRegistryAccount = prev; resetAllowlistCache() })
 	t.Setenv("DNS_ALLOWED_ACCOUNTS", "")
 	resetAllowlistCache()
 
 	calls := 0
-	scanAccountRegistry = func(context.Context) (map[string]struct{}, error) {
+	lookupRegistryAccount = func(context.Context, string) (bool, string, error) {
 		calls++
 		if calls == 1 {
-			return nil, errors.New("transient")
+			return false, "", errors.New("transient")
 		}
-		return map[string]struct{}{"435415984226": {}}, nil
+		return true, "active", nil
 	}
 
 	if ok, _ := authorizeCaller(context.Background(), "435415984226"); ok {
@@ -188,8 +201,26 @@ func TestAFailedLookupIsNotCached(t *testing.T) {
 	if ok, reason := authorizeCaller(context.Background(), "435415984226"); !ok {
 		t.Errorf("the retry was refused, so the failure was cached: %s", reason)
 	}
+	if ok, _ := authorizeCaller(context.Background(), "435415984226"); !ok {
+		t.Error("the cached success was refused")
+	}
 	if calls != 2 {
-		t.Errorf("registry consulted %d times, want 2 — a failure was served from cache", calls)
+		t.Errorf("registry consulted %d times, want 2: the failure retried, the success cached", calls)
+	}
+}
+
+// An allow-listed account is answered without touching the registry.
+func TestAllowListedAccountMakesNoRegistryCall(t *testing.T) {
+	prev := lookupRegistryAccount
+	t.Cleanup(func() { lookupRegistryAccount = prev; resetAllowlistCache() })
+	t.Setenv("DNS_ALLOWED_ACCOUNTS", "435415984226")
+	resetAllowlistCache()
+	lookupRegistryAccount = func(context.Context, string) (bool, string, error) {
+		t.Error("the registry was read for an allow-listed account")
+		return false, "", nil
+	}
+	if ok, reason := authorizeCaller(context.Background(), "435415984226"); !ok {
+		t.Errorf("allow-listed account refused: %s", reason)
 	}
 }
 
