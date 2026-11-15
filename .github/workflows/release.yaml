@@ -284,6 +284,20 @@ jobs:
           AWSCLI_VERIFY_DIR: ${{ runner.temp }}/awscli-verify
         run: scripts/verify-awscli-pin.sh
 
+      # A one-hour token from the spore-host-release GitHub App, scoped to the
+      # tap and the bucket with contents: write only. It replaces two classic
+      # PATs, whose expiry left releases half-published, and which could reach
+      # every repo their owner can.
+      - name: Mint the tap and bucket token
+        id: tap-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: spore-host
+          repositories: homebrew-tap,scoop-bucket
+          permission-contents: write
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
@@ -292,8 +306,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          SCOOP_BUCKET_GITHUB_TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token }}
+          SCOOP_BUCKET_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token }}
 
       # The shipped linux binary must print exactly the body published above:
       # its stub refuses any other bytes, so a mismatch would retire every launch
