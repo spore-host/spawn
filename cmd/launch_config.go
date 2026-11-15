@@ -709,10 +709,7 @@ try {
   $svc = Get-Service -Name AmazonSSMAgent -ErrorAction SilentlyContinue
   if (-not $svc) {
     $msi = "$env:TEMP\SSMAgent_latest.exe"
-    Invoke-WebRequest -Uri "https://amazon-ssm-${region}.s3.${region}.amazonaws.com/latest/windows_amd64/AmazonSSMAgentSetup.exe" -OutFile $msi -UseBasicParsing
-    # Amazon-signed or not run at all (#1598).
-    Assert-SpawnAmazonSigned $msi
-    Start-Process $msi -ArgumentList '/S' -Wait
+__SSM_AGENT_DOWNLOAD__    Start-Process $msi -ArgumentList '/S' -Wait
   }
   Set-Service -Name AmazonSSMAgent -StartupType Automatic -ErrorAction SilentlyContinue
   Restart-Service -Name AmazonSSMAgent -ErrorAction SilentlyContinue
@@ -728,12 +725,7 @@ try {
   $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
   if (-not (Test-Path $aws)) {
     $msi = "$env:TEMP\AWSCLIV2.msi"
-    # The release the Linux bootstrap pins, else the latest: Amazon-signed
-    # either way, or not run at all (#1598).
-    try { Invoke-WebRequest -Uri '__AWSCLI_MSI_URL__' -OutFile $msi -UseBasicParsing }
-    catch { Invoke-WebRequest -Uri '__AWSCLI_MSI_LATEST__' -OutFile $msi -UseBasicParsing }
-    Assert-SpawnAmazonSigned $msi
-    Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
+__AWSCLI_MSI_DOWNLOAD__    Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
   }
 
   # Verified install (#879, GHSA-q59f-6gc3-qj2p): binary, .sha256 and .sig from
@@ -763,16 +755,18 @@ __SPORED_WINDOWS_VERIFIED_INSTALL__
 		return "", fmt.Errorf("the Windows bootstrap template lost its verified-install placeholder")
 	}
 	script = strings.Replace(script, "__SPORED_WINDOWS_VERIFIED_INSTALL__", install, 1)
-	// The Amazon-signature check the SSM agent and AWS CLI installers pass
-	// before they run (#1598), and the AWS CLI release to install.
-	msiVersion := ""
+	// The checks the SSM agent and AWS CLI installers pass before they run:
+	// Amazon's Authenticode signature (#1598) and, once
+	// .github/workflows/installer-pins.yml has pinned them, the sha256 (#1620).
+	// Without an MSI pin, the AWS CLI release the Linux bootstrap pins.
+	linuxCLIVersion := ""
 	if pins := launcher.AWSCLIPins(); len(pins) > 0 {
-		msiVersion = pins[0].Version
+		linuxCLIVersion = pins[0].Version
 	}
 	script = strings.NewReplacer(
-		"__SPAWN_AMAZON_SIGNED_FUNC__", sporedinstall.WindowsAmazonSignedFunc,
-		"__AWSCLI_MSI_URL__", sporedinstall.WindowsAWSCLIMSIURL(msiVersion),
-		"__AWSCLI_MSI_LATEST__", sporedinstall.WindowsAWSCLIMSIURL(""),
+		"__SPAWN_AMAZON_SIGNED_FUNC__", sporedinstall.WindowsInstallerFuncs,
+		"__SSM_AGENT_DOWNLOAD__", sporedinstall.WindowsSSMAgentDownload(sporedinstall.WindowsSSMAgentPin()),
+		"__AWSCLI_MSI_DOWNLOAD__", sporedinstall.WindowsAWSCLIMSIDownload(sporedinstall.WindowsAWSCLIMSIPin(), linuxCLIVersion),
 	).Replace(script)
 
 	return script, nil

@@ -811,6 +811,9 @@ func TestEveryMainPackageIsAPrincipal(t *testing.T) {
 		// rulesets) with infra/iam/github-oidc; reads files only, calls no AWS
 		// or GitHub API (#1601).
 		"scripts/oidctrust": "the OIDC trust inventory checker (#1601), which calls no AWS API",
+		// Run by the weekly installer pins workflow with GITHUB_TOKEN only; it
+		// reads and edits three files in the checkout and calls no AWS API.
+		"scripts/installerpin": "the installer pin rewriter (#1620), which calls no AWS API",
 	}
 	var found []string
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {

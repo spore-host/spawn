@@ -35,6 +35,11 @@ function Assert-SpawnAmazonSigned([string]$Path) {
   if ($subject -notmatch '(^|,\s*)O="?Amazon') { throw "spawn: refusing $Path - signed by '$subject', not Amazon (#1598)" }
 }
 
+function Assert-SpawnSHA256([string]$Path, [string]$Want) {
+  $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+  if ($got -ne $Want) { throw "spawn: refusing $Path - its sha256 is $got, not the pinned $Want (#1620)" }
+}
+
 $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
 if (-not (Test-Path $aws)) {
   $msi = "$env:TEMP\AWSCLIV2.msi"

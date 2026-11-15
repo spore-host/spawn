@@ -58,8 +58,9 @@ func TestEveryGeneratedScriptS3HostIsRegional(t *testing.T) {
 			sources++
 		}
 	}
-	if ssm != 1 || sources < 2 {
-		t.Errorf("Windows bootstrap: %d SSM agent download(s) and %d spored source(s), want 1 and at least 2; discovery has broken", ssm, sources)
+	// One SSM agent source unpinned; a pinned version (#1620) adds us-east-1's.
+	if ssm < 1 || ssm > 2 || sources < 2 {
+		t.Errorf("Windows bootstrap: %d SSM agent download(s) and %d spored source(s), want 1-2 and at least 2; discovery has broken", ssm, sources)
 	}
 }
 

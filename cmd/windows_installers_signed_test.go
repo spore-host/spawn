@@ -43,7 +43,15 @@ func TestWindowsUserDataRunsOnlyAmazonSignedInstallers(t *testing.T) {
 	if strings.Contains(script, "__") && regexp.MustCompile(`__[A-Z_]+__`).MatchString(script) {
 		t.Errorf("an unreplaced placeholder is left: %v", regexp.MustCompile(`__[A-Z_]+__`).FindAllString(script, -1))
 	}
+	// The MSI pinned for Windows (#1620) once there is one, else the release
+	// the Linux bootstrap pins.
 	pin := launcher.AWSCLIPins()[0].Version
+	if p := sporedinstall.WindowsAWSCLIMSIPin(); p.Set() {
+		pin = p.Version
+		if !strings.Contains(script, sporedinstall.WindowsSHA256FuncName+" $msi '"+p.SHA256+"'") {
+			t.Errorf("the AWS CLI MSI pin %s is set but its sha256 is not checked", p.Version)
+		}
+	}
 	if !strings.Contains(script, sporedinstall.WindowsAWSCLIMSIURL(pin)) {
 		t.Errorf("the AWS CLI MSI is not the pinned %s", pin)
 	}

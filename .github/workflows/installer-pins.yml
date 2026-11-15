@@ -1,0 +1,205 @@
+name: Installer pins
+
+# Pins the sha256s of the Amazon installers spawn runs as root/SYSTEM without a
+# signature it can check itself at boot (#1620), by opening a PR:
+#   - the AWS CLI MSI and the SSM agent setup the Windows bootstrap runs
+#     (pkg/sporedinstall/installer_pins.go);
+#   - the Amazon DCV tarballs and the DCV signing key's fingerprints the DCV
+#     install checks (cmd/app.go).
+# The sibling of awscli-pin.yml and efa-pin.yml. Dependabot cannot see these.
+#
+# Two verify jobs, each read-only:
+#   - windows (windows-latest): scripts/installer-pins-windows.ps1 downloads
+#     the MSI of the release the Linux bootstrap pins and the newest SSM agent,
+#     and requires Get-AuthenticodeSignature Valid with an Amazon signer, the
+#     check the bootstrap itself makes, before hashing them;
+#   - dcv (ubuntu-latest): scripts/installer-pins-dcv.sh downloads
+#     NICE-GPG-KEY and both tarballs of dcvVersion, and requires every RPM in
+#     them to verify with rpmkeys -K against that key before hashing.
+# Then the pr job, the only one that writes, edits the constants and the
+# CHANGELOG with scripts/installerpin, regenerates scripts/install-spored.ps1
+# (which embeds the MSI pin), and opens the PR. A pin moved here changes the
+# Windows and DCV user data the CLI renders, not the published bootstrap
+# body, so it ships in a release and needs no Lambda redeploy.
+#
+# The first pins come from this workflow's first run (dispatch it by hand).
+# Run with force=true to re-verify versions that are already pinned.
+#
+# Only GITHUB_TOKEN, with the limits of awscli-pin.yml: a PR it opens does not
+# trigger CI (close and reopen it to run the checks), and while "Allow GitHub
+# Actions to create and approve pull requests" is off, as it is for this org,
+# GitHub refuses the PR; on that refusal, and only that one
+# (scripts/installerpin pr-refused), the run opens an issue, or updates the
+# open one with the same title, holding the compare link and every pin. Any
+# other failure fails the run.
+
+on:
+  schedule:
+    - cron: '29 7 * * 1' # weekly, Monday 07:29 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Re-verify versions that are already pinned
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: installer-pins
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Verify the Windows installers
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.verify.outputs.changed }}
+      msi_version: ${{ steps.verify.outputs.msi_version }}
+      msi_sha256: ${{ steps.verify.outputs.msi_sha256 }}
+      ssm_version: ${{ steps.verify.outputs.ssm_version }}
+      ssm_sha256: ${{ steps.verify.outputs.ssm_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Verify the AWS CLI MSI and the SSM agent setup
+        id: verify
+        shell: pwsh
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          if ($env:FORCE -eq 'true') { ./scripts/installer-pins-windows.ps1 -Force } else { ./scripts/installer-pins-windows.ps1 }
+
+  dcv:
+    name: Verify the Amazon DCV tarballs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.verify.outputs.changed }}
+      version: ${{ steps.verify.outputs.version }}
+      sha256_x86_64: ${{ steps.verify.outputs.sha256_x86_64 }}
+      sha256_aarch64: ${{ steps.verify.outputs.sha256_aarch64 }}
+      key_fingerprints: ${{ steps.verify.outputs.key_fingerprints }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Install rpm (rpmkeys, rpmdb)
+        run: sudo apt-get update -q && sudo apt-get install -y -q rpm
+      - name: Verify the DCV key and every RPM
+        id: verify
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" = true ]; then scripts/installer-pins-dcv.sh --force; else scripts/installer-pins-dcv.sh; fi
+
+  pr:
+    name: Open the pin PR
+    needs: [windows, dcv]
+    if: needs.windows.outputs.changed == 'true' || needs.dcv.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Write the pins
+        id: set
+        env:
+          MSI_VERSION: ${{ needs.windows.outputs.msi_version }}
+          MSI_SHA256: ${{ needs.windows.outputs.msi_sha256 }}
+          SSM_VERSION: ${{ needs.windows.outputs.ssm_version }}
+          SSM_SHA256: ${{ needs.windows.outputs.ssm_sha256 }}
+          DCV_VERSION: ${{ needs.dcv.outputs.version }}
+          DCV_SHA_X86_64: ${{ needs.dcv.outputs.sha256_x86_64 }}
+          DCV_SHA_AARCH64: ${{ needs.dcv.outputs.sha256_aarch64 }}
+          DCV_KEY_FPRS: ${{ needs.dcv.outputs.key_fingerprints }}
+        run: |
+          set -euo pipefail
+          out=$(go -C scripts run ./installerpin set --summary-out "$RUNNER_TEMP/summary.md" \
+            --msi-version "$MSI_VERSION" --msi-sha256 "$MSI_SHA256" \
+            --ssm-version "$SSM_VERSION" --ssm-sha256 "$SSM_SHA256" \
+            --dcv-version "$DCV_VERSION" --dcv-sha256-x86_64 "$DCV_SHA_X86_64" \
+            --dcv-sha256-aarch64 "$DCV_SHA_AARCH64" --dcv-key-fingerprints "$DCV_KEY_FPRS")
+          echo "$out"
+          echo "$out" >> "$GITHUB_OUTPUT"
+          if [ "$out" = changed=true ]; then
+            # The standalone Windows installer embeds the MSI pin; it is generated.
+            UPDATE_GOLDEN=1 go test ./pkg/sporedinstall -run TestInstallSporedPs1IsGenerated -count=1
+            go test ./cmd ./pkg/sporedinstall -run 'TestInstallerPinsAreWellFormed|TestWindowsUserDataRunsOnlyAmazonSignedInstallers|TestInstallSporedPs1IsGenerated' -count=1
+            cat "$RUNNER_TEMP/summary.md"
+          fi
+      - name: Open a PR (or, if GitHub refuses, an issue)
+        if: steps.set.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          id=$(sha256sum < "$RUNNER_TEMP/summary.md" | cut -c1-12)
+          branch="bot/installer-pins-$id"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch already exists; an earlier run opened its PR or issue"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add pkg/sporedinstall/installer_pins.go cmd/app.go scripts/install-spored.ps1 CHANGELOG.md
+          git commit -m "chore(installers): refresh the installer pins (#1620)"
+          git push origin "$branch"
+          compare="https://github.com/$REPO/compare/$BASE...$branch?expand=1"
+          body="Moves spawn's installer pins (#1620):
+
+          $(cat "$RUNNER_TEMP/summary.md")
+
+          Each Windows installer passed Get-AuthenticodeSignature (Valid, Amazon signer) on a Windows runner before its sha256 was pinned; every DCV RPM verified with rpmkeys -K against the downloaded NICE-GPG-KEY. The run's log has the output. A changed DCV key is called out above: confirm it with AWS before merging. This changes the Windows and DCV user data spawn renders, not the published bootstrap body, so it ships in a release.
+
+          Opened by .github/workflows/installer-pins.yml with GITHUB_TOKEN, so CI has not run: close and reopen this PR to run it."
+          if out=$(gh pr create --repo "$REPO" --base "$BASE" --head "$branch" \
+            --title "chore(installers): refresh the installer pins" --body "$body" 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out" >&2
+          # Only GitHub's "not permitted to create or approve pull requests"
+          # falls back to an issue; anything else fails the run.
+          if ! printf '%s' "$out" | go -C scripts run ./installerpin pr-refused; then
+            echo "::error::gh pr create failed for $branch: $out"
+            exit 1
+          fi
+          title=$(go -C scripts run ./installerpin issue-title)
+          go -C scripts run ./installerpin issue-body --summary "$RUNNER_TEMP/summary.md" --compare "$compare" >"$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --repo "$REPO" --state open --search "in:title Installer pins" \
+            --json number,title | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$REPO" --body-file "$RUNNER_TEMP/issue.md"
+            echo "::warning::GitHub refused the PR; updated issue #$existing with the compare link"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+            echo "::warning::GitHub refused the PR; opened an issue with the compare link"
+          fi
