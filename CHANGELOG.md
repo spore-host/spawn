@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+<<<<<<< HEAD
+
 ### Fixed
 
 - The DNS updater can read its account registry again, so an account
@@ -34,6 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launch may reuse. `spawn terminate` now also needs
   `ec2:DescribeSecurityGroups` and `ec2:DeleteSecurityGroup`
   (docs/reference/cli-iam-actions.md).
+
+- The EC2 key pairs a nested-spawn head imports to launch its children
+  (`spawn-key-<user>`) now have a deleter (#1621). They used to outlive both
+  instances: nothing deleted them on terminate, at head teardown or in the
+  reaper. A key imported by a `--nested-spawn` role session is now tagged
+  `spawn:purpose=ssh-key-session`. A key imported from anywhere else, such as
+  the workstation key in `~/.spawn/keys` that every launch from that machine
+  reuses, keeps `spawn:purpose=ssh-key`. One rule (`pkg/keypairsweep`) deletes
+  a session key pair once no instance in its region (pending through stopped)
+  uses it and it is an hour old. The TTL reaper applies it in its
+  network-resource sweep (`REAPER_NET_RESOURCES`: `report` logs
+  `WOULD reap session key pair`, `reap` deletes), and so does the new
+  `spawn cleanup --session-keys`. Neither ever selects a workstation key, and
+  the reaper's new `ec2:DeleteKeyPair` grant is conditioned on
+  `spawn:purpose=ssh-key-session`, so IAM denies it one. Session keys imported
+  before this release carry `ssh-key` and are not collected; delete them by
+  hand.
 
 ### Security
 
@@ -149,24 +168,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test fails on any workflow without a
   read-only top-level block, on any write in a workflow that runs on pull
   requests, and on `id-token: write` in a job that uses no OIDC token.
-### Fixed
+=======
+>>>>>>> f9556f8 (CHANGELOG: consolidate [Unreleased] after rebase)
 
-- The EC2 key pairs a nested-spawn head imports to launch its children
-  (`spawn-key-<user>`) now have a deleter (#1621). They used to outlive both
-  instances: nothing deleted them on terminate, at head teardown or in the
-  reaper. A key imported by a `--nested-spawn` role session is now tagged
-  `spawn:purpose=ssh-key-session`. A key imported from anywhere else, such as
-  the workstation key in `~/.spawn/keys` that every launch from that machine
-  reuses, keeps `spawn:purpose=ssh-key`. One rule (`pkg/keypairsweep`) deletes
-  a session key pair once no instance in its region (pending through stopped)
-  uses it and it is an hour old. The TTL reaper applies it in its
-  network-resource sweep (`REAPER_NET_RESOURCES`: `report` logs
-  `WOULD reap session key pair`, `reap` deletes), and so does the new
-  `spawn cleanup --session-keys`. Neither ever selects a workstation key, and
-  the reaper's new `ec2:DeleteKeyPair` grant is conditioned on
-  `spawn:purpose=ssh-key-session`, so IAM denies it one. Session keys imported
-  before this release carry `ssh-key` and are not collected; delete them by
-  hand.
+- Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
+  read-only, and grants writes only on the job that needs them (#1599). CI had
+  no `permissions:` block, so its token was whatever the org default was, and
+  the release workflow granted `contents: write`, `id-token: write` and
+  `attestations: write` to the whole workflow, so any job added without its
+  own block would have inherited them; the release job holds them now. A
+  test fails on any workflow without a
+  read-only top-level block, on any write in a workflow that runs on pull
+  requests, and on `id-token: write` in a job that uses no OIDC token.
 
 ## [0.165.0] - 2026-11-13
 
