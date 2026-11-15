@@ -20,6 +20,7 @@ Instances terminate themselves via TTL, idle detection, or completion signal —
 
 **macOS / Linux (Homebrew)**
 ```bash
+brew tap spore-host/tap && brew trust spore-host/tap
 brew install spore-host/tap/spawn
 ```
 
