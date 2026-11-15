@@ -892,10 +892,10 @@ const (
 	dcvVersion           = "2025.0-20103"
 	dcvVersionMajorMinor = "2025.0"
 
-	dcvPinVersion       = ""
-	dcvTGZSHA256x86_64  = ""
-	dcvTGZSHA256aarch64 = ""
-	dcvKeyFingerprints  = ""
+	dcvPinVersion       = "2025.0-20103"
+	dcvTGZSHA256x86_64  = "d98eb986f3b547af22a7732ca26cb6541c3842b9ed57218f503c9acc3b29e7e2"
+	dcvTGZSHA256aarch64 = "8c9d29b41ee5f9fdfced4ae257c8e6444298a61da62beb2a38add1783c2e3858"
+	dcvKeyFingerprints  = "5B9EEBC864449701F6CE566A11B5C70A170C6114"
 )
 
 const dcvOrigin = "https://d1uj6qtbmh3dt5.cloudfront.net"

@@ -43,9 +43,10 @@ function Assert-SpawnSHA256([string]$Path, [string]$Want) {
 $aws = "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe"
 if (-not (Test-Path $aws)) {
   $msi = "$env:TEMP\AWSCLIV2.msi"
-  Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2.msi' -OutFile $msi -UseBasicParsing
-  # Amazon-signed or not run at all (#1598).
+  # The pinned release, Amazon-signed and with the pinned sha256, or not run at all (#1598, #1620).
+  Invoke-WebRequest -Uri 'https://awscli.amazonaws.com/AWSCLIV2-2.39.3.msi' -OutFile $msi -UseBasicParsing
   Assert-SpawnAmazonSigned $msi
+  Assert-SpawnSHA256 $msi '421292ebfc0fb591f202b0b5644faf875966acbcffa4f543ec13fe709ec009f5'
   Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn') -Wait
 }
 

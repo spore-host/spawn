@@ -23,13 +23,13 @@ const (
 	// release the Linux bootstrap pins (pkg/launcher awsCLIVersion), so the
 	// two follow each other a run apart; until it does, Windows keeps
 	// installing the MSI pinned here.
-	windowsAWSCLIMSIVersion = ""
-	windowsAWSCLIMSISHA256  = ""
+	windowsAWSCLIMSIVersion = "2.39.3"
+	windowsAWSCLIMSISHA256  = "421292ebfc0fb591f202b0b5644faf875966acbcffa4f543ec13fe709ec009f5"
 	// The SSM agent, amazon-ssm-<region>/<version>/windows_amd64/
 	// AmazonSSMAgentSetup.exe, the newest aws/amazon-ssm-agent release the
 	// workflow could verify.
-	windowsSSMAgentVersion = ""
-	windowsSSMAgentSHA256  = ""
+	windowsSSMAgentVersion = "3.3.5828.0"
+	windowsSSMAgentSHA256  = "e216f63ef75822f6bec245d796db4a1da7c0a5985ec5f6881980ec9513075f25"
 )
 
 // WindowsInstallerPin is a pinned installer: its version and sha256.
