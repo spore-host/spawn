@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.166.0] - 2026-11-14
+
 <<<<<<< HEAD
 
 ### Fixed
@@ -126,15 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   POST returns. It now logs only the URL's scheme and host. The lagotto
   poller's equivalent is spore-host/lagotto#316.
 
-- Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
-  read-only, and grants writes only on the job that needs them (#1599). CI had
-  no `permissions:` block, so its token was whatever the org default was, and
-  the release workflow granted `contents: write`, `id-token: write` and
-  `attestations: write` to the whole workflow, so any job added without its
-  own block would have inherited them; the release job holds them now. A
-  test fails on any workflow without a
-  read-only top-level block, on any write in a workflow that runs on pull
-  requests, and on `id-token: write` in a job that uses no OIDC token.
 - dashboard-api no longer assumes `SpawnDashboardCrossAccountReadRole` (#1585).
   That role, in 435415984226, trusted the Cognito identity-pool role, which
   every Google, GitHub or Globus sign-in receives. Any of them could assume it
@@ -159,27 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new direct call. The record's writer is still not bound to the account it
   names; that is #1631.
 
-- Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
-  read-only, and grants writes only on the job that needs them (#1599). CI had
-  no `permissions:` block, so its token was whatever the org default was, and
-  the release workflow granted `contents: write`, `id-token: write` and
-  `attestations: write` to the whole workflow, so any job added without its
-  own block would have inherited them; the release job holds them now. A
-  test fails on any workflow without a
-  read-only top-level block, on any write in a workflow that runs on pull
-  requests, and on `id-token: write` in a job that uses no OIDC token.
 =======
 >>>>>>> f9556f8 (CHANGELOG: consolidate [Unreleased] after rebase)
 
-- Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
-  read-only, and grants writes only on the job that needs them (#1599). CI had
-  no `permissions:` block, so its token was whatever the org default was, and
-  the release workflow granted `contents: write`, `id-token: write` and
-  `attestations: write` to the whole workflow, so any job added without its
-  own block would have inherited them; the release job holds them now. A
-  test fails on any workflow without a
-  read-only top-level block, on any write in a workflow that runs on pull
-  requests, and on `id-token: write` in a job that uses no OIDC token.
 
 ## [0.165.0] - 2026-11-13
 
@@ -14103,7 +14078,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.165.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.166.0...HEAD
+[0.166.0]: https://github.com/spore-host/spawn/compare/v0.165.0...v0.166.0
 [0.165.0]: https://github.com/spore-host/spawn/compare/v0.164.0...v0.165.0
 [0.164.0]: https://github.com/spore-host/spawn/compare/v0.163.2...v0.164.0
 [0.163.2]: https://github.com/spore-host/spawn/compare/v0.163.1...v0.163.2
