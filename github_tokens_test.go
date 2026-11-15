@@ -25,7 +25,10 @@ import (
 //   - a token is read anywhere but the step env or with: of the steps its
 //     used_by lists (not a job or workflow env:, which every step, third-party
 //     actions included, would see), or a listed step no longer reads it;
-//   - a workflow that reads one runs on a pull request.
+//   - a workflow that reads one runs on a pull request;
+//   - an App token is minted without owner: spore-host, an explicit
+//     repositories: list equal to the key's, or explicit permission-* inputs
+//     within the key's permissions.
 
 const tokenInventory = "infra/github-tokens/tokens.json"
 
@@ -83,7 +86,12 @@ func TestTokenInventoryIsLeastPrivilege(t *testing.T) {
 		if tok.ResourceOwner != "spore-host" {
 			t.Errorf("%s: resource_owner %q, want spore-host", tok.Secret, tok.ResourceOwner)
 		}
-		if len(tok.Repositories) != 1 {
+		// A PAT reaches its repositories itself, so it gets one. An App key
+		// reaches its installation; what each run gets is the token minted
+		// from it, which TestAppTokensAreMintedNoWiderThanTheInventory holds
+		// to this list. GoReleaser needs the tap and the bucket in one
+		// process, so two single-repository tokens would isolate nothing.
+		if len(tok.Repositories) == 0 || (tok.Kind != "github-app" && len(tok.Repositories) != 1) {
 			t.Errorf("%s: repositories %v; scope each token to its one target", tok.Secret, tok.Repositories)
 		}
 		for _, r := range tok.Repositories {
@@ -219,7 +227,7 @@ func TestWorkflowsReadTokensOnlyWhereTheInventorySays(t *testing.T) {
 		}
 	}
 	if all == 0 {
-		t.Fatal("no workflow reads a secret other than GITHUB_TOKEN: the discovery is broken (release.yaml reads three)")
+		t.Fatal("no workflow reads a secret other than GITHUB_TOKEN: the discovery is broken (release.yaml reads two)")
 	}
 	for _, tok := range inv {
 		for _, u := range tok.UsedBy {
@@ -227,5 +235,81 @@ func TestWorkflowsReadTokensOnlyWhereTheInventorySays(t *testing.T) {
 				t.Errorf("%s: %s lists %s, which does not read it (renamed step, or a token no longer used?)", tok.Secret, tokenInventory, u)
 			}
 		}
+	}
+}
+
+// An App key reaches its whole installation, so the token each step mints
+// from it is what bounds a run: owner and repositories must be explicit (left
+// unset, create-github-app-token mints for the current repository, which is
+// spawn), equal to the inventory's, and the permissions explicit and within
+// it (left unset, the token gets everything the installation has).
+func TestAppTokensAreMintedNoWiderThanTheInventory(t *testing.T) {
+	inv := map[string]ghToken{}
+	for _, tok := range readTokenInventory(t) {
+		inv[tok.Secret] = tok
+	}
+	files, err := filepath.Glob(".github/workflows/*.y*ml")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no workflows found: %v", err)
+	}
+	minted := 0
+	for _, f := range files {
+		b, err := os.ReadFile(f) //nolint:gosec // the repo's own workflows
+		if err != nil {
+			t.Fatal(err)
+		}
+		var w tokWorkflow
+		if err := yaml.Unmarshal(b, &w); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		for id, j := range w.Jobs {
+			for _, st := range j.Steps {
+				if !strings.HasPrefix(st.Uses, "actions/create-github-app-token@") {
+					continue
+				}
+				minted++
+				where := filepath.Base(f) + ":" + id + ":" + st.Name
+				keys := secretsIn(map[string]string{"private-key": st.With["private-key"]})
+				if len(keys) != 1 {
+					t.Errorf("%s: private-key is not one secrets.X reference", where)
+					continue
+				}
+				tok, ok := inv[keys[0]]
+				if !ok || tok.Kind != "github-app" {
+					t.Errorf("%s: secrets.%s is not a github-app key in %s", where, keys[0], tokenInventory)
+					continue
+				}
+				if st.With["owner"] != "spore-host" {
+					t.Errorf("%s: owner %q, want spore-host", where, st.With["owner"])
+				}
+				var got []string
+				for _, r := range strings.FieldsFunc(st.With["repositories"], func(c rune) bool { return c == ',' || c == '\n' || c == ' ' }) {
+					got = append(got, "spore-host/"+r)
+				}
+				want := append([]string(nil), tok.Repositories...)
+				sort.Strings(got)
+				sort.Strings(want)
+				if strings.Join(got, ",") != strings.Join(want, ",") {
+					t.Errorf("%s: mints for %v, want exactly %v", where, got, want)
+				}
+				perms := 0
+				for k, level := range st.With {
+					p, isPerm := strings.CutPrefix(k, "permission-")
+					if !isPerm {
+						continue
+					}
+					perms++
+					if tok.Permissions[p] != level && !(level == "read" && tok.Permissions[p] == "write") {
+						t.Errorf("%s: %s: %s is beyond the key's %v", where, k, level, tok.Permissions)
+					}
+				}
+				if perms == 0 {
+					t.Errorf("%s: no permission-* input, so the token gets every permission the installation has", where)
+				}
+			}
+		}
+	}
+	if minted == 0 {
+		t.Fatal("no workflow mints an App token: the discovery is broken (release.yaml mints one)")
 	}
 }
