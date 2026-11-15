@@ -44,6 +44,11 @@ import (
 // fix for an entry that landed in a released section is to move it back to
 // [Unreleased].
 var acceptedReleasedEdits = map[string]struct{ sha256, why string }{
+	"0.166.0": {
+		sha256: "c009f9f273f621bd7e73667cb3fb94af1ca46a2080feecfca9168277bc167aad",
+		why: "the tag's section carried three merge-conflict marker lines left by a union rebase (#1640); " +
+			"the conflict was one-sided, so deleting them changes no entry.",
+	},
 	"0.126.0": {
 		sha256: "754d9814235734afd6ecca61128907f951b3329a73579a37bff558afcb307e68",
 		why: "four entries (#476 via #785, #781, #772 via #778, #774 via #775) merged after the tag and " +

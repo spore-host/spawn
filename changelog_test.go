@@ -141,6 +141,19 @@ func TestChangelogHasUnreleasedSection(t *testing.T) {
 	}
 }
 
+// TestChangelogHasNoConflictMarkers: a union rebase that stops on CHANGELOG.md can
+// leave `<<<<<<<`/`=======`/`>>>>>>>` lines behind. Markdown renders them as text,
+// the group checks above do not see them, and once tagged the released-section
+// gate protects them. v0.166.0 shipped three (#1640).
+func TestChangelogHasNoConflictMarkers(t *testing.T) {
+	marker := regexp.MustCompile(`^(<{7}( |$)|={7}$|>{7}( |$)|\|{7}( |$))`)
+	for i, l := range readChangelog(t) {
+		if marker.MatchString(strings.TrimRight(l, "\r")) {
+			t.Errorf("%s:%d is a merge-conflict marker line: %q", changelogPath, i+1, l)
+		}
+	}
+}
+
 // TestChangelogUnreleasedHasNoEntriesWithoutAGroup: a bullet sitting directly under
 // `## [Unreleased]` with no `###` above it renders, but is uncategorised and gets
 // promoted into a dated section that way.
