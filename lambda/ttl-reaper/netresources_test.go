@@ -578,3 +578,32 @@ func TestNetSweepReapsAnUnusedEFAGroup(t *testing.T) {
 		t.Errorf("EFA group inside the grace: deleted %v, want it spared", fresh.deletedSG)
 	}
 }
+
+// A per-instance Windows group (spawn-windows-<name>, spawn:purpose=windows)
+// is reclaimed an hour after it is unused, not after the seven days a
+// reusable group gets (#1623); an occupied one is never touched.
+func TestWindowsInstanceGroupHasAShortGrace(t *testing.T) {
+	now := time.Now()
+	win := func(id string, age time.Duration) ec2types.SecurityGroup {
+		g := sg(id, "spawn-windows-"+id, age, now)
+		g.Tags = append(g.Tags, ec2types.Tag{Key: awssdk.String(tagprefix.Tag("purpose")), Value: awssdk.String(windowsGroupPurpose)})
+		return g
+	}
+	f := &fakeNetAPI{
+		sgs: []ec2types.SecurityGroup{
+			win("sg-win-old", 2*time.Hour),
+			win("sg-win-new", 20*time.Minute),
+			win("sg-win-busy", 2*time.Hour),
+			sg("sg-mpi", "spawn-mpi-x", 2*time.Hour, now), // a reusable group: still 7 days
+		},
+		instances: []ec2types.Instance{{
+			InstanceId:     awssdk.String("i-live"),
+			State:          &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning},
+			SecurityGroups: []ec2types.GroupIdentifier{{GroupId: awssdk.String("sg-win-busy")}},
+		}},
+	}
+	runNetSweep(t, f, false)
+	if !slices.Equal(f.deletedSG, []string{"sg-win-old"}) {
+		t.Errorf("deleted %v, want only sg-win-old", f.deletedSG)
+	}
+}

@@ -55,6 +55,7 @@ const StagingLifecycleRuleID
 const StagingObjectExpiryDays
 const SweepOrchestratorRoleName
 const TracingExporterStdout
+const WindowsSecurityGroupPurpose
 field AMIHealthCheck.BaseAMIAge time.Duration
 field AMIHealthCheck.BaseAMIOutdated bool
 field AMIHealthCheck.CurrentBaseAMI string
@@ -531,6 +532,7 @@ func (*Client) DeleteInstanceTags(ctx context.Context, region, instanceID string
 func (*Client) DeletePlacementGroup(ctx context.Context, name, region string) error
 func (*Client) DeletePlacementGroupWithRetry(ctx context.Context, name, region string) error
 func (*Client) DeleteS3Object(ctx context.Context, region, bucket, key string) error
+func (*Client) DeleteSecurityGroupsAfterTerminate(ctx context.Context, region, instanceID string, groupIDs []string, wait time.Duration) ([]string, error)
 func (*Client) DescribeAvailabilityZones(ctx context.Context, region string) ([]string, error)
 func (*Client) DescribeCapacityReservation(ctx context.Context, region, reservationID string) (*CapacityReservation, error)
 func (*Client) DescribeFSxBrief(ctx context.Context, filesystemID, region string) (FSxBrief, error)
@@ -579,6 +581,7 @@ func (*Client) InstancePortIngress(ctx context.Context, region, instanceID strin
 func (*Client) InstanceProfileReady(ctx context.Context, name string) (bool, error)
 func (*Client) InstanceTypeOfferedInRegion(ctx context.Context, region, instanceType string) (bool, error)
 func (*Client) InstanceTypeZones(ctx context.Context, region, instanceType string) (ZoneOfferings, error)
+func (*Client) InstanceWindowsSecurityGroups(ctx context.Context, region, instanceID string) ([]string, error)
 func (*Client) IsWindowsAMI(ctx context.Context, region, amiID string) bool
 func (*Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error)
 func (*Client) LaunchWithZoneFallback(ctx context.Context, launchConfig LaunchConfig, out io.Writer) (*LaunchResult, error)

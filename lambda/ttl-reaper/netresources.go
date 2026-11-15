@@ -51,6 +51,21 @@ type netResourceAPI interface {
 // discover it.
 const netResourceGrace = 7 * 24 * time.Hour
 
+// windowsGroupPurpose is the spawn:purpose of the group `spawn launch --os
+// windows` creates for ONE instance, spawn-windows-<name>
+// (pkg/aws.WindowsSecurityGroupPurpose; this module does not import pkg/aws).
+const windowsGroupPurpose = "windows"
+
+// perInstanceGroupGrace is the grace for such a group (#1623). It belongs to
+// one instance, so unlike the MPI group nothing is gained by keeping it for a
+// re-run; `spawn terminate` deletes it, and this is the backstop for every
+// other way the instance goes (spored's own TTL or idle terminate, the
+// reaper's, a console terminate), none of which can wait for the instance's
+// network interface to detach. An hour, not zero: a launch that is about to
+// reuse the group by name (two launches with one --name) has long since run
+// RunInstances by then.
+const perInstanceGroupGrace = time.Hour
+
 // netResourceUntaggedGrace is the fallback for a spawn-managed resource carrying
 // NO creation stamp.
 //
@@ -420,6 +435,9 @@ func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acc
 		}
 		age, ok := netResourceAge(sg.Tags, now)
 		grace := netResourceGrace
+		if tagValue(sg.Tags, tagprefix.Tag("purpose")) == windowsGroupPurpose {
+			grace = perInstanceGroupGrace
+		}
 		if !ok {
 			// No creation stamp: fall back to the discovery age (how long WE have
 			// been seeing it) against a much longer grace. Skipping outright is

@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grant replaces the old `Scan` under the same policy name.
   `DNS_ACCOUNTS_TABLE` now defaults to `spore-portal-accounts`.
 
+- A Windows launch's own security group, `spawn-windows-<name>`, no longer
+  outlives its instance (#1623). `spawn terminate` reads the instance's
+  `spawn:purpose=windows` groups before terminating it, waits for it to reach
+  `terminated`, and then deletes them, retrying while the network interface
+  detaches. A group another live instance still uses (two launches with one
+  `--name`) is left alone. Every other way an instance ends (spored's TTL or
+  idle terminate, the reaper, a console terminate) is covered by the TTL
+  reaper. Its network-resource sweep now reclaims an unused per-instance
+  Windows group after 1 hour instead of the 7 days it gives a group a later
+  launch may reuse. `spawn terminate` now also needs
+  `ec2:DescribeSecurityGroups` and `ec2:DeleteSecurityGroup`
+  (docs/reference/cli-iam-actions.md).
+
 ### Security
 
 - Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
@@ -126,6 +139,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-region and cancel) go through one checked path, and a test fails any
   new direct call. The record's writer is still not bound to the account it
   names; that is #1631.
+
+- Every GitHub Actions workflow now names its `GITHUB_TOKEN` scope at the top,
+  read-only, and grants writes only on the job that needs them (#1599). CI had
+  no `permissions:` block, so its token was whatever the org default was, and
+  the release workflow granted `contents: write`, `id-token: write` and
+  `attestations: write` to the whole workflow, so any job added without its
+  own block would have inherited them; the release job holds them now. A
+  test fails on any workflow without a
+  read-only top-level block, on any write in a workflow that runs on pull
+  requests, and on `id-token: write` in a job that uses no OIDC token.
 
 ## [0.165.0] - 2026-11-13
 
