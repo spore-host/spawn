@@ -25,7 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.166.0] - 2026-11-14
 
-<<<<<<< HEAD
 
 ### Fixed
 
@@ -168,8 +167,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new direct call. The record's writer is still not bound to the account it
   names; that is #1631.
 
-=======
->>>>>>> f9556f8 (CHANGELOG: consolidate [Unreleased] after rebase)
 
 
 ## [0.165.0] - 2026-11-13
