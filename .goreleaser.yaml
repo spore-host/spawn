@@ -173,26 +173,34 @@ nfpms:
     rpm:
       summary: "Background monitoring daemon for spawn-managed EC2 instances"
 
-brews:
+# A cask, not a formula (spore-host/spore-host#747): GoReleaser deprecated
+# `brews:` for prebuilt binaries in v2.10, and `goreleaser check` fails on it.
+# Casks install on Linux too. spawn needs truffle at runtime, so its cask depends on truffle's. The binaries are not notarized, so the
+# post-install hook clears macOS's quarantine bit, without which Gatekeeper
+# blocks them. tap_migrations.json moves formula users here once this cask is
+# published.
+homebrew_casks:
   - name: spawn
     ids:
       - spawn-archive
+    binaries: [spawn]
     repository:
       owner: spore-host
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
     homepage: https://github.com/spore-host/spawn
     description: "Ephemeral compute for AWS"
     license: Apache-2.0
+    skip_upload: auto
     dependencies:
-      - name: spore-host/tap/truffle
-        type: runtime
-    test: |
-      system "#{bin}/spawn", "version"
-    install: |
-      bin.install "spawn"
+      - cask: spore-host/tap/truffle
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/spawn"]
+          end
 
 scoops:
   - name: spawn
