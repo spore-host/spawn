@@ -55,7 +55,10 @@ func TestDCVInstallsOnlyVerifiedPackages(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			script := strings.ReplaceAll(dcvInstallBlock(), "/tmp/", dir+"/")
+			// The unpinned path, explicitly: the stubs cannot produce the
+			// real key's fingerprints or the real tarball's sha256, and the
+			// pinned path has its own test below (#1620).
+			script := strings.ReplaceAll(dcvInstallBlockWith(dcvPins{}), "/tmp/", dir+"/")
 			// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 			cmd := exec.Command("bash", "-c", script) //nolint:gosec // this package's own generated script
 			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + dir}

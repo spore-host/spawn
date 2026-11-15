@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The first installer pins from `installer-pins.yml` (#1620) no longer fail CI.
+  The regional-S3 gate now accepts the pinned SSM agent's us-east-1 fallback,
+  tried only after the launch region's copy, and checks that download form even
+  while the pin is empty. The DCV signature test runs the unpinned path
+  explicitly, and gitleaks allowlists the DCV key's public fingerprint.
+
 ### Security
 
 - The Windows bootstrap and the Amazon DCV install can now require exact
