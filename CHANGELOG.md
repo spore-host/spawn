@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Homebrew: releases now publish a cask, `spore-host/tap/spawn`, instead of a
+  formula. GoReleaser deprecated formulas for prebuilt binaries, and casks
+  install on Linux too. The formula stays in the tap until a later tap change
+  moves existing installs to the cask (spore-host/spore-host#747).
 - **Installer pins moved** (#1620): AWS CLI MSI `AWSCLIV2-2.39.3.msi` (was unpinned): sha256 `421292ebfc0fb591f202b0b5644faf875966acbcffa4f543ec13fe709ec009f5`, Authenticode Valid, Amazon signer; SSM agent `amazon-ssm-<region>/3.3.5828.0/windows_amd64/AmazonSSMAgentSetup.exe` (was unpinned): sha256 `e216f63ef75822f6bec245d796db4a1da7c0a5985ec5f6881980ec9513075f25`, Authenticode Valid, Amazon signer; Amazon DCV 2025.0-20103 (was unpinned): tarball sha256 x86_64 `d98eb986f3b547af22a7732ca26cb6541c3842b9ed57218f503c9acc3b29e7e2`, aarch64 `8c9d29b41ee5f9fdfced4ae257c8e6444298a61da62beb2a38add1783c2e3858`; every RPM in both verified against NICE-GPG-KEY, primary fingerprints `5B9EEBC864449701F6CE566A11B5C70A170C6114`. The Windows bootstrap and the DCV install refuse any other bytes. Opened by the weekly installer pins workflow.
 
 ### Fixed
