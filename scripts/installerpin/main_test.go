@@ -60,6 +60,9 @@ func TestShowReadsTheRealFiles(t *testing.T) {
 func TestSetMovesEachGroupAndOnlyIt(t *testing.T) {
 	p := fixture(t)
 	dcv := readConst(t, p, "dcvVersion")
+	// The SSM agent group is not passed, so it must keep whatever the real
+	// file holds: empty before the first pin, the pinned values after (#1620).
+	ssmVersion, ssmSHA := readConst(t, p, "windowsSSMAgentVersion"), readConst(t, p, "windowsSSMAgentSHA256")
 	sum := filepath.Join(t.TempDir(), "summary.md")
 	var out bytes.Buffer
 	args := append([]string{"set", "--summary-out", sum,
@@ -74,7 +77,7 @@ func TestSetMovesEachGroupAndOnlyIt(t *testing.T) {
 	}
 	for n, want := range map[string]string{
 		"windowsAWSCLIMSIVersion": "2.40.1", "windowsAWSCLIMSISHA256": shaA,
-		"windowsSSMAgentVersion": "", "windowsSSMAgentSHA256": "",
+		"windowsSSMAgentVersion": ssmVersion, "windowsSSMAgentSHA256": ssmSHA,
 		"dcvPinVersion": dcv, "dcvTGZSHA256x86_64": shaA, "dcvTGZSHA256aarch64": shaB,
 		"dcvKeyFingerprints": fpr1 + " " + fprF, // sorted
 		"dcvVersion":         dcv,
