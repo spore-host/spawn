@@ -37,6 +37,13 @@ import (
 // launch region's, knowingly cross-region (sporedinstall.FallbackRegion).
 const FallbackBucket = "spawn-binaries-us-east-1"
 
+// SSMAgentFallbackBucket is the bucket the Windows bootstrap tries after the
+// launch region's when it installs a pinned SSM agent (#1620): a newly pinned
+// release reaches the regional buckets over days, and us-east-1's copy has it
+// first. Knowingly cross-region, sha256-pinned, and tried second, so a
+// private-only instance that cannot reach it has already tried its own.
+const SSMAgentFallbackBucket = "amazon-ssm-us-east-1"
+
 // Ref is one S3 location a script reaches.
 type Ref struct {
 	Line int
@@ -108,6 +115,8 @@ func Check(script, region string) (refs []Ref, problems []Problem) {
 			case m[2] == region:
 			case m[1] == FallbackBucket && m[2] == "us-east-1":
 				// The documented cross-region fallback, by its own regional name.
+			case m[1] == SSMAgentFallbackBucket && m[2] == "us-east-1":
+				// The pinned SSM agent's fallback (#1620), by its own regional name.
 			default:
 				problems = append(problems, Problem{r, fmt.Sprintf("%s is %s's regional name, not the launch region's (%s)", host, m[2], region)})
 			}

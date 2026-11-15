@@ -35,6 +35,11 @@ func TestEveryGeneratedScriptS3HostIsRegional(t *testing.T) {
 		t.Fatal(err)
 	}
 	scripts["Windows spored install (release build)"] = release
+	// The pinned SSM agent download (#1620), whatever the compiled pin: while
+	// the pin is empty the bootstrap above renders the unpinned form, and the
+	// pinned one went unchecked until the first pin landed.
+	scripts["Windows pinned SSM agent download"] = sporedinstall.WindowsSSMAgentDownload(
+		sporedinstall.WindowsInstallerPin{Version: "3.3.1.0", SHA256: strings.Repeat("ab", 32)})
 	for name, script := range scripts {
 		refs, problems := s3hosts.Check(script, region)
 		if len(refs) == 0 && name != "verified installer (standalone)" {

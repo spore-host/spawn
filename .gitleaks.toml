@@ -48,4 +48,9 @@ regexes = [
   # same reasoning and the same exact-line, exact-value form.
   '''const KeyFingerprint = "4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC"$''',
   '''readonly EFA_KEY_FPR=4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC$''',
+  # The Amazon DCV signing key's primary FINGERPRINT (#1620), written into
+  # cmd/app.go by .github/workflows/installer-pins.yml. Public, from the key
+  # AWS publishes beside the DCV tarballs; same exact-line, exact-value form,
+  # so a rotated key fails here and is looked at.
+  '''^\s*dcvKeyFingerprints\s+= "5B9EEBC864449701F6CE566A11B5C70A170C6114"$''',
 ]
