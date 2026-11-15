@@ -15,6 +15,7 @@ import (
 	"github.com/spore-host/spawn/pkg/bucketsweep"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/instancerole"
+	"github.com/spore-host/spawn/pkg/keypairsweep"
 	"github.com/spore-host/spawn/pkg/poolqueue"
 	"github.com/spore-host/spawn/pkg/scheduler"
 	"github.com/spore-host/spawn/pkg/schedulesweep"
@@ -32,6 +33,7 @@ var (
 	cleanupBuckets    bool
 	cleanupPoolQueues bool
 	cleanupSchedules  bool
+	cleanupSessionKey bool
 )
 
 var cleanupCmd = &cobra.Command{
@@ -52,6 +54,15 @@ that are attached to nothing. Each one bills and counts toward the region's
 Elastic IP limit. This mode touches nothing else, so running instances do not
 block it. spawn list and spawn status warn about these addresses and print the
 command.
+
+--session-keys deletes only the EC2 key pairs a nested-spawn head imported for
+one session (tagged spawn:purpose=ssh-key-session): their private half lived on
+the head, so they are useless once nothing uses them. A key pair goes only when
+no instance in the region (pending through stopped) was launched with it and it
+is at least an hour old, whoever imported it. A workstation key
+(spawn:purpose=ssh-key, the one ~/.spawn/keys holds and every launch from that
+machine reuses) is never touched by this mode. The TTL reaper applies the same
+rule in its network-resource sweep (REAPER_NET_RESOURCES).
 
 --buckets removes only spawn's own spawn-staging-<account>-<region> and
 spawn-results-<account>-<region> buckets, and only once they have been empty
@@ -133,6 +144,7 @@ func init() {
 	cleanupCmd.Flags().BoolVar(&cleanupInstRoles, "instance-roles", false, "Delete only unused per-task and per-pool spawn-instance-* (and pre-v0.147 spawn-pool-worker-*) IAM roles and instance profiles (no instance uses them, 24h old and unused); nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupPoolQueues, "pool-queues", false, "Delete only the SQS queues (and staged task specs) of pools nobody drained: spawn-tagged, empty, 24h old, no instance is the pool's; nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupSchedules, "schedule-params", false, "Delete only schedule params objects no schedule record names (30 days old, tagged as a schedule's params, never a queue config); nothing else is touched")
+	cleanupCmd.Flags().BoolVar(&cleanupSessionKey, "session-keys", false, "Delete only the EC2 key pairs nested-spawn heads imported for one session (spawn:purpose=ssh-key-session) that no instance uses and that are an hour old; never a workstation key; nothing else is touched")
 	cleanupCmd.Flags().BoolVar(&cleanupBuckets, "buckets", false, "Delete only spawn's own staging and results buckets that have been empty for "+bucketGraceDays()+"; no object is ever deleted and nothing else is touched")
 }
 
@@ -185,8 +197,11 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 	onlyMine := !cleanupAll
 
-	if n := countTrue(cleanupElasticIPs, cleanupBuckets, cleanupPoolQueues); n > 1 {
-		return fmt.Errorf("--elastic-ips, --buckets and --pool-queues each select one kind of resource; run them separately")
+	if n := countTrue(cleanupElasticIPs, cleanupBuckets, cleanupPoolQueues, cleanupSessionKey); n > 1 {
+		return fmt.Errorf("--elastic-ips, --buckets, --pool-queues and --session-keys each select one kind of resource; run them separately")
+	}
+	if cleanupSessionKey {
+		return runCleanupSessionKeys(ctx, cmd, regions, keypairsweep.ClientsFor(client.Config()), time.Now())
 	}
 	if cleanupPoolQueues {
 		account, err := client.GetAccountID(ctx)

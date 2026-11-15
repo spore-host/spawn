@@ -11,6 +11,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/spore-host/spawn/pkg/keypairsweep"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -36,6 +37,17 @@ type fakeNetAPI struct {
 	describeSGCalls   int
 	instanceFilters   []ec2types.Filter
 	sgFilters         []ec2types.Filter
+	// The session key-pair sweep (#1621).
+	keys        []ec2types.KeyPairInfo
+	deletedKeys []string
+}
+
+func (f *fakeNetAPI) DescribeKeyPairs(context.Context, *ec2.DescribeKeyPairsInput, ...func(*ec2.Options)) (*ec2.DescribeKeyPairsOutput, error) {
+	return &ec2.DescribeKeyPairsOutput{KeyPairs: f.keys}, nil
+}
+func (f *fakeNetAPI) DeleteKeyPair(_ context.Context, in *ec2.DeleteKeyPairInput, _ ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error) {
+	f.deletedKeys = append(f.deletedKeys, awssdk.ToString(in.KeyPairId))
+	return &ec2.DeleteKeyPairOutput{}, nil
 }
 
 func (f *fakeNetAPI) DescribeAddresses(context.Context, *ec2.DescribeAddressesInput, ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error) {
@@ -605,5 +617,45 @@ func TestWindowsInstanceGroupHasAShortGrace(t *testing.T) {
 	runNetSweep(t, f, false)
 	if !slices.Equal(f.deletedSG, []string{"sg-win-old"}) {
 		t.Errorf("deleted %v, want only sg-win-old", f.deletedSG)
+	}
+}
+
+// The reaper is the session key pair's named deleter (#1621): an unused one an
+// hour old goes, one a live instance uses stays, and a user's workstation key
+// is never touched, even if EC2 returned it.
+func TestReaperDeletesOnlyUnusedSessionKeyPairs(t *testing.T) {
+	now := time.Now()
+	kp := func(name, purpose string, age time.Duration) ec2types.KeyPairInfo {
+		created := now.Add(-age)
+		return ec2types.KeyPairInfo{KeyName: awssdk.String(name), KeyPairId: awssdk.String("key-" + name), CreateTime: &created,
+			Tags: []ec2types.Tag{
+				{Key: awssdk.String("spawn:managed"), Value: awssdk.String("true")},
+				{Key: awssdk.String("spawn:purpose"), Value: awssdk.String(purpose)},
+			}}
+	}
+	newFake := func() *fakeNetAPI {
+		return &fakeNetAPI{
+			keys: []ec2types.KeyPairInfo{
+				kp("spawn-key-spore", keypairsweep.PurposeSession, 26*time.Hour),
+				kp("spawn-key-busy", keypairsweep.PurposeSession, 26*time.Hour),
+				kp("spawn-key-alice", keypairsweep.PurposeWorkstation, 400*time.Hour),
+			},
+			instances: []ec2types.Instance{{
+				InstanceId: awssdk.String("i-child"), KeyName: awssdk.String("spawn-key-busy"),
+				State: &ec2types.InstanceState{Name: ec2types.InstanceStateNameRunning},
+			}},
+		}
+	}
+	f := newFake()
+	runNetSweep(t, f, false)
+	if !slices.Equal(f.deletedKeys, []string{"key-spawn-key-spore"}) {
+		t.Errorf("deleted %v, want only key-spawn-key-spore", f.deletedKeys)
+	}
+
+	// report mode deletes nothing.
+	f = newFake()
+	runNetSweepMode(t, f, false, netResourcesReport)
+	if len(f.deletedKeys) != 0 {
+		t.Errorf("report mode deleted %v", f.deletedKeys)
 	}
 }

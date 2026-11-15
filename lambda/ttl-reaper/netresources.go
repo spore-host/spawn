@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/elasticip"
+	"github.com/spore-host/spawn/pkg/keypairsweep"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
@@ -32,6 +33,9 @@ type netResourceAPI interface {
 	// The orphaned launch Elastic IP sweep (#661).
 	DescribeAddresses(ctx context.Context, in *ec2.DescribeAddressesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error)
 	ReleaseAddress(ctx context.Context, in *ec2.ReleaseAddressInput, optFns ...func(*ec2.Options)) (*ec2.ReleaseAddressOutput, error)
+	// The session key-pair sweep (#1621, pkg/keypairsweep).
+	DescribeKeyPairs(ctx context.Context, in *ec2.DescribeKeyPairsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeKeyPairsOutput, error)
+	DeleteKeyPair(ctx context.Context, in *ec2.DeleteKeyPairInput, optFns ...func(*ec2.Options)) (*ec2.DeleteKeyPairOutput, error)
 }
 
 // netResourceGrace is how long a spawn-managed security group or placement group
@@ -163,6 +167,7 @@ func (r *reaper) reapNetResourcesRegion(ctx context.Context, acct account, regio
 	if groups {
 		r.reapSecurityGroups(ctx, cli, acct, region, now, occupiedSG, sum, outcome)
 		r.reapPlacementGroups(ctx, cli, acct, region, now, occupiedPG, sum, outcome)
+		r.reapSessionKeyPairs(ctx, cli, acct, region, now, sum, outcome)
 	}
 	if eips {
 		r.reapLaunchElasticIPs(ctx, cli, acct, region, now, liveInstance, sum)
@@ -477,6 +482,36 @@ func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acc
 		log.Printf("REAPED security group %s (%s) in %s/%s — unused for %s",
 			id, name, acct.label, region, age.Round(time.Hour))
 		sum.NetReaped++
+	}
+}
+
+// reapSessionKeyPairs is the TTL reaper's half of the session key-pair
+// deleter (#1621): pkg/keypairsweep's rule, shared with `spawn cleanup
+// --session-keys`. A key pair a nested-spawn head imported
+// (spawn:purpose=ssh-key-session) goes once no instance in the region uses it
+// and it is an hour old; a user's workstation key (spawn:purpose=ssh-key) is
+// never selected, and the reaper's IAM grant denies deleting one.
+// REAPER_NET_RESOURCES governs it like the groups: report logs WOULD reap.
+func (r *reaper) reapSessionKeyPairs(ctx context.Context, cli netResourceAPI, acct account, region string, now time.Time, sum *Summary, outcome *accountOutcome) {
+	results, err := keypairsweep.Sweep(ctx, cli, now, r.netReportOnly())
+	if err != nil {
+		log.Printf("net-resources: %s/%s: session key pairs: %v", acct.label, region, err)
+		return
+	}
+	for _, k := range results {
+		switch k.Outcome {
+		case keypairsweep.WouldDelete:
+			log.Printf("WOULD reap session key pair %s (%s) in %s/%s — unused, %s old",
+				k.KeyName, k.KeyPairID, acct.label, region, k.Age.Round(time.Minute))
+			sum.NetSkipped++
+		case keypairsweep.Deleted:
+			log.Printf("REAPED session key pair %s (%s) in %s/%s — unused, %s old",
+				k.KeyName, k.KeyPairID, acct.label, region, k.Age.Round(time.Minute))
+			sum.NetReaped++
+		case keypairsweep.Failed:
+			log.Printf("net-resources: %s/%s: delete session key pair %s: %v", acct.label, region, k.KeyName, k.Err)
+			recordDeleteFailure(outcome)
+		}
 	}
 }
 
