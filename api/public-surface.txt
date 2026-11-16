@@ -89,6 +89,7 @@ field BoundaryMissingError.Cause error
 field BoundaryOutcome.ARN string
 field BoundaryOutcome.Created bool
 field BoundaryOutcome.Pruned int
+field BoundaryOutcome.Tagged bool
 field BoundaryOutcome.Unchanged bool
 field BoundaryOutcome.Updated bool
 field BuildSnapshotInput.Description string

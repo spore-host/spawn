@@ -18,8 +18,8 @@ func maximalConfig() LaunchConfig {
 	return LaunchConfig{
 		InstanceType: "c6i.large", Region: "us-east-1", AMI: "ami-x", KeyName: "k",
 		Name: "n", DNSName: "d", TTL: "4h", IdleTimeout: "1h", HibernateOnIdle: true,
-		CostLimit: 10, PricePerHour: 0.085, SessionTimeout: "8h",
-		PreStop: "sync", PreStopTimeout: "5m", Username: "ec2-user",
+		CostLimit: 10, PricePerHour: 0.085,
+		PreStop: "sync", Username: "ec2-user",
 		SpotInterruptionWebhookURL: "https://spot", WebhookCorrelation: "corr",
 		WebhookTimeout: "2s", CompletionWebhookURL: "https://done",
 		NotifyURL: "https://n", NotifyCommand: "/spore", SlackWorkspaceID: "T1",
@@ -28,7 +28,11 @@ func maximalConfig() LaunchConfig {
 		SweepID: "s", SweepName: "sn", SweepSize: 4, SweepIndex: 1,
 		EFSID: "fs-1", EFSMountPoint: "/efs",
 		FSxLustreID: "fs-2", FSxMountPoint: "/fsx",
-		OnComplete: "terminate", CompletionFile: "/tmp/C", CompletionDelay: "1m",
+		// No SessionTimeout, PreStopTimeout or CompletionDelay since the
+		// spore.host tags (spore-host:managed-by, created, schema; #1652) took
+		// three slots: this keeps the shape's slack, two sweep parameters, as
+		// it was.
+		OnComplete: "terminate", CompletionFile: "/tmp/C",
 		Spot: true, EFAEnabled: true, Hibernate: true,
 	}
 }

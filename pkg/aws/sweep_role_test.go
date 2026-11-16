@@ -571,8 +571,12 @@ func TestEnsureSweepRole_CreatesTheRole(t *testing.T) {
 	if f.trust != want {
 		t.Errorf("trust %s, want %s", f.trust, want)
 	}
-	if len(f.tags) != 1 || aws.ToString(f.tags[0].Key) != "spawn:managed" || aws.ToString(f.tags[0].Value) != "true" {
-		t.Errorf("tags %v, want spawn:managed=true", f.tags)
+	gotTags := map[string]string{}
+	for _, tg := range f.tags {
+		gotTags[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
+	}
+	if gotTags["spawn:managed"] != "true" || gotTags["spore-host:managed-by"] != "spawn" || gotTags["spore-host:scope"] != "global" {
+		t.Errorf("tags %v, want spawn:managed=true and the spore.host tags (#1652)", gotTags)
 	}
 	if got := f.names(); len(got) != 1 || got[0] != SweepRolePolicyName() || got[0] != "SweepCrossAccountEC2Policy-v2" {
 		t.Errorf("inline policies %v, want [SweepCrossAccountEC2Policy-v2]", got)

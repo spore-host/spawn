@@ -15,7 +15,10 @@
     "spawn:root": "true",
     "spawn:ttl": "144h0m0s",
     "spawn:ttl-deadline": "2026-11-09T12:00:00Z",
-    "spawn:version": "0.0.0-fixture"
+    "spawn:version": "0.0.0-fixture",
+    "spore-host:created": "2026-11-03T12:00:00Z",
+    "spore-host:managed-by": "spawn",
+    "spore-host:schema": "1"
   },
   "volume_tags": {
     "Name": "spawn-egress-proxy-vpc-1",
@@ -30,7 +33,10 @@
     "spawn:root": "true",
     "spawn:ttl": "144h0m0s",
     "spawn:ttl-deadline": "2026-11-09T12:00:00Z",
-    "spawn:version": "0.0.0-fixture"
+    "spawn:version": "0.0.0-fixture",
+    "spore-host:created": "2026-11-03T12:00:00Z",
+    "spore-host:managed-by": "spawn",
+    "spore-host:schema": "1"
   },
   "groups": [
     {
@@ -40,7 +46,10 @@
         "spawn:created": "2026-11-03T12:00:00Z",
         "spawn:egress-proxy": "vpc-1",
         "spawn:managed": "true",
-        "spawn:purpose": "egress-clients"
+        "spawn:purpose": "egress-clients",
+        "spore-host:created": "2026-11-03T12:00:00Z",
+        "spore-host:managed-by": "spawn",
+        "spore-host:schema": "1"
       }
     },
     {
@@ -50,7 +59,10 @@
         "spawn:created": "2026-11-03T12:00:00Z",
         "spawn:egress-proxy": "vpc-1",
         "spawn:managed": "true",
-        "spawn:purpose": "egress-proxy"
+        "spawn:purpose": "egress-proxy",
+        "spore-host:created": "2026-11-03T12:00:00Z",
+        "spore-host:managed-by": "spawn",
+        "spore-host:schema": "1"
       },
       "references": "spawn-egress-clients-vpc-1"
     }

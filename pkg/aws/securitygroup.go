@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -171,9 +170,9 @@ func (c *Client) createOrGetClusterGroup(ctx context.Context, region, vpcID, gro
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				// LifecycleTags adds spawn:created, which the reaper's sweep needs
+				// lifecycleTags adds spawn:created, which the reaper's sweep needs
 				// and which nothing used to write — see the #685 follow-up.
-				Tags: LifecycleTags(groupName, purpose, time.Now()),
+				Tags: c.lifecycleTags(region, groupName, purpose),
 			},
 		},
 	})
@@ -222,7 +221,7 @@ func (c *Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vp
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags:         LifecycleTags(groupName, WindowsSecurityGroupPurpose, time.Now()),
+				Tags:         c.lifecycleTags(region, groupName, WindowsSecurityGroupPurpose),
 			},
 		},
 	})
@@ -434,7 +433,7 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags:         LifecycleTags(sgName, "", time.Now()),
+				Tags:         c.lifecycleTags(region, sgName, ""),
 			},
 		},
 	})
@@ -515,7 +514,7 @@ func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID 
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeSecurityGroup,
-				Tags:         LifecycleTags(sgName, "", time.Now()),
+				Tags:         c.lifecycleTags(region, sgName, ""),
 			},
 		},
 	})

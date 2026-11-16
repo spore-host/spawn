@@ -22,9 +22,14 @@ import (
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	libtags "github.com/spore-host/libs/tags"
+	"github.com/spore-host/libs/tags/iamtags"
+	"github.com/spore-host/libs/tags/s3tags"
 
 	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/reaperiam"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // APIs is the slice of AWS each step needs, as interfaces, so the Deployer is
@@ -286,7 +291,7 @@ const DefaultLogRetentionDays = 30
 // only set retention would leave every fresh reaper unretained, and this one
 // set none at all (#1156). Lambda writes to an existing group rather than
 // creating its own, so creating it first is safe and idempotent.
-func (d *Deployer) ensureLogGroup(ctx context.Context, days int32, version string) (string, error) {
+func (d *Deployer) ensureLogGroup(ctx context.Context, days int32, version, region string) (string, error) {
 	if d.Logs == nil {
 		return "", errors.New("reaperdeploy: no CloudWatch Logs client, so log retention cannot be set")
 	}
@@ -296,7 +301,7 @@ func (d *Deployer) ensureLogGroup(ctx context.Context, days int32, version strin
 	created := true
 	if _, err := d.Logs.CreateLogGroup(ctx, &cwlogs.CreateLogGroupInput{
 		LogGroupName: awssdk.String(LogGroupName()),
-		Tags:         Tags(version),
+		Tags:         scopedTags(version, region),
 	}); err != nil {
 		var exists *cwtypes.ResourceAlreadyExistsException
 		if !errors.As(err, &exists) {
@@ -429,7 +434,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	res.Actions = append(res.Actions, fmt.Sprintf("uploaded artifact s3://%s/%s (%d bytes)", opts.Bucket, res.Key, len(zip)))
 
 	// Before the function, so the group exists before anything can invoke it.
-	logAction, err := d.ensureLogGroup(ctx, opts.LogRetentionDays, opts.Version)
+	logAction, err := d.ensureLogGroup(ctx, opts.LogRetentionDays, opts.Version, opts.Region)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +470,13 @@ func (d *Deployer) ensureRole(ctx context.Context, opts Options) (string, bool, 
 	arn := fmt.Sprintf("arn:aws:iam::%s:role/%s", opts.AccountID, RoleName)
 
 	created := false
-	if _, err := d.IAM.GetRole(ctx, &iam.GetRoleInput{RoleName: awssdk.String(RoleName)}); err != nil {
+	if got, err := d.IAM.GetRole(ctx, &iam.GetRoleInput{RoleName: awssdk.String(RoleName)}); err == nil {
+		// A role an older spawn deployed gets the spore.host tags it lacks,
+		// keeping any it has (#1652). Best-effort.
+		if got != nil && got.Role != nil {
+			d.convergeRoleTags(ctx, got.Role.Tags, opts.Version)
+		}
+	} else {
 		var nse *iamtypes.NoSuchEntityException
 		if !errors.As(err, &nse) {
 			return "", false, fmt.Errorf("reaperdeploy: get role %s: %w", RoleName, err)
@@ -542,13 +553,14 @@ func (d *Deployer) ensureBucket(ctx context.Context, bucket, region string) (boo
 	// Non-fatal: a deploy that cannot tag has still produced a working reaper, and
 	// failing here would turn a cosmetic gap into an outage. The teardown handles
 	// an untagged bucket explicitly rather than assuming the tag is present.
+	bt := sporetags.For(region, "")
+	bt[libtags.Component] = "ttl-reaper"
+	bt["spawn:managed"] = "true"
+	bt["spawn:component"] = "ttl-reaper"
+	bt["spawn:created-by"] = "spawn reaper deploy"
 	if _, err := d.S3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
-		Bucket: awssdk.String(bucket),
-		Tagging: &s3types.Tagging{TagSet: []s3types.Tag{
-			{Key: awssdk.String("spawn:managed"), Value: awssdk.String("true")},
-			{Key: awssdk.String("spawn:component"), Value: awssdk.String("ttl-reaper")},
-			{Key: awssdk.String("spawn:created-by"), Value: awssdk.String("spawn reaper deploy")},
-		}},
+		Bucket:  awssdk.String(bucket),
+		Tagging: s3tags.Tagging(bt),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  reaperdeploy: could not tag bucket %s (%v) — teardown will need --force-artifacts to remove it\n", bucket, err)
 	}
@@ -693,9 +705,21 @@ func DefaultFetch(ctx context.Context, ref string) ([]byte, error) {
 const ArtifactBucketTag = "spawn:artifact-bucket"
 
 func functionTags(opts Options) map[string]string {
-	t := Tags(opts.Version)
+	t := scopedTags(opts.Version, opts.Region)
 	if opts.Bucket != "" {
 		t[ArtifactBucketTag] = opts.Bucket
+	}
+	return t
+}
+
+// keepFirstStamp returns t with the spore-host:created and spore-host:owner
+// of existing, when it has them: re-tagging an upgraded function must not
+// reset when it was first deployed, which cleanup's grace counts from.
+func keepFirstStamp(t, existing map[string]string) map[string]string {
+	for _, k := range []string{libtags.Created, libtags.Owner} {
+		if v, ok := existing[k]; ok && v != "" {
+			t[k] = v
+		}
 	}
 	return t
 }
@@ -737,7 +761,7 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 		// status` and the skew report (#654) read the wrong version (#1086).
 		if _, err := d.Lambda.TagResource(ctx, &lambda.TagResourceInput{
 			Resource: awssdk.String(arn),
-			Tags:     functionTags(opts),
+			Tags:     keepFirstStamp(functionTags(opts), out.Tags),
 		}); err != nil {
 			return "", false, false, fmt.Errorf("reaperdeploy: tag function: %w", err)
 		}
@@ -770,11 +794,12 @@ func (d *Deployer) ensureFunction(ctx context.Context, opts Options, roleARN, ke
 }
 
 func (d *Deployer) ensureSchedule(ctx context.Context, opts Options, fnARN string) error {
-	if _, err := d.Events.PutRule(ctx, &eventbridge.PutRuleInput{
+	if err := d.putRule(ctx, &eventbridge.PutRuleInput{
 		Name:               awssdk.String(RuleName),
 		ScheduleExpression: awssdk.String(opts.Schedule),
 		State:              ebtypes.RuleStateEnabled,
 		Description:        awssdk.String("Invokes the spawn ttl-reaper (spawn#625)"),
+		Tags:               ruleTags(opts),
 	}); err != nil {
 		return fmt.Errorf("reaperdeploy: put rule: %w", err)
 	}
@@ -811,11 +836,12 @@ func (d *Deployer) ensureSchedule(ctx context.Context, opts Options, fnARN strin
 // which since #1287 releases a terminated instance's address without waiting
 // out the grace. The release follows REAPER_ELASTIC_IPS and REAPER_DRY_RUN.
 func (d *Deployer) ensureInstanceEventRule(ctx context.Context, opts Options, fnARN string) error {
-	if _, err := d.Events.PutRule(ctx, &eventbridge.PutRuleInput{
+	if err := d.putRule(ctx, &eventbridge.PutRuleInput{
 		Name:         awssdk.String(InstanceEventRuleName),
 		EventPattern: awssdk.String(InstanceEventPattern),
 		State:        ebtypes.RuleStateEnabled,
 		Description:  awssdk.String("Releases a terminated spawn instance's launch Elastic IPs (spawn#1287)"),
+		Tags:         ruleTags(opts),
 	}); err != nil {
 		return fmt.Errorf("reaperdeploy: put instance-event rule: %w", err)
 	}
@@ -1052,12 +1078,67 @@ func isNotFound(err error) bool {
 	return errors.As(err, &iamNF) || errors.As(err, &lamNF) || errors.As(err, &ebNF) || errors.As(err, &logsNF)
 }
 
-func iamTags(version string) []iamtypes.Tag {
-	var out []iamtypes.Tag
-	for k, v := range Tags(version) {
-		out = append(out, iamtypes.Tag{Key: awssdk.String(k), Value: awssdk.String(v)})
+// putRule is PutRule, retried once without the tags when it is refused as
+// AccessDenied: tagging a rule also needs events:TagResource, and a reaper
+// whose rule is untagged still runs (#1652).
+func (d *Deployer) putRule(ctx context.Context, in *eventbridge.PutRuleInput) error {
+	_, err := d.Events.PutRule(ctx, in)
+	var apiErr smithy.APIError
+	if err == nil || len(in.Tags) == 0 || !errors.As(err, &apiErr) || !strings.Contains(apiErr.ErrorCode(), "AccessDenied") {
+		return err
+	}
+	untagged := *in
+	untagged.Tags = nil
+	if _, uerr := d.Events.PutRule(ctx, &untagged); uerr != nil {
+		return uerr
+	}
+	fmt.Fprintf(os.Stderr, "⚠️  reaperdeploy: rule %s was created without the spore-host:* tags (%v) (#1652)\n", awssdk.ToString(in.Name), err)
+	return nil
+}
+
+// ruleTags are an EventBridge rule's tags: the function's, without the
+// artifact bucket.
+func ruleTags(opts Options) []ebtypes.Tag {
+	t := scopedTags(opts.Version, opts.Region)
+	out := make([]ebtypes.Tag, 0, len(t))
+	keys := make([]string, 0, len(t))
+	for k := range t {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, ebtypes.Tag{Key: awssdk.String(k), Value: awssdk.String(t[k])})
 	}
 	return out
+}
+
+// roleTagger is TagRole, asserted on the IAM client: *iam.Client has it, and
+// a test fake without it skips the converge.
+type roleTagger interface {
+	TagRole(context.Context, *iam.TagRoleInput, ...func(*iam.Options)) (*iam.TagRoleOutput, error)
+}
+
+// convergeRoleTags adds to the existing execution role the spore.host tags it
+// lacks (sporetags.Converge never changes one it has).
+func (d *Deployer) convergeRoleTags(ctx context.Context, existing []iamtypes.Tag, version string) {
+	desired := map[string]string{}
+	for k, v := range scopedTags(version, sporetags.ScopeGlobal) {
+		if strings.HasPrefix(k, "spore-host:") {
+			desired[k] = v
+		}
+	}
+	add := sporetags.Converge(iamtags.ToMap(existing), desired)
+	t, ok := d.IAM.(roleTagger)
+	if len(add) == 0 || !ok {
+		return
+	}
+	if _, err := t.TagRole(ctx, &iam.TagRoleInput{RoleName: awssdk.String(RoleName), Tags: iamtags.FromMap(add)}); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  reaperdeploy: could not add the spore-host:* tags to role %s (%v); it works as before (#1652)\n", RoleName, err)
+	}
+}
+
+func iamTags(version string) []iamtypes.Tag {
+	return iamtags.FromMap(scopedTags(version, sporetags.ScopeGlobal))
 }
 
 func actionWord(created bool, kind, name string) string {

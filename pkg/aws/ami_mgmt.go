@@ -10,6 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/imagebuilder"
+
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // AMIInfo represents information about an AMI
@@ -55,7 +57,11 @@ type createImageAPI interface {
 // snapshots are tagged, atomically with the CreateImage call, with
 // ImageCreateTags(input.Tags, input.SourceTags): the caller's tags plus the
 // image's provenance (#1364), which input.Tags cannot override.
+//
+// The image and snapshots also carry the spore.host tags (#1652), each only
+// where input.Tags does not set it, so a caller's spore-host:managed-by wins.
 func (c *Client) CreateAMI(ctx context.Context, region string, input CreateAMIInput) (string, error) {
+	input.Tags = sporetags.Fill(input.Tags, c.sporeTags(region))
 	return createAMI(ctx, c.regionalEC2(region), input)
 }
 

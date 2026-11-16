@@ -13,6 +13,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags/iamtags"
+
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // CrossAccountRoleName is the role `spawn notify register` creates in the
@@ -263,12 +266,13 @@ func createCrossAccountRole(ctx context.Context, client RoleIAM, principal strin
 		Description:              aws.String("Allows spore-bot Lambda to control EC2 instances in this account via Slack/Teams commands"),
 		// Tag so `spawn cleanup`/`resources` can find and attribute it (#258),
 		// and so --repair knows spawn owns it.
-		Tags: []iamtypes.Tag{
+		// And the spore.host tags (#1652).
+		Tags: append([]iamtypes.Tag{
 			{Key: aws.String("spawn:managed"), Value: aws.String("true")},
 			{Key: aws.String("spawn:created-by"), Value: aws.String("spawn")},
 			{Key: aws.String("spawn:created-at"), Value: aws.String(time.Now().UTC().Format(time.RFC3339))},
 			{Key: aws.String(botPurposeTagKey), Value: aws.String(botPurposeTagValue)},
-		},
+		}, iamtags.FromMap(sporetags.For(sporetags.ScopeGlobal, ""))...),
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("create role: %w", err)

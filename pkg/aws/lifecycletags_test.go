@@ -90,7 +90,9 @@ func TestEveryNetResourceCreationIsTagged(t *testing.T) {
 					continue
 				}
 				checked++
-				if !strings.Contains(window, "LifecycleTags(") {
+				// LifecycleTags, or a Client's lifecycleTags (the same set with
+				// spore-host:scope and owner, #1652).
+				if !strings.Contains(window, "LifecycleTags(") && !strings.Contains(window, "c.lifecycleTags(") {
 					t.Errorf("%s:%d tags a network resource without LifecycleTags — "+
 						"it will be missing %s and so permanently uncollectable",
 						path, i+1, CreatedTagKey)

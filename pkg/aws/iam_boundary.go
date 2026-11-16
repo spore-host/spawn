@@ -10,6 +10,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags/iamtags"
+
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // The spawn-instance permissions boundary.
@@ -231,16 +234,10 @@ func ensureBoundaryForLaunch(ctx context.Context, api boundaryLaunchAPI, account
 	case !isNoSuchEntity(err):
 		return fmt.Errorf("look up the spawn permissions boundary %s: %w", arn, err)
 	}
-	// Missing: create the first version if these credentials may.
-	cerr := retryIAMWrite(func() error {
-		_, e := api.CreatePolicy(ctx, &iam.CreatePolicyInput{
-			PolicyName:     aws.String(spawnInstanceBoundaryName),
-			Path:           aws.String(sporedPolicyPath),
-			PolicyDocument: aws.String(spawnInstanceBoundaryDocument),
-			Description:    aws.String(spawnInstanceBoundaryDescription()),
-		})
-		return e
-	})
+	// Missing: create the first version if these credentials may. An existing
+	// boundary's tags are not converged here, only by `spawn setup-account`
+	// (EnsureSpawnInstanceBoundary): the user baseline may not write to it.
+	cerr := createBoundaryPolicy(ctx, api)
 	switch {
 	case cerr == nil:
 		return nil
@@ -304,6 +301,56 @@ type BoundaryOutcome struct {
 	Updated   bool // a new default version was written (the document had drifted)
 	Pruned    int  // older versions deleted to stay under IAM's five-version cap
 	Unchanged bool // the deployed document already matched this spawn's
+	Tagged    bool // the existing boundary was given the spore.host tags it lacked (#1652)
+}
+
+// boundaryTags are the spawn-instance boundary's tags: the spore.host set with
+// spore-host:permanent=true (#1652). The boundary is the one spawn resource
+// kept on purpose, by owner decision (spore-host/spore-host#752); teardown
+// keys on that marker and leaves it. It is not spore-host:role=service, which
+// marks spore.host's own live service (pkg/servicetags).
+func boundaryTags() map[string]string {
+	return sporetags.Permanent("")
+}
+
+// boundaryCreateAPI is the IAM call createBoundaryPolicy makes.
+type boundaryCreateAPI interface {
+	CreatePolicy(ctx context.Context, in *iam.CreatePolicyInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyOutput, error)
+}
+
+// createBoundaryPolicy creates the first version of the spawn-instance
+// boundary, tagged (boundaryTags), or untagged when the tags alone are denied
+// (createPolicyTagged).
+func createBoundaryPolicy(ctx context.Context, api boundaryCreateAPI) error {
+	return createPolicyTagged(ctx, func(in *iam.CreatePolicyInput) error {
+		return retryIAMWrite(func() error {
+			_, e := api.CreatePolicy(ctx, in)
+			return e
+		})
+	}, &iam.CreatePolicyInput{
+		PolicyName:     aws.String(spawnInstanceBoundaryName),
+		Path:           aws.String(sporedPolicyPath),
+		PolicyDocument: aws.String(spawnInstanceBoundaryDocument),
+		Description:    aws.String(spawnInstanceBoundaryDescription()),
+		Tags:           iamtags.FromMap(boundaryTags()),
+	})
+}
+
+// convergeBoundaryTags adds to the existing boundary the boundaryTags it
+// lacks, and reports whether it wrote any. A failure is warned about, not
+// returned.
+func convergeBoundaryTags(ctx context.Context, api any, arn string, existing []types.Tag, warn func(string)) bool {
+	add := sporetags.Converge(iamtags.ToMap(existing), boundaryTags())
+	t, ok := api.(policyTagger)
+	if len(add) == 0 || !ok {
+		return false
+	}
+	if _, err := t.TagPolicy(ctx, &iam.TagPolicyInput{PolicyArn: aws.String(arn), Tags: iamtags.FromMap(add)}); err != nil {
+		warn(fmt.Sprintf("could not tag the spawn permissions boundary %s with the spore-host:* tags (iam:TagPolicy: %v); "+
+			"it caps roles as before, but leave-no-trace cleanup cannot tell it is the one resource to keep (#1652)", arn, err))
+		return false
+	}
+	return true
 }
 
 // EnsureSpawnInstanceBoundary creates the spawn-instance boundary in account,
@@ -325,15 +372,7 @@ func EnsureSpawnInstanceBoundary(ctx context.Context, api BoundaryAdminAPI, acco
 	switch {
 	case err == nil:
 	case isNoSuchEntity(err):
-		cerr := retryIAMWrite(func() error {
-			_, e := api.CreatePolicy(ctx, &iam.CreatePolicyInput{
-				PolicyName:     aws.String(spawnInstanceBoundaryName),
-				Path:           aws.String(sporedPolicyPath),
-				PolicyDocument: aws.String(spawnInstanceBoundaryDocument),
-				Description:    aws.String(spawnInstanceBoundaryDescription()),
-			})
-			return e
-		})
+		cerr := createBoundaryPolicy(ctx, api)
 		if cerr != nil && !isEntityAlreadyExists(cerr) {
 			return out, fmt.Errorf("create the spawn permissions boundary %s: %w", arn, cerr)
 		}
@@ -350,7 +389,14 @@ func EnsureSpawnInstanceBoundary(ctx context.Context, api BoundaryAdminAPI, acco
 		return out, fmt.Errorf("look up the spawn permissions boundary %s: %w", arn, err)
 	}
 
-	// It exists: compare the default version's document.
+	// It exists. An older spawn created it untagged: add the spore.host tags
+	// it lacks, keeping any it has (#1652). Best-effort, like every tag
+	// converge: the boundary caps roles whether or not it is tagged.
+	if cur != nil && cur.Policy != nil {
+		out.Tagged = convergeBoundaryTags(ctx, api, arn, cur.Policy.Tags, warn)
+	}
+
+	// Compare the default version's document.
 	defaultVersion := "v1"
 	if cur != nil && cur.Policy != nil && cur.Policy.DefaultVersionId != nil {
 		defaultVersion = aws.ToString(cur.Policy.DefaultVersionId)

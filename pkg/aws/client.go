@@ -53,6 +53,11 @@ type Client struct {
 	// image needs the AWS CLI downloaded (imageAWSCLINeed, #1515), so the
 	// check Launch repeats reads the image once.
 	imageCLI sync.Map
+	// callerUserID is the caller's sts:GetCallerIdentity UserId, recorded by
+	// GetAccountID and GetCallerIdentityInfo when STS answers, for the
+	// spore-host:owner tag on what spawn creates (#1652). Empty until then:
+	// the owner is tagged only when it is known without an extra call.
+	callerUserID sync.Map
 }
 
 // CallerVersion is the resolved version of the launching spawn binary,
@@ -1090,7 +1095,7 @@ func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publ
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeKeyPair,
-				Tags:         c.managedResourceTags(ctx, map[string]string{"spawn:purpose": purpose}),
+				Tags:         c.managedResourceTags(ctx, region, map[string]string{"spawn:purpose": purpose}),
 			},
 		},
 	}
@@ -1766,6 +1771,7 @@ func (c *Client) GetAccountID(ctx context.Context) (string, error) {
 	stsClient := sts.NewFromConfig(c.cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err == nil && identity.Account != nil {
+		c.recordCallerUserID(identity.UserId)
 		return *identity.Account, nil
 	}
 	// STS failed or returned no account — try IMDS (e.g. STS VPC endpoint with
@@ -1788,6 +1794,7 @@ func (c *Client) GetCallerIdentityInfo(ctx context.Context) (accountID string, u
 	stsClient := sts.NewFromConfig(c.cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err == nil && identity.Account != nil && identity.Arn != nil {
+		c.recordCallerUserID(identity.UserId)
 		return *identity.Account, *identity.Arn, nil
 	}
 	stsErr := err

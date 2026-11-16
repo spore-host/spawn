@@ -20,6 +20,7 @@ import (
 	"github.com/spore-host/libs/tags/s3tags"
 	"github.com/spore-host/spawn/pkg/s3transfer"
 	"github.com/spore-host/spawn/pkg/servicetags"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // StagingMetadata represents metadata about staged data
@@ -106,6 +107,19 @@ func schedulesServiceTags() map[string]string {
 	return servicetags.For("scheduler-handler", "pkg/staging/staging.go")
 }
 
+// bucketTags are the tags of a schedules bucket ensureBucket creates in region
+// for k: the spore.host tags (#1652), plus the service tags for schedule
+// params.
+func bucketTags(region string, k paramsKind) map[string]string {
+	t := sporetags.For(region, "")
+	if k == kindScheduleParams {
+		for key, v := range schedulesServiceTags() {
+			t[key] = v
+		}
+	}
+	return t
+}
+
 // ensureBucket ensures a single named bucket exists; returns the name if it does (or was created).
 // Returns an error if the bucket is owned by another account or creation fails.
 //
@@ -148,13 +162,14 @@ func (c *Client) ensureBucket(ctx context.Context, bucket, region string, k para
 	// Best-effort, like the public access block: the bucket works without its
 	// tags, and a missing s3:PutBucketTagging grant must not fail the schedule.
 	// spore-host's scripts/retag-service-resources.sh covers one left untagged.
-	if k == kindScheduleParams {
-		if _, err := s3Client.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
-			Bucket:  aws.String(bucket),
-			Tagging: s3tags.Tagging(schedulesServiceTags()),
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not tag new bucket %s as a spore.host service bucket: %v\n", bucket, err)
-		}
+	//
+	// Either kind carries the spore.host tags (spore-host:managed-by=spawn,
+	// #1652); only the schedule-params bucket adds the service tags.
+	if _, err := s3Client.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
+		Bucket:  aws.String(bucket),
+		Tagging: s3tags.Tagging(bucketTags(region, k)),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not tag new bucket %s: %v\n", bucket, err)
 	}
 
 	// No lifecycle rule here. This used to put `expire-schedules` (7 days on

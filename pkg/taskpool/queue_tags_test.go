@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	smithy "github.com/aws/smithy-go"
+	libtags "github.com/spore-host/libs/tags"
 	"github.com/spore-host/spawn/pkg/poolqueue"
 	"github.com/spore-host/spawn/pkg/testutil"
 )
@@ -31,10 +32,10 @@ func (c *createRecorder) CreateQueue(ctx context.Context, in *sqs.CreateQueueInp
 	return c.fakeSQS.CreateQueue(ctx, in, o...)
 }
 
-// TestCreateQueueTagsTheQueue: a pool's queue is created carrying exactly
-// poolqueue.Tags, the tags the abandoned-pool sweep requires (#1351). Without
-// them the reaper and `spawn cleanup --pool-queues` must keep the queue
-// forever.
+// TestCreateQueueTagsTheQueue: a pool's queue is created carrying
+// poolqueue.Tags, the tags the abandoned-pool sweep requires (#1351), and the
+// spore.host tags (#1652) and nothing else. Without the first the reaper and
+// `spawn cleanup --pool-queues` must keep the queue forever.
 func TestCreateQueueTagsTheQueue(t *testing.T) {
 	rec := &createRecorder{fakeSQS: newFakeSQS(time.Now)}
 	q, err := CreateQueue(context.Background(), rec, "run-7", 30)
@@ -46,8 +47,14 @@ func TestCreateQueueTagsTheQueue(t *testing.T) {
 	}
 	want := poolqueue.Tags("run-7")
 	got := rec.inputs[0].Tags
-	if len(got) != len(want) {
-		t.Errorf("created with tags %v, want %v", got, want)
+	spore := 0
+	for k := range got {
+		if strings.HasPrefix(k, "spore-host:") {
+			spore++
+		}
+	}
+	if len(got)-spore != len(want) || got[libtags.ManagedBy] != string(libtags.ToolSpawn) {
+		t.Errorf("created with tags %v, want %v and the spore.host tags", got, want)
 	}
 	for k, v := range want {
 		if got[k] != v {

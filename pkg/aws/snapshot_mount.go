@@ -43,10 +43,10 @@ func (c *Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*
 		VolumeType:       ec2types.VolumeTypeGp3,
 		TagSpecifications: []ec2types.TagSpecification{{
 			ResourceType: ec2types.ResourceTypeVolume,
-			Tags: []ec2types.Tag{
+			Tags: appendMissingTags([]ec2types.Tag{
 				{Key: aws.String("spawn:managed"), Value: aws.String("true")},
 				{Key: aws.String("spawn:from-snapshot"), Value: aws.String(snapshotID)},
-			},
+			}, c.sporeTags(idDoc.Region)),
 		}},
 	})
 	if err != nil {

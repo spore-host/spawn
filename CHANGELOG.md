@@ -39,6 +39,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tagged as a service bucket of `scheduler-handler`. The command now also calls
   `s3:PutBucketTagging` when it creates the bucket; without the grant it warns
   and carries on (spore-host/spore-host#750).
+- Everything spawn creates now carries the spore.host tags from `libs/tags`
+  beside its `spawn:*` tags (#1652, part of the leave-no-trace epic
+  spore-host/spore-host#752): `spore-host:managed-by=spawn`,
+  `spore-host:created`, `spore-host:schema` and, where it applies,
+  `spore-host:scope` (the region, or `global` for IAM) and `spore-host:owner`
+  (the caller's `aws:userid`, when spawn already looked it up). Covered:
+  instances, their volumes and persistent Spot requests; security groups,
+  placement groups, imported key pairs, launch Elastic IPs and the volume
+  `spawn snapshot mount` makes; the `spawn-instance-*`, `spored-instance-role`,
+  sweep and bot roles and their instance profiles; the `/spore-host/spored-*`
+  managed policies; the results, FSx, staging and schedules buckets; pool SQS
+  queues; FSx filesystems and their data repository associations; AMIs and
+  snapshots from `spawn create-ami` and `spawn ami copy`; the self-hosted
+  reaper's role, log group, bucket, function and rules (with
+  `spore-host:component=ttl-reaper`); the egress proxy's groups and instance;
+  the ISO-import role, profile, Image Builder infrastructure configuration and
+  image (untagged before); the `spore-portal-onboard` role; the hybrid
+  registry table; and pipeline notification topics. None gets
+  `spore-host:role`: what spawn makes for users stays deletable.
+- The permissions boundary `spore-host/spawn-instance-boundary`, the one spawn
+  resource kept on purpose, is tagged `spore-host:managed-by=spawn` and
+  `spore-host:permanent=true`, the marker leave-no-trace teardown keeps it by.
+  `spawn setup-account` adds the tags to a boundary an older spawn created.
+
+### Changed
+
+- **A caller's `spore-host:*` tags win over spawn's** (#1652). calque and
+  lagotto launch instances and create instance roles through `pkg/aws` and pass
+  their own `spore-host:managed-by` because they own those resources'
+  lifecycle; spawn writes each `spore-host:*` key only where `LaunchConfig.Tags`
+  or `IAMRoleConfig.Tags` does not set it, on the instance, its volumes, its
+  Spot request and launch Elastic IP, the role and the profile. The `spawn:*`
+  keys stay spawn's, and TTL enforcement keys on them whoever manages the
+  instance. `buildIAMTags` no longer writes into the caller's
+  `IAMRoleConfig.Tags` map.
+- An existing role, instance profile, spored managed policy, results bucket or
+  staging bucket that predates these tags is given the ones it lacks when spawn next uses it.
+  Nothing it already carries is changed, so `spore-host:created` (cleanup's
+  grace clock) and `spore-host:owner` keep their first values, and a resource
+  another tool's `spore-host:managed-by` claims is not relabelled. A missing
+  tag permission never fails a command: a tagged create that IAM, Image
+  Builder or EventBridge refuses as AccessDenied is retried untagged with a
+  warning, and a converge that is denied changes nothing.
+- An instance carries three more tags (`spore-host:managed-by`, `created`,
+  `schema`; an instance's scope and owner are left out, as its region and
+  `spawn:iam-user` already say them). A launch within three tags of AWS's
+  50-tag limit, counting the slots kept for spored, is now refused at the
+  pre-flight, naming what to drop.
+- New IAM actions: `iam:TagPolicy` for every command that sets up an instance
+  role (and `spawn setup-account`), `imagebuilder:TagResource` for
+  `spawn image import`, `events:TagResource` for `spawn reaper deploy`
+  (docs/reference/cli-iam-actions.md). Without them the resource is created
+  untagged and the command carries on.
 
 ### Fixed
 

@@ -37,10 +37,10 @@ func (c *Client) CreatePlacementGroup(ctx context.Context, name, region string) 
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypePlacementGroup,
-				// spawn:created comes from LifecycleTags and is what the reaper's
+				// spawn:created comes from lifecycleTags and is what the reaper's
 				// sweep reads; without it the group is permanently uncollectable,
 				// because EC2 does not report a placement group's creation time.
-				Tags: LifecycleTags("", "mpi", time.Now()),
+				Tags: c.lifecycleTags(region, "", "mpi"),
 			},
 		},
 	})

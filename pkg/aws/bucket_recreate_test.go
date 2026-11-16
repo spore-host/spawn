@@ -34,6 +34,7 @@ func (f *fakeCreateS3) CreateBucket(_ context.Context, in *s3.CreateBucketInput,
 func (f *fakeCreateS3) PutBucketTagging(_ context.Context, in *s3.PutBucketTaggingInput, _ ...func(*s3.Options)) (*s3.PutBucketTaggingOutput, error) {
 	f.calls = append(f.calls, "PutBucketTagging")
 	f.tags = in.Tagging.TagSet
+	f.existingTags = in.Tagging.TagSet // as S3 does: a later read sees this write
 	return &s3.PutBucketTaggingOutput{}, nil
 }
 func (f *fakeCreateS3) GetBucketTagging(context.Context, *s3.GetBucketTaggingInput, ...func(*s3.Options)) (*s3.GetBucketTaggingOutput, error) {

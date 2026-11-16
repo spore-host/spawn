@@ -17,7 +17,10 @@ import (
 	ibtypes "github.com/aws/aws-sdk-go-v2/service/imagebuilder/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	libtags "github.com/spore-host/libs/tags"
+	"github.com/spore-host/libs/tags/iamtags"
 	"github.com/spore-host/spawn/pkg/s3transfer"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // imageBuilderServiceName is the AWS service principal used to create the
@@ -121,13 +124,25 @@ func (c *Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImport
 	iamClient := iam.NewFromConfig(cfg)
 	ibClient := imagebuilder.NewFromConfig(cfg)
 
+	// The import infrastructure is spawn's, reused by every import and
+	// deletable once none runs: the spore.host tags with no role (#1652). An
+	// existing role or profile gets the ones it lacks.
+	iamTags := c.isoImportTags(sporetags.ScopeGlobal)
+
 	// 1. Instance-profile role (trust ec2.amazonaws.com).
-	if err := ensureExists(iamClient.CreateRole(ctx, &iam.CreateRoleInput{
+	_, rerr := iamClient.CreateRole(ctx, &iam.CreateRoleInput{
 		RoleName:                 aws.String(importInstanceProfileRole),
 		AssumeRolePolicyDocument: aws.String(ec2TrustPolicy),
 		Description:              aws.String("spawn: Image Builder ISO-import build instance role"),
-	})); err != nil {
+		Tags:                     iamtags.FromMap(iamTags),
+	})
+	if err := ensureExists(struct{}{}, rerr); err != nil {
 		return "", fmt.Errorf("create role %s: %w", importInstanceProfileRole, err)
+	}
+	if rerr != nil { // it existed
+		if got, gerr := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(importInstanceProfileRole)}); gerr == nil && got.Role != nil {
+			convergeRoleTags(ctx, iamClient, importInstanceProfileRole, got.Role.Tags, iamTags)
+		}
 	}
 	for _, arn := range importInstancePolicies {
 		if _, err := iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
@@ -139,10 +154,17 @@ func (c *Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImport
 	}
 
 	// 2. Instance profile of the same name, with the role added.
-	if err := ensureExists(iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
+	_, perr := iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
 		InstanceProfileName: aws.String(importInstanceProfileRole),
-	})); err != nil {
+		Tags:                iamtags.FromMap(iamTags),
+	})
+	if err := ensureExists(struct{}{}, perr); err != nil {
 		return "", fmt.Errorf("create instance profile %s: %w", importInstanceProfileRole, err)
+	}
+	if perr != nil { // it existed
+		if got, gerr := iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{InstanceProfileName: aws.String(importInstanceProfileRole)}); gerr == nil && got.InstanceProfile != nil {
+			convergeProfileTags(ctx, iamClient, importInstanceProfileRole, got.InstanceProfile.Tags, iamTags)
+		}
 	}
 	if err := ensureExists(iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
 		InstanceProfileName: aws.String(importInstanceProfileRole),
@@ -176,7 +198,9 @@ func (c *Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImport
 		InstanceProfileName:        aws.String(importInstanceProfileRole),
 		InstanceTypes:              []string{instanceType},
 		TerminateInstanceOnFailure: aws.Bool(true),
-		ResourceTags:               map[string]string{"spawn:managed": "true"},
+		// ResourceTags go on the build instances Image Builder launches.
+		ResourceTags: sporetags.Fill(map[string]string{"spawn:managed": "true"}, c.isoImportTags(in.Region)),
+		Tags:         c.isoImportTags(in.Region),
 	}
 	if in.SubnetID != "" {
 		createInput.SubnetId = aws.String(in.SubnetID)
@@ -190,6 +214,13 @@ func (c *Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImport
 		out, err := ibClient.CreateInfrastructureConfiguration(ctx, createInput)
 		if err == nil {
 			return aws.ToString(out.InfrastructureConfigurationArn), nil
+		}
+		// Tag-on-create also needs imagebuilder:TagResource. Without it, create
+		// the configuration untagged rather than not at all (#1652).
+		if IsAccessDenied(err) && createInput.Tags != nil {
+			warnTagging("imagebuilder:TagResource", "Image Builder infrastructure configuration "+importInfraConfigName, err)
+			createInput.Tags = nil
+			continue
 		}
 		// Lost the race with another caller — look it up.
 		var exists *ibtypes.ResourceAlreadyExistsException
@@ -209,6 +240,18 @@ func (c *Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImport
 		}
 		return "", fmt.Errorf("create infrastructure configuration: %w", err)
 	}
+}
+
+// isoImportComponent is the spore-host:component of the ISO-import
+// infrastructure.
+const isoImportComponent = "iso-import"
+
+// isoImportTags are the spore.host tags of what `spawn image import` creates
+// in scope (#1652).
+func (c *Client) isoImportTags(scope string) map[string]string {
+	m := c.sporeTags(scope)
+	m[libtags.Component] = isoImportComponent
+	return m
 }
 
 // findInfraConfigByName returns the ARN of an infrastructure configuration with
@@ -346,6 +389,7 @@ func (c *Client) ImportWindowsISO(ctx context.Context, in ImportWindowsISOInput)
 	}
 
 	input := &imagebuilder.ImportDiskImageInput{
+		Tags:                           c.isoImportTags(in.Region),
 		Name:                           aws.String(in.Name),
 		SemanticVersion:                aws.String(in.SemanticVersion),
 		Platform:                       aws.String("Windows"),
@@ -365,6 +409,12 @@ func (c *Client) ImportWindowsISO(ctx context.Context, in ImportWindowsISOInput)
 	}
 
 	out, err := ibClient.ImportDiskImage(ctx, input)
+	if IsAccessDenied(err) && input.Tags != nil {
+		// As for the infrastructure configuration: untagged beats not at all.
+		warnTagging("imagebuilder:TagResource", "Image Builder image "+in.Name, err)
+		input.Tags = nil
+		out, err = ibClient.ImportDiskImage(ctx, input)
+	}
 	if err != nil {
 		return "", fmt.Errorf("import-disk-image: %w", err)
 	}

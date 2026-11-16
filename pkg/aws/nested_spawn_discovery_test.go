@@ -58,6 +58,12 @@ var nestedSpawnNotGranted = map[string]string{
 	"iam:GetPolicyVersion":         "only reached by the role-setup paths a nested spore skips",
 	"iam:GetRolePolicy":            "only reached by the role-setup paths a nested spore skips",
 	"iam:ListAttachedRolePolicies": "only reached by the role-setup paths a nested spore skips",
+	// Converging the spore.host tags on an existing role, profile or managed
+	// policy (#1652): on the same role-setup paths, and best-effort, so a
+	// denial is warned about and changes nothing.
+	"iam:TagRole":            "IAM write (tag converge, #1652); only reached by the role-setup paths a nested spore skips",
+	"iam:TagInstanceProfile": "IAM write (tag converge, #1652); only reached by the role-setup paths a nested spore skips",
+	"iam:TagPolicy":          "IAM write (tag converge, #1652); only reached by the role-setup paths a nested spore skips",
 	// Not part of a plain child launch.
 	"fsx:CreateFileSystem":               "--fsx-create: ~$174/month minimum; create filesystems from a workstation",
 	"fsx:DeleteFileSystem":               "--fsx-create teardown; see fsx:CreateFileSystem",

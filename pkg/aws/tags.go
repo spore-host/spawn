@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spore-host/spawn/pkg/launchconfig"
+	"github.com/spore-host/spawn/pkg/sporetags"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/ttl"
 )
@@ -53,7 +54,9 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	//      settings go into the launch config object (spawn:config, #1359).
 	//   5. Storage: FSx/EFS mount metadata.
 	//   6. Job-array / sweep: array id/name/index and per-run parameters.
-	//   7. User-supplied custom tags (appended last).
+	//   7. User-supplied custom tags.
+	//   7b. The spore.host tags (spore-host:managed-by=spawn, ...), each only
+	//       when the caller did not supply it (#1652).
 
 	// --- Section 1: base identity (always present) ---
 	// Convert account ID to base36 for DNS namespace
@@ -346,13 +349,33 @@ func buildTags(config LaunchConfig, accountID, userARN, accountNameSlug string) 
 	for _, k := range sortedKeys(config.Tags) {
 		tags = appendTagUnique(tags, k, config.Tags[k])
 	}
+	customTags := len(tags) - beforeCustom
+
+	// --- Section 7b: the spore.host tags (#1652) ---
+	// After the caller's tags, and only for keys the caller did not set. calque
+	// and lagotto launch through this code and pass their own
+	// spore-host:managed-by (calque, lagotto), because they own those
+	// instances' lifecycle; spawn's value must not replace theirs, or spawn's
+	// cleanup would count their instances as its own and theirs would miss
+	// them. TTL enforcement keys on the spawn:* tags above, whoever manages
+	// the instance. spore-host:created is the launch instant, re-anchored with
+	// the others by AnchorLaunchTags.
+	//
+	// Three keys, not five: an instance's spore-host:scope and owner are left
+	// out (a caller may still set them). The instance, its volumes and its
+	// Spot request share AWS's 50-tag cap with the slots kept for spored's own
+	// tags (#1336, #1355), and the documented maximal launch had exactly three
+	// to spare (TestMonitoringSettingsFitOnAMaximalLaunch). Both would repeat
+	// what the instance already says: its region is where it runs, and
+	// spawn:iam-user names who launched it.
+	tags = appendMissingTags(tags, sporetags.At("", "", launchAt))
 
 	// Everything above is kept whatever the count, so a set that does not fit
 	// is refused here, before any AWS call the caller has yet to make, rather
 	// than by RunInstances after the launch's security groups, IAM and FSx
 	// exist (#1336). The count includes the slots kept for the tags spored and
 	// spawn write after the launch (tagReserve, #1355).
-	if err := checkTagLimit(config, tags, len(tags)-beforeCustom); err != nil {
+	if err := checkTagLimit(config, tags, customTags); err != nil {
 		return nil, err
 	}
 
@@ -459,7 +482,10 @@ func sortedKeys(m map[string]string) []string {
 // it. Mirrors the per-instance baseline (spawn:managed/created-by/account/
 // iam-user) plus spawn:created-at, and merges any extra tags. Identity lookup is
 // best-effort — a resource still gets spawn:managed=true even if STS is slow.
-func (c *Client) managedResourceTags(ctx context.Context, extra map[string]string) []types.Tag {
+//
+// It also carries the spore.host tags for scope (#1652); an extra
+// spore-host:* key wins over spawn's.
+func (c *Client) managedResourceTags(ctx context.Context, scope string, extra map[string]string) []types.Tag {
 	out := map[string]string{
 		"spawn:managed":    "true",
 		"spawn:created-by": "spawn",
@@ -472,11 +498,8 @@ func (c *Client) managedResourceTags(ctx context.Context, extra map[string]strin
 	for k, v := range extra {
 		out[k] = v
 	}
-	tags := make([]types.Tag, 0, len(out))
-	for k, v := range out {
-		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-	return tags
+	out = sporetags.Fill(out, c.sporeTags(scope))
+	return tagList(out)
 }
 
 // AccountBase36 converts an AWS account ID to its base36 form, the segment used
