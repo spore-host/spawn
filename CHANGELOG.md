@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.167.0] - 2026-11-15
+
 ### Changed
 
 - Homebrew: releases now publish a cask, `spore-host/tap/spawn`, instead of a
@@ -14107,7 +14109,8 @@ Initial tagged release from the standalone `spore-host/spawn` repository.
 Older releases are summarized in the
 [GitHub Releases](https://github.com/spore-host/spawn/releases) for this repo.
 
-[Unreleased]: https://github.com/spore-host/spawn/compare/v0.166.0...HEAD
+[Unreleased]: https://github.com/spore-host/spawn/compare/v0.167.0...HEAD
+[0.167.0]: https://github.com/spore-host/spawn/compare/v0.166.0...v0.167.0
 [0.166.0]: https://github.com/spore-host/spawn/compare/v0.165.0...v0.166.0
 [0.165.0]: https://github.com/spore-host/spawn/compare/v0.164.0...v0.165.0
 [0.164.0]: https://github.com/spore-host/spawn/compare/v0.163.2...v0.164.0
