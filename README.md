@@ -122,6 +122,7 @@ spawn list
 | `reaper` | Manage the out-of-band TTL reaper in your own AWS account |
 | `doctor` | Check that your environment is ready to launch a spore instance |
 | `footprint` | Report everything spawn has created in this account, including the control plane |
+| `teardown` | Re-check and delete what a 'spawn footprint -o json' report marks deletable |
 | `onboard` | Bring this AWS account onto the spore.host portal (BYOA) |
 | `validate` | Validate compliance and infrastructure configuration |
 

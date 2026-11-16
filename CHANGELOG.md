@@ -62,9 +62,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resource kept on purpose, is tagged `spore-host:managed-by=spawn` and
   `spore-host:permanent=true`, the marker leave-no-trace teardown keeps it by.
   `spawn setup-account` adds the tags to a boundary an older spawn created.
+- `spawn teardown --plan <file|-> [--mode report|reap]` carries out a
+  `spawn footprint -o json` report (#1653, part of the leave-no-trace epic
+  spore-host/spore-host#752). It orders the plan so dependents go first (an
+  instance before its security group and profile, a profile before its role, a
+  role before its policies), re-reads every resource from the account and
+  re-applies the delete guard to what it says now, and reuses spawn's existing
+  deleters: `RemoveResource` for instances, volumes, security groups, placement
+  groups, session key pairs, launch Elastic IPs, roles and profiles; the egress
+  proxy's own teardown for its two groups; `pkg/instancerole` for per-task roles
+  (kept unless the schedules that may name them can be read, as for
+  `spawn cleanup --instance-roles`); `pkg/bucketsweep` for the empty staging
+  and results buckets (it still waits out their 7-day empty grace); and
+  `pkg/poolqueue`'s rule for pool queues. Report mode is the default and
+  deletes nothing; `--mode reap` needs `--yes`, never runs in spore.host's
+  infra account or an account it cannot identify, and, because the
+  shared-account teardown lease does not exist yet, refuses to run at all.
+  Anything in use (a live instance, a profile on one, a security group on a
+  network interface, a pool with workers, an attached policy) is kept with
+  everything it depends on. User data, the `spawn-instance-boundary` policy,
+  `spore-host:role=service` and `spore-host:permanent=true` resources, another
+  tool's (calque, lagotto) resources and anything only matched by name are
+  never deleted. Needs the delete actions of the deleters it reuses (see
+  `docs/reference/cli-iam-actions.md`).
+- `spawn footprint` also lists the customer-managed policies under
+  `/spore-host/` (the spored policies and the boundary), CloudFormation stacks
+  named like spore.host's (`spawn-*`, `spore-*`, and calque's and lagotto's),
+  `spawn-pipeline-*` SNS topics, everything tagged `spore-host:managed-by` by
+  any tool, and calque's `calque-*` roles, instance profiles and queues, its
+  `calque-nfs-sg` security group and its AMIs (#1653). calque's and lagotto's
+  resources are reported with ownership `foreign` and are never spawn's to
+  delete. It reads more to classify what it lists, and a refusal of any of the
+  new calls is a warning, never an error: `iam:ListPolicies`,
+  `iam:ListPolicyTags`, `iam:ListRoleTags`, `iam:ListInstanceProfileTags`,
+  `iam:ListAttachedRolePolicies`, `cloudformation:DescribeStacks`,
+  `sns:ListTopics`, `sns:ListTagsForResource`, `sqs:ListQueues`,
+  `sqs:ListQueueTags`, `ec2:DescribeSecurityGroups`, `ec2:DescribeKeyPairs`,
+  `ec2:DescribeNetworkInterfaces`, `ec2:DescribeImages`,
+  `s3:ListBucketVersions`, `s3:ListBucketMultipartUploads`, `lambda:ListTags`,
+  `logs:ListTagsForResource`, `dynamodb:ListTagsOfResource` and
+  `events:ListTagsForResource`.
 
 ### Changed
 
+- **Breaking: `spawn footprint -o json` is now the shared spore.host footprint
+  schema** (`libs/footprint`, schema 1; #1653). The old shape (`regions`,
+  `tagged[]` with untagged PascalCase fields, `control_plane[]`, `global[]`,
+  `notes`, `warnings`) is gone. The report is now `{schema, tool, account,
+  generated_at, resources[], warnings[]}`, and each resource carries `arn`,
+  `type` (a CloudFormation type name), `region` (`global` for IAM), `scope`,
+  `name`, `tags`, `ownership` (`tagged`, `legacy-name` or `foreign`), `class`
+  (`litter`, `residue`, `active`, `user-data` or `permanent`), `deletable`,
+  `reason` and `depends_on`. It is what `spawn teardown --plan` reads. Nothing
+  in spawn, lagotto, spore-host-mcp or spawn-ts read the old shape. The text
+  output keeps its tables and adds a "Teardown view" of every resource's
+  ownership, class and verdict.
 - **A caller's `spore-host:*` tags win over spawn's** (#1652). calque and
   lagotto launch instances and create instance roles through `pkg/aws` and pass
   their own `spore-host:managed-by` because they own those resources'

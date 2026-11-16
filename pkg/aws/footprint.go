@@ -37,6 +37,9 @@ type ControlPlaneResource struct {
 	Kind    string `json:"kind"`    // function, log-group, bucket, role, instance-profile, event-bus, rule, schedule, table
 	Name    string `json:"name"`
 	Region  string `json:"region"` // empty for global (IAM, and S3 bucket names that carry no region)
+	// ARN is the resource's ARN as its listing reports it, or "" when the
+	// listing carries none (a DynamoDB table name). FootprintReport keys on it.
+	ARN string `json:"arn,omitempty"`
 	// Detail is the one fact that matters for this kind: a log group's retention,
 	// a bucket's creation date, a function's last modification.
 	Detail string `json:"detail,omitempty"`
@@ -51,6 +54,13 @@ type ControlPlaneResource struct {
 	Why string `json:"why,omitempty"`
 	// Warn is a specific, evidence-backed hazard for this row. Empty when none.
 	Warn string `json:"warn,omitempty"`
+
+	// What the listing said that FootprintReport classifies on, and that the
+	// table does not print: an instance profile's roles, a bucket's region,
+	// a schedule's state.
+	profileRoleARNs []string
+	bucketRegion    string
+	scheduleState   string
 }
 
 // footprintNamePrefixes are the name patterns that identify a spore.host
@@ -67,7 +77,10 @@ type ControlPlaneResource struct {
 // SPAWN_LAMBDA_NAME to it), which is why the deploy census had to stop
 // hardcoding function names. So the report always says how many rows came from
 // each half, and never claims to be exhaustive.
-var footprintNamePrefixes = []string{"spawn", "spore", "spored", "lagotto", "truffle"}
+//
+// calque is here so its resources are LISTED (spawn#1653): spawn's footprint
+// reports them with ownership foreign, and never deletes them.
+var footprintNamePrefixes = []string{"spawn", "spore", "spored", "lagotto", "truffle", "calque"}
 
 // footprintExactNames are spore.host resources whose names carry NO prefix, so
 // the list above cannot find them. Every entry was discovered by enumerating an
@@ -133,6 +146,7 @@ func (c *Client) ScanControlPlane(ctx context.Context, region string) ([]Control
 			}
 			out = append(out, ControlPlaneResource{
 				Service: "lambda", Kind: "function", Name: name, Region: region,
+				ARN:    aws.ToString(f.FunctionArn),
 				Detail: fmt.Sprintf("last deployed %s", aws.ToString(f.LastModified)),
 				Why:    "name",
 			})
@@ -159,6 +173,7 @@ func (c *Client) ScanControlPlane(ctx context.Context, region string) ([]Control
 			}
 			r := ControlPlaneResource{
 				Service: "logs", Kind: "log-group", Name: name, Region: region,
+				ARN: strings.TrimSuffix(aws.ToString(g.Arn), ":*"),
 				Why: "name",
 			}
 			if g.CreationTime != nil {
@@ -255,6 +270,7 @@ func scanEvents(ctx context.Context, c eventsScanner, region string) ([]ControlP
 			if matchesFootprintName(name) {
 				out = append(out, ControlPlaneResource{
 					Service: "events", Kind: "event-bus", Name: name, Region: region, Why: "name",
+					ARN: aws.ToString(b.Arn),
 				})
 			}
 		}
@@ -280,6 +296,7 @@ func scanEvents(ctx context.Context, c eventsScanner, region string) ([]ControlP
 			}
 			out = append(out, ControlPlaneResource{
 				Service: "events", Kind: "rule", Name: name, Region: region, Detail: detail, Why: "name",
+				ARN: aws.ToString(r.Arn),
 			})
 		}
 	}
@@ -355,6 +372,7 @@ func scanSchedules(ctx context.Context, c schedulesScanner, region string) ([]Co
 			}
 			r := ControlPlaneResource{
 				Service: "scheduler", Kind: "schedule", Name: name, Region: region, Detail: detail, Why: why,
+				ARN: aws.ToString(s.Arn), scheduleState: string(s.State),
 			}
 			if s.CreationDate != nil {
 				r.Created = *s.CreationDate
@@ -443,6 +461,7 @@ func (c *Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResourc
 			}
 			res := ControlPlaneResource{
 				Service: "iam", Kind: "role", Name: name, Why: "name",
+				ARN: aws.ToString(r.Arn),
 			}
 			if r.CreateDate != nil {
 				res.Created = *r.CreateDate
@@ -465,6 +484,10 @@ func (c *Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResourc
 			}
 			res := ControlPlaneResource{
 				Service: "iam", Kind: "instance-profile", Name: name, Why: "name",
+				ARN: aws.ToString(p.Arn),
+			}
+			for _, role := range p.Roles {
+				res.profileRoleARNs = append(res.profileRoleARNs, aws.ToString(role.Arn))
 			}
 			if p.CreateDate != nil {
 				res.Created = *p.CreateDate
@@ -486,6 +509,7 @@ func (c *Client) ScanGlobalFootprint(ctx context.Context) ([]ControlPlaneResourc
 			}
 			res := ControlPlaneResource{
 				Service: "s3", Kind: "bucket", Name: name, Why: "name",
+				ARN: "arn:aws:s3:::" + name, bucketRegion: aws.ToString(b.BucketRegion),
 			}
 			if b.CreationDate != nil {
 				res.Created = *b.CreationDate

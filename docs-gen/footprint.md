@@ -12,12 +12,13 @@ auto-creates. The TTL reaper is the backstop for instances; nothing is the
 backstop for the reaper (#653), so the honest first step is making the footprint
 visible rather than deleting anything.
 
-This command NEVER deletes. It is a report.
+This command NEVER deletes. It is a report. 'spawn teardown --plan' reads its
+JSON and, with --mode reap, deletes what the report marks deletable.
 
 Resources are found two ways, and each row says which:
 
   tag          the spawn:managed tag — authoritative, and what 'spawn cleanup' acts on
-  name         a spawn/spore/spored/lagotto/truffle name prefix — needed because
+  name         a spawn/spore/spored/lagotto/truffle/calque name prefix — needed because
                most of the control plane predates being tagged
   target       a schedule whose target is a spore.host Lambda
   description  a schedule named like spawn's (sched-YYYYMMDD-HHMMSS) whose
@@ -34,6 +35,24 @@ differently-named resource is missed. So the totals below are a floor, not a
 guarantee — three separate hand-built footprint lists during #653 were each
 incomplete.
 
+-o json is the shared spore.host footprint schema (libs/footprint, schema 1):
+every resource with its ARN, type, region, name, tags, ownership, class,
+deletable verdict and reason, and depends_on. It also lists what the tables
+above do not: the managed policies under /spore-host/, CloudFormation stacks
+named like spore.host's, spawn-pipeline-* SNS topics, anything tagged
+spore-host:managed-by by any tool, and calque's queues, NFS security group and
+AMIs (calque's, so never spawn's to delete).
+
+  ownership  tagged (spore-host:managed-by=spawn), legacy-name (only the name or
+             spawn:managed matched; never deleted), foreign (another tool's)
+  class      permanent (the boundary, spore-host:permanent, role=service, the
+             infra account), user-data (results, AMIs, snapshots, a user's key
+             or Elastic IP), active (in use now), residue (spawn's machinery),
+             litter (the rest)
+
+Only tagged resources of a type spawn's teardown can delete, whose class is
+not permanent or user-data, are deletable.
+
 ```
 spawn footprint [flags]
 ```
@@ -47,8 +66,9 @@ spawn footprint [flags]
   # Every region enabled in this account
   spawn footprint --all-regions
 
-  # Machine-readable
-  spawn footprint -o json
+  # Machine-readable, and a teardown plan
+  spawn footprint -o json > plan.json
+  spawn teardown --plan plan.json
 ```
 
 **Flags:**

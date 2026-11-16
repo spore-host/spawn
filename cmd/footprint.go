@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spore-host/libs/footprint"
+
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/instancerole"
 )
@@ -33,12 +35,13 @@ auto-creates. The TTL reaper is the backstop for instances; nothing is the
 backstop for the reaper (#653), so the honest first step is making the footprint
 visible rather than deleting anything.
 
-This command NEVER deletes. It is a report.
+This command NEVER deletes. It is a report. 'spawn teardown --plan' reads its
+JSON and, with --mode reap, deletes what the report marks deletable.
 
 Resources are found two ways, and each row says which:
 
   tag          the spawn:managed tag — authoritative, and what 'spawn cleanup' acts on
-  name         a spawn/spore/spored/lagotto/truffle name prefix — needed because
+  name         a spawn/spore/spored/lagotto/truffle/calque name prefix — needed because
                most of the control plane predates being tagged
   target       a schedule whose target is a spore.host Lambda
   description  a schedule named like spawn's (sched-YYYYMMDD-HHMMSS) whose
@@ -53,15 +56,34 @@ resource named differently. A few known spore.host names with no prefix (such as
 the 'scheduler-handler' Lambda) are matched by exact name, but any other
 differently-named resource is missed. So the totals below are a floor, not a
 guarantee — three separate hand-built footprint lists during #653 were each
-incomplete.`,
+incomplete.
+
+-o json is the shared spore.host footprint schema (libs/footprint, schema 1):
+every resource with its ARN, type, region, name, tags, ownership, class,
+deletable verdict and reason, and depends_on. It also lists what the tables
+above do not: the managed policies under /spore-host/, CloudFormation stacks
+named like spore.host's, spawn-pipeline-* SNS topics, anything tagged
+spore-host:managed-by by any tool, and calque's queues, NFS security group and
+AMIs (calque's, so never spawn's to delete).
+
+  ownership  tagged (spore-host:managed-by=spawn), legacy-name (only the name or
+             spawn:managed matched; never deleted), foreign (another tool's)
+  class      permanent (the boundary, spore-host:permanent, role=service, the
+             infra account), user-data (results, AMIs, snapshots, a user's key
+             or Elastic IP), active (in use now), residue (spawn's machinery),
+             litter (the rest)
+
+Only tagged resources of a type spawn's teardown can delete, whose class is
+not permanent or user-data, are deletable.`,
 	Example: `  # This region, including the control plane
   spawn footprint
 
   # Every region enabled in this account
   spawn footprint --all-regions
 
-  # Machine-readable
-  spawn footprint -o json`,
+  # Machine-readable, and a teardown plan
+  spawn footprint -o json > plan.json
+  spawn teardown --plan plan.json`,
 	RunE: runFootprint,
 }
 
@@ -71,9 +93,9 @@ func init() {
 	rootCmd.AddCommand(footprintCmd)
 }
 
-// footprintReport is the JSON shape. Named fields rather than a bare list so a
-// consumer can tell an empty account from a failed scan — the #708 lesson, where
-// "nothing to clean" and "the scope hid everything" printed identically.
+// footprintReport is what the human tables print. -o json is the
+// libs/footprint Report built from it (spawn#1653); this shape is no longer
+// written as JSON.
 type footprintReport struct {
 	Regions      []string                   `json:"regions"`
 	Tagged       []aws.ManagedResource      `json:"tagged"`
@@ -126,16 +148,62 @@ func runFootprint(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	account, err := client.GetAccountID(ctx)
+	if err != nil {
+		rep.Notes = append(rep.Notes, fmt.Sprintf("account: %v (ARNs built from it are left without one)", err))
+	}
+	full := client.FootprintReport(ctx, aws.FootprintInput{
+		Account: account, Regions: regions, Tagged: rep.Tagged, ControlPlane: rep.ControlPlane,
+		Global: rep.Global, Notes: rep.Notes, Now: time.Now(),
+	})
+
 	// The root -o/--output, not a local --json: the repo's flag convention
 	// (spawn#40) keeps one spelling across every command, and
 	// TestFlagConventions enforces it.
 	if spawnOutputFormat == "json" {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+		return writeFootprintJSON(os.Stdout, full)
 	}
 	renderFootprint(os.Stdout, rep)
+	renderFootprintVerdicts(os.Stdout, full)
 	return nil
+}
+
+// writeFootprintJSON writes the libs/footprint report, the shape
+// `spawn teardown --plan` reads back with footprint.Decode.
+func writeFootprintJSON(w io.Writer, rep *footprint.Report) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rep)
+}
+
+// renderFootprintVerdicts is the teardown view of the report: every resource
+// with its ownership and class, and whether 'spawn teardown' would delete it.
+func renderFootprintVerdicts(w io.Writer, rep *footprint.Report) {
+	if len(rep.Resources) == 0 {
+		return
+	}
+	deletable := 0
+	byClass := map[footprint.Class]int{}
+	for _, r := range rep.Resources {
+		byClass[r.Class]++
+		if r.Deletable {
+			deletable++
+		}
+	}
+	fmt.Fprintf(w, "Teardown view (%d) — %d deletable by 'spawn teardown'; litter %d, residue %d, active %d, user-data %d, permanent %d\n",
+		len(rep.Resources), deletable, byClass[footprint.ClassLitter], byClass[footprint.ClassResidue],
+		byClass[footprint.ClassActive], byClass[footprint.ClassUserData], byClass[footprint.ClassPermanent])
+	tw := newTableWriter(w)
+	fmt.Fprintf(tw, "  TYPE\tNAME\tREGION\tOWNERSHIP\tCLASS\tDELETABLE\tREASON\n")
+	for _, r := range rep.Resources {
+		yes := "no"
+		if r.Deletable {
+			yes = "yes"
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Type, r.Name, r.Region, r.Ownership, r.Class, yes, r.Reason)
+	}
+	tw.Flush()
+	fmt.Fprintln(w)
 }
 
 // renderFootprint writes the human report. Split out so the wording — which is
@@ -148,7 +216,7 @@ func renderFootprint(w io.Writer, rep footprintReport) {
 		// Never let an empty result read as a clean account without saying what
 		// was actually looked at (#708).
 		fmt.Fprintf(w, "That means: no resource tagged spawn:managed, and nothing matching a\n")
-		fmt.Fprintf(w, "spawn/spore/spored/lagotto/truffle name prefix. It does NOT mean the account\n")
+		fmt.Fprintf(w, "spawn/spore/spored/lagotto/truffle/calque name prefix. It does NOT mean the account\n")
 		fmt.Fprintf(w, "is empty — a resource named differently would not appear here.\n")
 		renderFootprintNotes(w, rep)
 		return

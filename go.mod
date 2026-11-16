@@ -44,7 +44,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spore-host/cohort v0.2.0
-	github.com/spore-host/libs v0.52.0
+	github.com/spore-host/libs v0.53.0
 	github.com/spore-host/truffle v0.63.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0
 	go.opentelemetry.io/otel v1.46.0
@@ -59,6 +59,8 @@ require (
 require mvdan.cc/sh/v3 v3.14.1
 
 require golang.org/x/tools v0.51.0
+
+require github.com/aws/aws-sdk-go-v2/service/cloudformation v1.82.1
 
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
