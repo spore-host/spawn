@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/egressproxy"
@@ -196,17 +197,20 @@ func TestDeleteRefusesAStructuralFailure(t *testing.T) {
 			t.Errorf("%s refused for %q, want %q", r.InstanceID, r.Reason, want[r.InstanceID])
 		}
 	}
-	res, err := Delete(context.Background(), deps(f, &fakeProber{}, &fakeClock{now: t0}), plan, 0)
-	if err != nil {
-		t.Fatal(err)
+	res, err := Delete(context.Background(), deps(f, &fakeProber{}, &fakeClock{now: t0}), plan, DeleteOptions{})
+	if !errors.Is(err, ErrGroupsInUse) {
+		t.Fatalf("err = %v, want ErrGroupsInUse: groups were left behind", err)
 	}
 	if strings.Join(f.terminated, ",") != "i-stale" || strings.Join(res.Terminated, ",") != "i-stale" {
 		t.Errorf("terminated %v, want only i-stale", f.terminated)
 	}
 	// The refused instances still carry the proxy group, so it is kept, and
-	// the clients group after it.
-	if res.Kept == nil || res.Kept.ID != g.ProxyID || len(f.deleted) != 0 {
-		t.Errorf("kept %+v, deleted %v; want the proxy group kept for the refused instances", res.Kept, f.deleted)
+	// the clients group with it, since the kept group's rule names it.
+	if len(res.Kept) != 2 || res.Kept[0].ID != g.ProxyID || res.Kept[1].ID != g.ClientsID || len(f.deleted) != 0 {
+		t.Errorf("kept %+v, deleted %v; want both groups kept for the refused instances", res.Kept, f.deleted)
+	}
+	if n := f.count("RevokeSecurityGroupIngress"); n != 0 {
+		t.Errorf("%d revokes: a kept group's rules were changed while instances carry it", n)
 	}
 }
 
@@ -217,9 +221,9 @@ func TestDeleteKeepsAClientsGroupInUse(t *testing.T) {
 	g, _ := EnsureGroups(context.Background(), f, testVPC, t0)
 	f.instances = []types.Instance{goodProxy("i-p", g.ProxyID), member("i-m1", g.ClientsID), member("i-m2", g.ClientsID)}
 	plan := PlanDelete(oneVPC(t, f))
-	res, err := Delete(context.Background(), deps(f, &fakeProber{}, &fakeClock{now: t0}), plan, 0)
-	if err != nil {
-		t.Fatal(err)
+	res, err := Delete(context.Background(), deps(f, &fakeProber{}, &fakeClock{now: t0}), plan, DeleteOptions{})
+	if !errors.Is(err, ErrGroupsInUse) {
+		t.Fatalf("err = %v, want ErrGroupsInUse: a kept group is reported, never a clean delete", err)
 	}
 	if strings.Join(res.Terminated, ",") != "i-p" {
 		t.Errorf("terminated %v", res.Terminated)
@@ -227,7 +231,7 @@ func TestDeleteKeepsAClientsGroupInUse(t *testing.T) {
 	if strings.Join(res.DeletedGroups, ",") != g.ProxyID {
 		t.Errorf("deleted %v, want only the proxy group %s", res.DeletedGroups, g.ProxyID)
 	}
-	if res.Kept == nil || res.Kept.ID != g.ClientsID || strings.Join(res.Kept.Users, ",") != "i-m1,i-m2" {
+	if len(res.Kept) != 1 || res.Kept[0].ID != g.ClientsID || strings.Join(res.Kept[0].Users, ",") != "i-m1,i-m2" {
 		t.Errorf("kept %+v, want the clients group, used by i-m1 and i-m2", res.Kept)
 	}
 	if f.group(g.ClientsID) == nil {
@@ -240,7 +244,7 @@ func TestDeleteRemovesEverything(t *testing.T) {
 	f := &fakeEC2{onDescribe: terminateOn}
 	g, _ := EnsureGroups(context.Background(), f, testVPC, t0)
 	f.instances = []types.Instance{goodProxy("i-p", g.ProxyID)}
-	res, err := Delete(context.Background(), deps(f, &fakeProber{}, &fakeClock{now: t0}), PlanDelete(oneVPC(t, f)), 0)
+	res, err := Delete(context.Background(), deps(f, &fakeProber{}, &fakeClock{now: t0}), PlanDelete(oneVPC(t, f)), DeleteOptions{})
 	if err != nil || res.Kept != nil {
 		t.Fatalf("res %+v, err %v", res, err)
 	}
@@ -249,22 +253,252 @@ func TestDeleteRemovesEverything(t *testing.T) {
 	}
 }
 
-// A proxy that never reaches terminated fails the delete before any group is
-// touched, after a bounded wait.
+// A proxy that never reaches terminated fails the delete after a bounded
+// wait. The groups are still tried (#1651), and fail safely: the proxy still
+// carries its group, so both are kept and reported, and neither is deleted.
 func TestDeleteWaitIsBounded(t *testing.T) {
 	f := &fakeEC2{}
 	g, _ := EnsureGroups(context.Background(), f, testVPC, t0)
 	f.instances = []types.Instance{goodProxy("i-p", g.ProxyID)}
 	clock := &fakeClock{now: t0}
-	_, err := Delete(context.Background(), deps(f, &fakeProber{}, clock), PlanDelete(oneVPC(t, f)), time.Minute)
-	if !errors.Is(err, ErrTerminateTimeout) {
-		t.Fatalf("err = %v, want ErrTerminateTimeout", err)
+	res, err := Delete(context.Background(), deps(f, &fakeProber{}, clock), PlanDelete(oneVPC(t, f)), DeleteOptions{Terminate: time.Minute})
+	if !errors.Is(err, ErrTerminateTimeout) || !errors.Is(err, ErrGroupsInUse) {
+		t.Fatalf("err = %v, want ErrTerminateTimeout and the kept groups", err)
 	}
 	if f.count("DeleteSecurityGroup") != 0 {
 		t.Error("deleted a group before the proxy was gone")
 	}
+	if len(res.Kept) != 2 || strings.Join(res.Kept[0].Users, ",") != "i-p" {
+		t.Errorf("kept %+v, want the proxy group (still used by i-p) and the clients group", res.Kept)
+	}
 	if clock.sleeps == 0 || clock.now.Sub(t0) > 2*time.Minute {
 		t.Errorf("waited %v in %d sleeps; want about the 1m bound", clock.now.Sub(t0), clock.sleeps)
+	}
+}
+
+// dependencyViolation is EC2's refusal to delete a group something references.
+func dependencyViolation(id string) error {
+	return errors.New("api error DependencyViolation: resource " + id + " has a dependent object")
+}
+
+// lingeringENI is a network interface a terminated proxy left carrying the
+// proxy group, not yet released.
+func lingeringENI(id, groupID string) types.NetworkInterface {
+	return types.NetworkInterface{NetworkInterfaceId: aws.String(id), Status: types.NetworkInterfaceStatusAvailable,
+		Groups: []types.GroupIdentifier{{GroupId: aws.String(groupID)}}}
+}
+
+func attempts(f *fakeEC2, id string) int {
+	n := 0
+	for _, a := range f.deleteAttempts {
+		if a == id {
+			n++
+		}
+	}
+	return n
+}
+
+// Delete leaves nothing behind it can remove (#1651): both groups are tried
+// whatever happens to the other, a lingering interface is waited out, the
+// rule naming the other group is revoked first, a DependencyViolation is
+// retried for a bounded window, and anything left is in the error.
+func TestDeleteRemovesBothGroups(t *testing.T) {
+	unauthorized := errors.New("api error UnauthorizedOperation: not allowed")
+	cases := []struct {
+		name  string
+		setup func(f *fakeEC2, g Groups)
+		opts  DeleteOptions
+		check func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, waited time.Duration)
+	}{{
+		name: "happy path: both deleted, the proxy group first",
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, _ time.Duration) {
+			if err != nil || len(res.Kept) != 0 {
+				t.Fatalf("err %v, kept %+v", err, res.Kept)
+			}
+			if got := strings.Join(res.DeletedGroups, ","); got != g.ProxyID+","+g.ClientsID {
+				t.Errorf("deleted %q, want both", got)
+			}
+			if f.group(g.ProxyID) != nil || f.group(g.ClientsID) != nil {
+				t.Error("a group is still there")
+			}
+		},
+	}, {
+		name:  "the proxy group's delete fails: the clients group is still deleted",
+		setup: func(f *fakeEC2, g Groups) { f.deleteErrAlways = map[string]error{g.ProxyID: unauthorized} },
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, _ time.Duration) {
+			if !errors.Is(err, unauthorized) || !strings.Contains(err.Error(), g.ProxyID) {
+				t.Errorf("err = %v, want the proxy group's failure, naming it", err)
+			}
+			if attempts(f, g.ClientsID) != 1 || strings.Join(res.DeletedGroups, ",") != g.ClientsID || f.group(g.ClientsID) != nil {
+				t.Errorf("attempts %v, deleted %v: the clients group was not deleted after the proxy group failed",
+					f.deleteAttempts, res.DeletedGroups)
+			}
+			if attempts(f, g.ProxyID) != 1 {
+				t.Errorf("%d attempts on the proxy group: only DependencyViolation is retried", attempts(f, g.ProxyID))
+			}
+		},
+	}, {
+		name: "an interface lingers across polls, is released, then both are deleted",
+		setup: func(f *fakeEC2, g Groups) {
+			f.enis = []types.NetworkInterface{lingeringENI("eni-old", g.ProxyID)}
+			f.enisFor = map[string]int{"eni-old": 3}
+		},
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, waited time.Duration) {
+			if err != nil || strings.Join(res.DeletedGroups, ",") != g.ProxyID+","+g.ClientsID {
+				t.Fatalf("err %v, deleted %v; want both once the interface was released", err, res.DeletedGroups)
+			}
+			// Deleted once each: the interface was waited out, not met as a
+			// DependencyViolation.
+			if attempts(f, g.ProxyID) != 1 {
+				t.Errorf("%d delete attempts on the proxy group, want 1 after the interface was released", attempts(f, g.ProxyID))
+			}
+			if waited < teardownPoll || waited > ENIReleaseTimeout {
+				t.Errorf("waited %v, want a few polls", waited)
+			}
+		},
+	}, {
+		name: "an interface never released: the group is kept, naming it, after a bounded wait",
+		setup: func(f *fakeEC2, g Groups) {
+			f.enis = []types.NetworkInterface{lingeringENI("eni-stuck", g.ProxyID)}
+		},
+		opts: DeleteOptions{ENIRelease: time.Minute},
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, waited time.Duration) {
+			if !errors.Is(err, ErrGroupsInUse) || !strings.Contains(err.Error(), "eni-stuck") {
+				t.Errorf("err = %v, want the kept proxy group naming eni-stuck", err)
+			}
+			if len(res.Kept) != 2 || strings.Join(res.Kept[0].NetworkInterfaces, ",") != "eni-stuck" ||
+				strings.Join(res.Kept[1].ReferencedBy, ",") != g.ProxyID {
+				t.Errorf("kept %+v, want the proxy group (eni-stuck) and the clients group it names", res.Kept)
+			}
+			if attempts(f, g.ProxyID) != 0 {
+				t.Error("tried to delete a group an interface still carries")
+			}
+			if waited < time.Minute || waited > time.Minute+teardownPoll {
+				t.Errorf("waited %v, want the 1m bound", waited)
+			}
+		},
+	}, {
+		name: "the rule naming the clients group is revoked before any delete",
+		setup: func(f *fakeEC2, g Groups) {
+			// Fail the proxy group so only the revoke can free the clients group.
+			f.deleteErrAlways = map[string]error{g.ProxyID: unauthorized}
+		},
+		check: func(t *testing.T, f *fakeEC2, g Groups, _ DeleteResult, _ error, _ time.Duration) {
+			revoke, del := lastIndex(f.calls, "RevokeSecurityGroupIngress"), -1
+			for i, c := range f.calls {
+				if c == "DeleteSecurityGroup" {
+					del = i
+					break
+				}
+			}
+			if revoke < 0 || del < 0 || revoke > del {
+				t.Fatalf("calls %v: want the ingress revoke before the first delete", f.calls)
+			}
+			if len(f.revokedIn) != 1 || rulesFor(f.revokedIn) != "tcp 3128 "+g.ClientsID {
+				t.Errorf("revoked %q, want only the proxy group's rule naming the clients group", rulesFor(f.revokedIn))
+			}
+			if f.group(g.ClientsID) != nil {
+				t.Error("the clients group is still there")
+			}
+		},
+	}, {
+		name: "a DependencyViolation is retried with backoff and succeeds within the window",
+		setup: func(f *fakeEC2, g Groups) {
+			f.deleteErrs = map[string][]error{g.ProxyID: {dependencyViolation(g.ProxyID), dependencyViolation(g.ProxyID), dependencyViolation(g.ProxyID)}}
+		},
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, waited time.Duration) {
+			if err != nil || strings.Join(res.DeletedGroups, ",") != g.ProxyID+","+g.ClientsID {
+				t.Fatalf("err %v, deleted %v; want both after the retries", err, res.DeletedGroups)
+			}
+			if attempts(f, g.ProxyID) != 4 {
+				t.Errorf("%d attempts on the proxy group, want 4", attempts(f, g.ProxyID))
+			}
+			// 5s, 10s, 20s.
+			if waited != 35*time.Second {
+				t.Errorf("waited %v between retries, want 35s of doubling backoff", waited)
+			}
+		},
+	}, {
+		name: "DependencyViolation outlasts the 10m window: an error naming it, nothing swallowed",
+		setup: func(f *fakeEC2, g Groups) {
+			f.deleteErrAlways = map[string]error{g.ProxyID: dependencyViolation(g.ProxyID)}
+		},
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, waited time.Duration) {
+			if err == nil || !strings.Contains(err.Error(), "DependencyViolation") || !strings.Contains(err.Error(), g.ProxyID) ||
+				!strings.Contains(err.Error(), "still refused") {
+				t.Fatalf("err = %v, want the proxy group's DependencyViolation after the window", err)
+			}
+			if waited < GroupDeleteTimeout || waited > GroupDeleteTimeout+deleteBackoffMax {
+				t.Errorf("retried for %v, want the %v window", waited, GroupDeleteTimeout)
+			}
+			if strings.Join(res.DeletedGroups, ",") != g.ClientsID || f.group(g.ProxyID) == nil {
+				t.Errorf("deleted %v; want only the clients group, the proxy group still there", res.DeletedGroups)
+			}
+		},
+	}, {
+		name: "the window is configurable",
+		setup: func(f *fakeEC2, g Groups) {
+			f.deleteErrAlways = map[string]error{g.ProxyID: dependencyViolation(g.ProxyID)}
+		},
+		opts: DeleteOptions{GroupDelete: time.Minute},
+		check: func(t *testing.T, _ *fakeEC2, _ Groups, _ DeleteResult, err error, waited time.Duration) {
+			if err == nil || waited != time.Minute {
+				t.Errorf("err %v after %v, want an error after the 1m window", err, waited)
+			}
+		},
+	}, {
+		name: "interfaces cannot be read: no wait, and a DependencyViolation is still retried to success",
+		setup: func(f *fakeEC2, g Groups) {
+			f.eniErr = &smithy.GenericAPIError{Code: "UnauthorizedOperation", Message: "not allowed"}
+			// The interface it cannot see, met as EC2's refusal instead.
+			f.deleteErrs = map[string][]error{g.ProxyID: {dependencyViolation(g.ProxyID)}}
+		},
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, waited time.Duration) {
+			if err != nil || strings.Join(res.DeletedGroups, ",") != g.ProxyID+","+g.ClientsID {
+				t.Fatalf("err %v, deleted %v; want both", err, res.DeletedGroups)
+			}
+			if attempts(f, g.ProxyID) != 2 || waited != deleteBackoffMin {
+				t.Errorf("%d attempts after %v, want a retry after %v", attempts(f, g.ProxyID), waited, deleteBackoffMin)
+			}
+		},
+	}, {
+		name: "a group in use is kept and reported, and the result is an error",
+		setup: func(f *fakeEC2, g Groups) {
+			f.instances = append(f.instances, member("i-m1", g.ClientsID))
+		},
+		check: func(t *testing.T, f *fakeEC2, g Groups, res DeleteResult, err error, _ time.Duration) {
+			var inUse *GroupInUseError
+			if !errors.As(err, &inUse) || inUse.ID != g.ClientsID {
+				t.Fatalf("err = %v, want the kept clients group", err)
+			}
+			if len(res.Kept) != 1 || res.Kept[0].ID != g.ClientsID || strings.Join(res.Kept[0].Users, ",") != "i-m1" {
+				t.Errorf("kept %+v, want the clients group, used by i-m1", res.Kept)
+			}
+			if strings.Join(res.DeletedGroups, ",") != g.ProxyID || attempts(f, g.ClientsID) != 0 {
+				t.Errorf("deleted %v, attempts %v; want only the proxy group", res.DeletedGroups, f.deleteAttempts)
+			}
+		},
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeEC2{onDescribe: terminateOn}
+			g, err := EnsureGroups(context.Background(), f, testVPC, t0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.instances = []types.Instance{goodProxy("i-p", g.ProxyID)}
+			plan := PlanDelete(oneVPC(t, f))
+			if tc.setup != nil {
+				tc.setup(f, g)
+			}
+			f.calls, f.revokedIn = nil, nil
+			clock := &fakeClock{now: t0}
+			res, err := Delete(context.Background(), deps(f, &fakeProber{}, clock), plan, tc.opts)
+			if strings.Join(res.Terminated, ",") != "i-p" {
+				t.Errorf("terminated %v, want i-p", res.Terminated)
+			}
+			tc.check(t, f, g, res, err, clock.now.Sub(t0))
+		})
 	}
 }
 

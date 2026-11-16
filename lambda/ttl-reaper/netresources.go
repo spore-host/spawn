@@ -416,18 +416,25 @@ func tagValue(tags []ec2types.Tag, key string) string {
 }
 
 func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acct account, region string, now time.Time, occupied map[string]bool, sum *Summary, outcome *accountOutcome) {
-	out, err := cli.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+	// Every page: an account with more spawn-managed groups than one page
+	// holds would otherwise never see the rest swept (#1651).
+	var groups []ec2types.SecurityGroup
+	pages := ec2.NewDescribeSecurityGroupsPaginator(cli, &ec2.DescribeSecurityGroupsInput{
 		Filters: []ec2types.Filter{{
 			Name:   awssdk.String("tag:" + tagprefix.Tag("managed")),
 			Values: []string{"true"},
 		}},
 	})
-	if err != nil {
-		log.Printf("net-resources: %s/%s: describe security groups: %v", acct.label, region, err)
-		return
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			log.Printf("net-resources: %s/%s: describe security groups: %v", acct.label, region, err)
+			return
+		}
+		groups = append(groups, page.SecurityGroups...)
 	}
 
-	for _, sg := range out.SecurityGroups {
+	for _, sg := range groups {
 		id := awssdk.ToString(sg.GroupId)
 		name := awssdk.ToString(sg.GroupName)
 		if id == "" || occupied[id] {
@@ -470,8 +477,12 @@ func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acc
 			// DependencyViolation means something still references it that
 			// DescribeInstances does not show — another group's rule, an ENI, a
 			// load balancer. Not an error worth alarming on; the next cycle
-			// retries and `spawn orphans` shows it meanwhile.
+			// retries and `spawn orphans` shows it meanwhile. But it is logged:
+			// skipped silently, a group stuck this way for good was invisible
+			// (#1651).
 			if strings.Contains(derr.Error(), "DependencyViolation") {
+				log.Printf("net-resources: %s/%s: security group %s (%s) is still referenced, kept for a later cycle: %v",
+					acct.label, region, id, name, derr)
 				sum.NetSkipped++
 				continue
 			}

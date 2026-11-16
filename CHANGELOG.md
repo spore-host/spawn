@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `spawn egress-proxy delete` no longer leaves the VPC's two security groups
+  behind (#1651). It used to stop at the first group it could not delete, so
+  the clients group was never tried; it checked instances but not network
+  interfaces; and it gave up on a `DependencyViolation` after two minutes. It
+  now waits until no network interface carries either group, revokes the rule
+  where one group names the other, and deletes both, each whatever happened to
+  the other, retrying a `DependencyViolation` with backoff for up to 10
+  minutes. If a proxy does not finish terminating within 5 minutes, the groups
+  are still tried and reported. A group something still uses is kept and named
+  as before, but the command now exits non-zero whenever a group or proxy it
+  should have removed is left. The command now also calls
+  `ec2:DescribeNetworkInterfaces`, `ec2:RevokeSecurityGroupIngress` and
+  `ec2:RevokeSecurityGroupEgress`. A caller without
+  `ec2:DescribeNetworkInterfaces` (the nested-spawn role) skips the interface
+  wait and relies on the retry.
+- The TTL reaper's managed-network sweep reads every page of
+  `DescribeSecurityGroups`, not only the first, and logs a security group it
+  cannot delete because something still references it (`DependencyViolation`)
+  instead of skipping it silently (#1651).
+
 ## [0.167.0] - 2026-11-15
 
 ### Changed
