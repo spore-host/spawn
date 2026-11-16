@@ -103,6 +103,14 @@ Resources:
           Value: scheduler
         - Key: Environment
           Value: !Ref Environment
+        # spore-host:* service tags (spore-host/spore-host#750). No script
+        # deploys this template, so the template is the deploy mechanism.
+        - Key: spore-host:role
+          Value: service
+        - Key: spore-host:component
+          Value: scheduler-handler
+        - Key: spore-host:deployed-by
+          Value: deployment/cloudformation/scheduler-handler-role.yaml
 
 Outputs:
   RoleArn:

@@ -18,6 +18,12 @@ if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
   exit 1
 fi
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=sweep-orchestrator
+SPORE_SERVICE_DEPLOYED_BY=scripts/setup-sweep-orchestrator-lambda-role.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
+
 echo "Creating IAM role for Lambda sweep orchestrator..."
 
 # Create trust policy
@@ -38,9 +44,14 @@ aws iam create-role \
   --role-name "$ROLE_NAME" \
   --assume-role-policy-document "$TRUST_POLICY" \
   --description "Role for spawn sweep orchestrator Lambda function" \
+  --tags Key=spawn:managed,Value=true "${SPORE_SERVICE_TAGS_LIST[@]}" \
   2>/dev/null || echo "Role already exists"
 
 # Attach basic Lambda execution policy
+# The --tags above reach only a role this run created; tag an existing one too
+# (#750). tag-role merges.
+spore_tag_role "$ROLE_NAME"
+
 aws iam attach-role-policy \
   --role-name "$ROLE_NAME" \
   --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"

@@ -61,6 +61,13 @@ func (r *reaper) reapPoolQueuesAccount(ctx context.Context, acct account, now ti
 	}
 	reap := r.poolQueues == poolQueuesReap && !r.dryRun
 
+	// Never in the infra account, nor one the reaper could not identify
+	// (#750). Each queue is also kept when it is tagged spore-host:role=service:
+	// pkg/poolqueue's KeepService.
+	if err := GuardTeardown(acct.accountID); err != nil {
+		log.Printf("pool-queues: %s: not swept: %v", acct.label, err)
+		return
+	}
 	if acct.regionsFor == nil {
 		log.Printf("pool-queues: %s: not swept, no way to list the account's enabled regions", acct.label)
 		return

@@ -47,7 +47,7 @@ note() { printf '  %s\n' "$1" >&2; }
 # sweep-orchestrator and scheduler-handler go unstamped — they are deployed by
 # scripts, and no YAML key exists to find.
 # ---------------------------------------------------------------------------
-echo "=== offline: deploy mechanisms must stamp spawn:version and set log retention"
+echo "=== offline: deploy mechanisms must stamp spawn:version, set log retention and tag spore-host:role=service"
 
 for t in lambda/*/template.yaml; do
   [ -e "$t" ] || continue
@@ -59,6 +59,15 @@ for t in lambda/*/template.yaml; do
   ok=1
   if ! grep -qE "^[[:space:]]*spawn:version:[[:space:]]*!Ref[[:space:]]+Version" "$t"; then
     note "❌ $t declares a function but never stamps spawn:version"
+    fail=1; ok=0
+  fi
+  # The spore-host:* service tags (spore-host/spore-host#750): the function is
+  # spore.host's own service, and without spore-host:role=service a litter
+  # classifier cannot tell it from workload resources tagged spawn:managed. The
+  # map form, as an AWS::Serverless::Function's Tags is written; the shell
+  # deploys are gated by scripts/deploy_scripts_test.go.
+  if ! grep -qE "^[[:space:]]*spore-host:role:[[:space:]]*service[[:space:]]*$" "$t"; then
+    note "❌ $t declares a function but never tags it spore-host:role: service"
     fail=1; ok=0
   fi
   # A declared LogGroup with a retention is the only thing that stops Lambda

@@ -401,3 +401,87 @@ func TestRecordRendersEveryResult(t *testing.T) {
 		t.Error("record leaks the presigned URL")
 	}
 }
+
+// The service tags (spore-host/spore-host#750) are added with the version stamp
+// when a function lacks them, from the checklist: the component is the Lambda
+// directory's name and deployed-by its own mechanism.
+func TestDeployAddsTheServiceTags(t *testing.T) {
+	f := newFixture(t)
+	rec, err := f.run(false, nil)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, f.log.String())
+	}
+	want := map[string]map[string]string{
+		"fn-a": {serviceRoleKey: "service", serviceComponentKey: "a", serviceDeployedByKey: "lambda/a/deploy.sh"},
+		"fn-b": {serviceRoleKey: "service", serviceComponentKey: "b", serviceDeployedByKey: "lambda/b/template.yaml"},
+	}
+	for fn, tags := range want {
+		for k, v := range tags {
+			if got := f.aws.fns[fn].tags[k]; got != v {
+				t.Errorf("%s: %s = %q, want %q", fn, k, got, v)
+			}
+		}
+		if !strings.Contains(strings.Join(outcome(t, rec, fn).Notes, " "), "service tags added (verified)") {
+			t.Errorf("%s: the record does not say the service tags were added: %v", fn, outcome(t, rec, fn).Notes)
+		}
+	}
+}
+
+// A wrong role or component is corrected; an existing deployed-by is kept, so a
+// component with two mechanisms is not rewritten by a code-only deploy.
+func TestDeployKeepsAnExistingDeployedBy(t *testing.T) {
+	f := newFixture(t)
+	f.aws.fns["fn-a"].tags[serviceRoleKey] = "workload"
+	f.aws.fns["fn-a"].tags[serviceComponentKey] = "a"
+	f.aws.fns["fn-a"].tags[serviceDeployedByKey] = "lambda/a/other-deploy.sh"
+	if _, err := f.run(false, f.checklist(f.lambdas()[0])); err != nil {
+		t.Fatal(err)
+	}
+	tags := f.aws.fns["fn-a"].tags
+	if tags[serviceRoleKey] != "service" || tags[serviceComponentKey] != "a" || tags[serviceDeployedByKey] != "lambda/a/other-deploy.sh" {
+		t.Errorf("tags = %v", tags)
+	}
+}
+
+// A function already at this version but missing the service tags is still
+// tagged; one carrying both is not touched at all.
+func TestAlreadyCurrentAndTaggedIsNotRetagged(t *testing.T) {
+	for _, tagged := range []bool{false, true} {
+		f := newFixture(t)
+		fx := f.aws.fns["fn-a"]
+		fx.tags[versionTag] = "0.151.0"
+		if tagged {
+			for k, v := range serviceTags(f.lambdas()[0]) {
+				fx.tags[k] = v
+			}
+		}
+		d := f.deployer(false)
+		d.build = func(context.Context, string, string, buildSpec, string) ([]byte, error) {
+			return fx.code, nil
+		}
+		if _, err := d.run(context.Background(), f.checklist(f.lambdas()[0])); err != nil {
+			t.Fatal(err)
+		}
+		n := f.aws.count("tag-resource", "")
+		if tagged && n != 0 {
+			t.Errorf("tagged and current: %d tag-resource calls, want 0", n)
+		}
+		if !tagged && (n != 1 || fx.tags[serviceRoleKey] != "service") {
+			t.Errorf("untagged and current: %d tag-resource calls, tags %v", n, fx.tags)
+		}
+	}
+}
+
+func TestDryRunReportsTheServiceTags(t *testing.T) {
+	f := newFixture(t)
+	rec, err := f.run(true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes := strings.Join(outcome(t, rec, "fn-a").Notes, " "); !strings.Contains(notes, "would add service tags spore-host:component=a,spore-host:deployed-by=lambda/a/deploy.sh,spore-host:role=service") {
+		t.Errorf("notes %q", notes)
+	}
+	if _, ok := f.aws.fns["fn-a"].tags[serviceRoleKey]; ok {
+		t.Error("a dry run wrote a service tag")
+	}
+}

@@ -158,7 +158,7 @@ func egressProxyGroups(t *testing.T, fx egressProxyFixture) (*netRefsAPI, map[st
 
 func sweepGroups(f *netRefsAPI, now time.Time) {
 	r := &reaper{netResources: netResourcesReap, elasticIPs: elasticIPsOff}
-	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
+	acct := account{label: "self", accountID: "111111111111", netFor: func(string) netResourceAPI { return f }}
 	r.reapNetResourcesRegion(context.Background(), acct, "us-west-2", now, &Summary{}, &accountOutcome{})
 }
 

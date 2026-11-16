@@ -59,7 +59,7 @@ func eipInst(id string, state ec2types.InstanceStateName) ec2types.Instance {
 func runEIPSweep(t *testing.T, f *fakeNetAPI, dryRun bool, netMode, eipMode string) (*Summary, string) {
 	t.Helper()
 	r := &reaper{dryRun: dryRun, netResources: netMode, elasticIPs: eipMode}
-	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
+	acct := account{label: "self", accountID: "111111111111", netFor: func(string) netResourceAPI { return f }}
 	sum := &Summary{}
 	out := captureLogs(func() {
 		r.reapNetResourcesRegion(context.Background(), acct, "us-east-1", time.Now(), sum, &accountOutcome{})
@@ -366,7 +366,7 @@ func TestReapTerminateReleasesTheInstancesLaunchElasticIP(t *testing.T) {
 				inUse: tc.inUse,
 			}
 			r := &reaper{netResources: tc.netMode, elasticIPs: parseElasticIPs(tc.eipMode, tc.netMode)}
-			acct := account{label: "acct", ec2For: func(string) ec2API { return ec2c }, netFor: func(string) netResourceAPI { return net }}
+			acct := account{label: "acct", accountID: "111111111111", ec2For: func(string) ec2API { return ec2c }, netFor: func(string) netResourceAPI { return net }}
 			if err := r.terminate(context.Background(), acct, candidate{id: "i-spot", region: "us-east-1"}); err != nil {
 				t.Fatalf("terminate: %v (an Elastic IP problem must never fail the reap)", err)
 			}

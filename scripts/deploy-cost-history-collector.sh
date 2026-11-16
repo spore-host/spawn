@@ -91,6 +91,12 @@ if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
   exit 1
 fi
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=cost-history-collector
+SPORE_SERVICE_DEPLOYED_BY=scripts/deploy-cost-history-collector.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
+
 echo "Deploying cost-history-collector Lambda function..."
 echo "  Region:   $REGION"
 echo "  Profile:  $PROFILE"
@@ -130,6 +136,7 @@ else
         --runtime "$RUNTIME" \
         --architectures "$ARCH" \
         --role "arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}" \
+        --tags "spawn:managed=true,spawn:component=cost-history-collector,${SPORE_SERVICE_TAGS_MAP}" \
         --handler bootstrap \
         --zip-file fileb://function.zip \
         --timeout "$TIMEOUT" \
@@ -181,7 +188,7 @@ echo "   runtime=$RUNTIME timeout=${TIMEOUT}s memory=${MEMORY}MB"
 SPAWN_VERSION="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)"
 aws lambda tag-resource \
     --resource "arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_NAME}" \
-    --tags "spawn:managed=true,spawn:component=cost-history-collector,spawn:created-by=deploy-cost-history-collector.sh,spawn:version=$SPAWN_VERSION" \
+    --tags "spawn:managed=true,spawn:component=cost-history-collector,spawn:created-by=deploy-cost-history-collector.sh,spawn:version=$SPAWN_VERSION,${SPORE_SERVICE_TAGS_MAP}" \
     --region "$REGION" --profile "$PROFILE" --no-cli-pager
 echo "stamped spawn:version=$SPAWN_VERSION"
 
@@ -194,6 +201,7 @@ echo "stamped spawn:version=$SPAWN_VERSION"
 # making its own, so this is safe and idempotent.
 aws logs create-log-group \
   --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --tags "$SPORE_SERVICE_TAGS_MAP" \
   --region "$REGION" --profile "$PROFILE" 2>/dev/null || true  # swallow-ok: already exists; any other failure fails put-retention-policy next
 # Fatal now: with the group created above, a failure here is real.
 aws logs put-retention-policy \
@@ -201,6 +209,9 @@ aws logs put-retention-policy \
   --retention-in-days "$LOG_RETENTION_DAYS" \
   --region "$REGION" --profile "$PROFILE"
 echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME"
+# The --tags above reach only a group this run created; an existing one is
+# tagged here, on every deploy (#750).
+spore_tag_log_group "/aws/lambda/$FUNCTION_NAME" "$REGION" "$ACCOUNT_ID" --profile "$PROFILE"
 
 rm -f bootstrap function.zip
 

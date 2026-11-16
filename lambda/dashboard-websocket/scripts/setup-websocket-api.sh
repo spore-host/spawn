@@ -16,6 +16,12 @@ API_NAME="spawn-dashboard-websocket"
 LAMBDA_FUNCTION_NAME="spawn-dashboard-websocket"
 STAGE_NAME="production"
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=dashboard-websocket
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-websocket/scripts/setup-websocket-api.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../../scripts/lib/service-tags.sh"
+
 echo "Setting up WebSocket API in region $REGION with profile $AWS_PROFILE"
 
 # Check if API already exists
@@ -35,6 +41,7 @@ else
         --name "$API_NAME" \
         --protocol-type WEBSOCKET \
         --route-selection-expression '$request.body.action' \
+        --tags "spawn:managed=true,spawn:component=dashboard-websocket,${SPORE_SERVICE_TAGS_MAP}" \
         --region "$REGION" \
         --profile "$AWS_PROFILE" \
         --query 'ApiId' \

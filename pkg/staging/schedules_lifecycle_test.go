@@ -87,7 +87,7 @@ func TestNewSchedulesBucketDoesNotExpireScheduleParams(t *testing.T) {
 
 	// And creation itself puts none, not only the reconcile that follows it.
 	fresh := "spawn-schedules-123456789012-us-east-1"
-	if _, err := c.ensureBucket(ctx, fresh, "us-east-1"); err != nil {
+	if _, err := c.ensureBucket(ctx, fresh, "us-east-1", kindScheduleParams); err != nil {
 		t.Fatalf("ensureBucket: %v", err)
 	}
 	for _, r := range bucketRules(t, s3c, fresh) {

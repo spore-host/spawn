@@ -57,3 +57,37 @@ func TestCIDeployRoleCoversTheOperatedFunctions(t *testing.T) {
 		t.Errorf("%s FUNCTIONS = %v, but the operated functions are %v; update the array, then rerun the script against the infra account", ciRoleScript, got, want)
 	}
 }
+
+// TestEveryOperatedComponentHasAServiceComponentID: the CI deployer tags each
+// function spore-host:component=<the Lambda directory's name> (#750), and the
+// shell deploy scripts accept only the ids scripts/lib/service-tags.sh lists.
+// A new Lambda must be added there, or its two deploy paths would tag it
+// differently.
+func TestEveryOperatedComponentHasAServiceComponentID(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts/lib/service-tags.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^SPORE_SERVICE_COMPONENTS="([^"]*)"`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("scripts/lib/service-tags.sh has no SPORE_SERVICE_COMPONENTS assignment")
+	}
+	ids := map[string]bool{}
+	for _, c := range strings.Fields(string(m[1])) {
+		ids[c] = true
+	}
+	tree, err := newTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := discover(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := range inv.Lambdas {
+		if c := filepath.Base(id); !ids[c] {
+			t.Errorf("operated Lambda %s would be tagged spore-host:component=%s, which SPORE_SERVICE_COMPONENTS in scripts/lib/service-tags.sh does not list", id, c)
+		}
+	}
+}

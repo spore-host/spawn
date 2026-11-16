@@ -17,7 +17,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/libs/tags/s3tags"
 	"github.com/spore-host/spawn/pkg/s3transfer"
+	"github.com/spore-host/spawn/pkg/servicetags"
 )
 
 // StagingMetadata represents metadata about staged data
@@ -76,10 +78,10 @@ func (c *Client) resolveSchedulesBucket(ctx context.Context, region string, k pa
 	fallback := fmt.Sprintf("spawn-schedules-%s-%s", c.accountID, region)
 
 	// Try preferred name first
-	bucket, err := c.ensureBucket(ctx, preferred, region)
+	bucket, err := c.ensureBucket(ctx, preferred, region, k)
 	if err != nil {
 		// Fall back to account-scoped name
-		if bucket, err = c.ensureBucket(ctx, fallback, region); err != nil {
+		if bucket, err = c.ensureBucket(ctx, fallback, region, k); err != nil {
 			return "", err
 		}
 	}
@@ -96,9 +98,22 @@ func (c *Client) resolveSchedulesBucket(ctx context.Context, region string, k pa
 	return bucket, nil
 }
 
+// schedulesServiceTags are the spore-host:* service tags (spore-host/spore-host#750)
+// a schedules bucket is created with when `spawn schedule create` makes it. That
+// command writes to the infra account, where the bucket is part of the service
+// scheduler-handler reads from, not workload litter.
+func schedulesServiceTags() map[string]string {
+	return servicetags.For("scheduler-handler", "pkg/staging/staging.go")
+}
+
 // ensureBucket ensures a single named bucket exists; returns the name if it does (or was created).
 // Returns an error if the bucket is owned by another account or creation fails.
-func (c *Client) ensureBucket(ctx context.Context, bucket, region string) (string, error) {
+//
+// A bucket it creates for schedule params is tagged as part of the service
+// (schedulesServiceTags). One created for a batch queue's config is not: that
+// path runs in the launching account, where the bucket is the user's, so a
+// teardown there may remove it.
+func (c *Client) ensureBucket(ctx context.Context, bucket, region string, k paramsKind) (string, error) {
 	s3Client := c.s3For(region)
 	_, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 	if err == nil {
@@ -129,6 +144,18 @@ func (c *Client) ensureBucket(ctx context.Context, bucket, region string) (strin
 			RestrictPublicBuckets: aws.Bool(true),
 		},
 	})
+
+	// Best-effort, like the public access block: the bucket works without its
+	// tags, and a missing s3:PutBucketTagging grant must not fail the schedule.
+	// spore-host's scripts/retag-service-resources.sh covers one left untagged.
+	if k == kindScheduleParams {
+		if _, err := s3Client.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
+			Bucket:  aws.String(bucket),
+			Tagging: s3tags.Tagging(schedulesServiceTags()),
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not tag new bucket %s as a spore.host service bucket: %v\n", bucket, err)
+		}
+	}
 
 	// No lifecycle rule here. This used to put `expire-schedules` (7 days on
 	// schedules/, "queue configs are ephemeral"), which deleted every

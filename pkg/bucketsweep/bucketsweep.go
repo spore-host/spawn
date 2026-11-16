@@ -58,6 +58,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/spawn/pkg/servicetags"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -223,6 +224,11 @@ func Sweep(ctx context.Context, api API, b Bucket, opts Options) Result {
 	}
 	if ts, ok := parseStamp(tags[EmptySinceTagKey]); ok {
 		res.EmptySince = ts
+	}
+	// Before every other rule: a bucket that is part of spore.host's own
+	// service (spore-host/spore-host#750) is never deleted, whatever its name.
+	if servicetags.IsService(tags) {
+		return kept(res, "tagged spore-host:role=service")
 	}
 
 	switch {

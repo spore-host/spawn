@@ -327,7 +327,7 @@ func TestEIPSweepSkipsTheGraceOnlyForAConfirmedTermination(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &countingNet{describeErrNth: tc.describeErr, fakeNetAPI: fakeNetAPI{instances: tc.instances, addrs: []ec2types.Address{tc.addr}}}
 			r := &reaper{netResources: netResourcesOff, elasticIPs: elasticIPsReap}
-			acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
+			acct := account{label: "self", accountID: "111111111111", netFor: func(string) netResourceAPI { return f }}
 			sum := &Summary{}
 			captureLogs(func() {
 				r.reapNetResourcesRegion(context.Background(), acct, "us-east-1", now, sum, &accountOutcome{})

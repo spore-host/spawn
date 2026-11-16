@@ -176,8 +176,10 @@ func TestEveryLambdaCallIsGrantedByTheCIRole(t *testing.T) {
 			t.Errorf("deploylambdas calls `aws lambda %s` (%s), which %s does not grant", s, iamAction(s), ciRoleScript)
 		}
 	}
-	if !tagKeys[versionTag] {
-		t.Errorf("deploylambdas stamps %s, which the role's TagResource condition %v does not allow", versionTag, tagKeys)
+	for _, k := range []string{versionTag, serviceRoleKey, serviceComponentKey, serviceDeployedByKey} {
+		if !tagKeys[k] {
+			t.Errorf("deploylambdas writes %s, which the role's TagResource condition %v does not allow", k, tagKeys)
+		}
 	}
 
 	// The static set covers what actually runs: a deploy that fails, rolls back

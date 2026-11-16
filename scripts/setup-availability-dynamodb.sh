@@ -5,6 +5,12 @@ REGION="${AWS_REGION:-us-east-1}"
 PROFILE="${AWS_PROFILE:-spore-host-infra}"
 TABLE_NAME="spawn-availability-stats"
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=sweep-orchestrator
+SPORE_SERVICE_DEPLOYED_BY=scripts/setup-availability-dynamodb.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
+
 echo "Creating DynamoDB table: $TABLE_NAME in $REGION (profile: $PROFILE)"
 
 aws dynamodb create-table \
@@ -18,7 +24,8 @@ aws dynamodb create-table \
   --billing-mode PAY_PER_REQUEST \
   --tags \
     Key=spawn:managed,Value=true \
-    Key=spawn:purpose,Value=availability-stats
+    Key=spawn:purpose,Value=availability-stats \
+    "${SPORE_SERVICE_TAGS_LIST[@]}"
 
 echo "Waiting for table to be active..."
 aws dynamodb wait table-exists --profile "$PROFILE" --table-name "$TABLE_NAME" --region "$REGION"

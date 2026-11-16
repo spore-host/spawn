@@ -361,3 +361,17 @@ func TestSpecKeyIsUnderSpecRunPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestDecideKeepsAServiceQueue: a queue tagged spore-host:role=service is part
+// of spore.host's own service (spore-host/spore-host#750) and is kept even when
+// every other condition would delete it.
+func TestDecideKeepsAServiceQueue(t *testing.T) {
+	f := Facts{Name: NamePrefix + "r1", Tags: Tags("r1"), CountsKnown: true, Created: now.Add(-48 * time.Hour)}
+	if ok, why := Decide(f, now); !ok {
+		t.Fatalf("the baseline must be deletable, kept: %s", why)
+	}
+	f.Tags["spore-host:role"] = "service"
+	if ok, why := Decide(f, now); ok || why != KeepService {
+		t.Errorf("Decide = %t, %q; want kept as %q", ok, why, KeepService)
+	}
+}

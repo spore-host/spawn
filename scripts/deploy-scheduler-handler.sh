@@ -77,6 +77,12 @@ if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
   exit 1
 fi
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=scheduler-handler
+SPORE_SERVICE_DEPLOYED_BY=scripts/deploy-scheduler-handler.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
+
 echo "Deploying scheduler-handler Lambda function..."
 echo "  Region: $REGION"
 echo "  Profile: $PROFILE"
@@ -138,7 +144,7 @@ else
         --region "$REGION" \
         --profile "$PROFILE" \
         --description "Handles EventBridge Scheduler triggers for spawn scheduled executions" \
-        --tags "Application=spawn,Component=scheduler" \
+        --tags "Application=spawn,Component=scheduler,spawn:managed=true,spawn:component=scheduler-handler,${SPORE_SERVICE_TAGS_MAP}" \
         --output table
 
     # Wait before the configuration update below: a freshly created function is
@@ -225,7 +231,7 @@ SCHED_ARN=$(aws lambda get-function-configuration \
     --query FunctionArn --output text)
 aws lambda tag-resource \
     --resource "$SCHED_ARN" \
-    --tags "spawn:managed=true,spawn:component=scheduler-handler,spawn:created-by=deploy-scheduler-handler.sh,spawn:version=$SPAWN_VERSION" \
+    --tags "spawn:managed=true,spawn:component=scheduler-handler,spawn:created-by=deploy-scheduler-handler.sh,spawn:version=$SPAWN_VERSION,${SPORE_SERVICE_TAGS_MAP}" \
     --region "$REGION" --profile "$PROFILE" >/dev/null
 echo "stamped spawn:version=$SPAWN_VERSION"
 
@@ -242,6 +248,7 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
 # making its own, so this is safe and idempotent.
 aws logs create-log-group \
   --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --tags "$SPORE_SERVICE_TAGS_MAP" \
   --region "$REGION" --profile "$PROFILE" 2>/dev/null || true  # swallow-ok: already exists; any other failure fails put-retention-policy next
 # Fatal now: with the group created above, a failure here is real.
 aws logs put-retention-policy \
@@ -249,6 +256,9 @@ aws logs put-retention-policy \
   --retention-in-days "$LOG_RETENTION_DAYS" \
   --region "$REGION" --profile "$PROFILE"
 echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME"
+# The --tags above reach only a group this run created; an existing one is
+# tagged here, on every deploy (#750).
+spore_tag_log_group "/aws/lambda/$FUNCTION_NAME" "$REGION" "$ACCOUNT_ID" --profile "$PROFILE"
 
 echo ""
 echo "✅ Deployment complete!"

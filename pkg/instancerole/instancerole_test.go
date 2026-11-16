@@ -58,6 +58,8 @@ func TestDecideEachConditionIsRequired(t *testing.T) {
 		{"not the per-task prefix", func(f *Facts) { f.Name = "my-own-role" }, KeepNotPerTask},
 		{"the shared spored role", func(f *Facts) { f.Name = SharedRoleName }, KeepShared},
 		{"the shared spored profile", func(f *Facts) { f.Name = SharedProfileName }, KeepShared},
+		{"role tagged service", func(f *Facts) { f.RoleTags["spore-host:role"] = "service" }, KeepService},
+		{"profile tagged service", func(f *Facts) { f.ProfileTags["spore-host:role"] = "service" }, KeepService},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

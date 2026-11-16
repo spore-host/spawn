@@ -64,6 +64,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/spawn/pkg/servicetags"
 )
 
 const (
@@ -127,6 +128,10 @@ const (
 	KeepYoung           = "role younger than the 24h grace"
 	KeepRecentlyUsed    = "role used within the 24h grace"
 	KeepPoolUnmatched   = "pool role's spawn:pool-run-id tag does not match its name"
+	// KeepService: the role or its profile is part of spore.host's own
+	// service (spore-host/spore-host#750), which cleanup never deletes,
+	// whatever its name.
+	KeepService = "tagged spore-host:role=service"
 )
 
 // PoolWorkerRoleName is the role (and instance profile, same name) for one
@@ -238,6 +243,8 @@ func DecideWith(f Facts, now time.Time, opts Options) (bool, string) {
 	switch {
 	case f.Name == SharedRoleName || f.Name == SharedProfileName:
 		return false, KeepShared
+	case servicetags.IsService(f.RoleTags) || servicetags.IsService(f.ProfileTags):
+		return false, KeepService
 	case !legacy && !IsCandidate(f.Name):
 		return false, KeepNotPerTask
 	case pool && !poolRoleMatches(f.Name, f.RoleTags):

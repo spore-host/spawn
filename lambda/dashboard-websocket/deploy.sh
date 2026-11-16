@@ -28,6 +28,12 @@ if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
   exit 1
 fi
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=dashboard-websocket
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-websocket/deploy.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../scripts/lib/service-tags.sh"
+
 echo "Building and deploying $FUNCTION_NAME to region $REGION with profile $AWS_PROFILE"
 
 # Build the Lambda
@@ -69,6 +75,7 @@ else
         --role "$ROLE_ARN" \
         --timeout 30 \
         --memory-size 256 \
+        --tags "spawn:managed=true,spawn:component=dashboard-websocket,${SPORE_SERVICE_TAGS_MAP}" \
         --region "$REGION" \
         --profile "$AWS_PROFILE"
 
@@ -88,7 +95,7 @@ FUNCTION_ARN=$(aws lambda get-function-configuration \
   --query FunctionArn --output text)
 aws lambda tag-resource \
   --resource "$FUNCTION_ARN" \
-  --tags "spawn:managed=true,spawn:component=dashboard-websocket,spawn:created-by=lambda/dashboard-websocket/deploy.sh,spawn:version=$SPAWN_VERSION" \
+  --tags "spawn:managed=true,spawn:component=dashboard-websocket,spawn:created-by=lambda/dashboard-websocket/deploy.sh,spawn:version=$SPAWN_VERSION,${SPORE_SERVICE_TAGS_MAP}" \
   --region "$REGION" --profile "$AWS_PROFILE" >/dev/null
 echo "stamped spawn:version=$SPAWN_VERSION"
 
@@ -102,6 +109,7 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
 # making its own, so this is safe and idempotent.
 aws logs create-log-group \
   --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --tags "$SPORE_SERVICE_TAGS_MAP" \
   --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null || true  # swallow-ok: already exists; any other failure fails put-retention-policy next
 # Fatal now: with the group created above, a failure here is real.
 aws logs put-retention-policy \
@@ -109,6 +117,9 @@ aws logs put-retention-policy \
   --retention-in-days "$LOG_RETENTION_DAYS" \
   --region "$REGION" --profile "$AWS_PROFILE"
 echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME"
+# The --tags above reach only a group this run created; an existing one is
+# tagged here, on every deploy (#750).
+spore_tag_log_group "/aws/lambda/$FUNCTION_NAME" "$REGION" "$ACCOUNT_ID" --profile "$AWS_PROFILE"
 
 # Clean up
 rm bootstrap dashboard-websocket.zip

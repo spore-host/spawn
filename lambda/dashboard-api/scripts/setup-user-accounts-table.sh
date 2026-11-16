@@ -8,6 +8,12 @@ PROFILE=${1:-default}
 TABLE_NAME="spawn-user-accounts"
 REGION="us-east-1"
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=dashboard-api
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-api/scripts/setup-user-accounts-table.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../../scripts/lib/service-tags.sh"
+
 # Assert the target account (#799 follow-up). The deploy-script gates originally
 # discovered only `aws lambda`/`aws cloudformation` verbs, so the IAM-mutating
 # scripts — the class that creates cross-account trust — were the one class
@@ -57,6 +63,7 @@ else
         --tags \
             Key=spawn:managed,Value=true \
             Key=spawn:purpose,Value=dashboard-user-cache \
+            "${SPORE_SERVICE_TAGS_LIST[@]}" \
         --query 'TableDescription.TableArn' \
         --output text)
 
@@ -67,6 +74,8 @@ else
     aws dynamodb wait table-exists --profile "$PROFILE" --region "$REGION" --table-name "$TABLE_NAME"
     echo -e "  ${GREEN}✓${NC} Table is active"
 fi
+# create-table's --tags reach only a table this run created (#750).
+spore_tag_table "$TABLE_NAME" "$REGION" --profile "$PROFILE"
 
 # Update Lambda IAM role policy to include PutItem for user account caching
 echo ""

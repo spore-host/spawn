@@ -75,7 +75,7 @@ func TestEnsureBucketCreatesTheAccountScopedFallback(t *testing.T) {
 	c, s3c := newStagingClient(t, account)
 
 	fallback := "spawn-schedules-" + account + "-eu-west-1"
-	got, err := c.ensureBucket(ctx, fallback, "eu-west-1")
+	got, err := c.ensureBucket(ctx, fallback, "eu-west-1", kindScheduleParams)
 	if err != nil {
 		t.Fatalf("ensureBucket(%q): %v", fallback, err)
 	}
@@ -111,5 +111,42 @@ func TestEnsureBucketIsIdempotent(t *testing.T) {
 	if first != second {
 		t.Errorf("resolveSchedulesBucket returned %q then %q; the persisted bucket name would be "+
 			"wrong for every schedule created after the first", first, second)
+	}
+}
+
+// A schedules bucket `spawn schedule create` makes is part of spore.host's
+// service (spore-host/spore-host#750) and says so in its tags; one made for a
+// batch queue's config, in the launching account, does not.
+func TestEnsureBucketTagsOnlyAScheduleParamsBucketAsService(t *testing.T) {
+	ctx := context.Background()
+	c, s3c := newStagingClient(t, "123456789012")
+	for _, tc := range []struct {
+		bucket  string
+		kind    paramsKind
+		service bool
+	}{
+		{"spawn-schedules-us-east-1", kindScheduleParams, true},
+		{"spawn-schedules-123456789012-us-east-1", kindQueueConfig, false},
+	} {
+		if _, err := c.ensureBucket(ctx, tc.bucket, "us-east-1", tc.kind); err != nil {
+			t.Fatalf("ensureBucket(%s): %v", tc.bucket, err)
+		}
+		got := map[string]string{}
+		if out, err := s3c.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{Bucket: aws.String(tc.bucket)}); err == nil {
+			for _, tg := range out.TagSet {
+				got[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
+			}
+		} else if tc.service {
+			t.Fatalf("GetBucketTagging(%s): %v", tc.bucket, err)
+		}
+		if tc.service {
+			for k, v := range schedulesServiceTags() {
+				if got[k] != v {
+					t.Errorf("%s: %s = %q, want %q", tc.bucket, k, got[k], v)
+				}
+			}
+		} else if _, ok := got["spore-host:role"]; ok {
+			t.Errorf("%s: a queue-config bucket is tagged %v; it is the launching account's, not the service's", tc.bucket, got)
+		}
 	}
 }

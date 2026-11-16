@@ -8,6 +8,14 @@ PROFILE=${1:-default}
 ROLE_NAME="SpawnDashboardLambdaRole"
 POLICY_NAME="SpawnDashboardLambdaPolicy"
 
+# The spore-host:* service tags (spore-host/spore-host#750). The role is shared
+# by dashboard-api, the two websocket functions and cost-history-collector;
+# dashboard-api is the component that owns it.
+SPORE_SERVICE_COMPONENT=dashboard-api
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../../scripts/lib/service-tags.sh"
+
 # Assert the target account (#799 follow-up). The deploy-script gates originally
 # discovered only `aws lambda`/`aws cloudformation` verbs, so the IAM-mutating
 # scripts — the class that creates cross-account trust — were the one class
@@ -62,11 +70,14 @@ ROLE_ARN=$(aws iam create-role \
     --role-name "$ROLE_NAME" \
     --assume-role-policy-document file:///tmp/trust-policy.json \
     --description "Execution role of the spawn dashboard Lambdas (dashboard-api, websocket, websocket-processor, cost-history-collector)" \
-    --tags Key=spawn:managed,Value=true Key=spawn:purpose,Value=dashboard-api \
+    --tags Key=spawn:managed,Value=true Key=spawn:purpose,Value=dashboard-api "${SPORE_SERVICE_TAGS_LIST[@]}" \
     --query 'Role.Arn' \
     --output text 2>/dev/null || aws iam get-role --profile "$PROFILE" --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
 
 echo -e "  ${GREEN}✓${NC} Role created: $ROLE_ARN"
+# The --tags above reach only a role this run created; tag an existing one too
+# (#750). tag-role merges.
+spore_tag_role "$ROLE_NAME" --profile "$PROFILE"
 
 # Attach basic Lambda execution policy
 echo "→ Attaching Lambda basic execution policy..."

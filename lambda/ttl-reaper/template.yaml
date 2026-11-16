@@ -498,6 +498,14 @@ Resources:
         spawn:component: ttl-reaper
         spawn:created-by: sam deploy
         spawn:version: !Ref Version
+        # spore-host:* service tags (spore-host/spore-host#750): this is spore.host's
+        # own service, not workload litter. Cleanup never deletes role=service.
+        spore-host:role: service
+        spore-host:component: ttl-reaper
+        spore-host:deployed-by: lambda/ttl-reaper/template.yaml
+      # Tags reach the generated role and the schedule rule too, not only the
+      # function.
+      PropagateTags: true
       Policies:
         # Assume each per-account role that actually describes/terminates EC2.
         - Statement:
@@ -839,6 +847,13 @@ Resources:
           Value: ttl-reaper
         - Key: spawn:version
           Value: !Ref Version
+        # spore-host:* service tags (spore-host/spore-host#750).
+        - Key: spore-host:role
+          Value: service
+        - Key: spore-host:component
+          Value: ttl-reaper
+        - Key: spore-host:deployed-by
+          Value: lambda/ttl-reaper/template.yaml
 
   # Who may put events on the bus: exactly the forwarder role of each account in
   # RoleArns, the accounts this reaper already assumes into. The principal list
@@ -891,6 +906,14 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/lambda/spawn-ttl-reaper-${Environment}
       RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        # spore-host:* service tags (spore-host/spore-host#750).
+        - Key: spore-host:role
+          Value: service
+        - Key: spore-host:component
+          Value: ttl-reaper
+        - Key: spore-host:deployed-by
+          Value: lambda/ttl-reaper/template.yaml
 
   # ---------------------------------------------------------------------------
   # Failure observability (#469, #457 failure mode A, #254 idea 3)
