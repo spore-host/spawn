@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `s3:PutBucketTagging` when it creates the bucket; without the grant it warns
   and carries on (spore-host/spore-host#750).
 
+### Documentation
+
+- `spawn notify`'s reference page shows its `<TEAMS_TENANT_ID>` and
+  `<AZURE_BOT_CLIENT_SECRET>` placeholders again: libs v0.52.0 (taken for its
+  `tags` package) carries libs v0.51.5's docgen fix for wrapped help lines.
+
 ### Fixed
 
 - `spawn egress-proxy delete` no longer leaves the VPC's two security groups
