@@ -83,7 +83,9 @@ func TestLaunchConfigObjectHoldsWhatTheTagsHeld(t *testing.T) {
 
 	got := map[string]string{}
 	for k, v := range tags {
-		if k == launchconfig.Tag {
+		// spawn:config, and the spore.host tags (#1652), which v0.149.0
+		// predates: neither held a setting.
+		if k == launchconfig.Tag || strings.HasPrefix(k, "spore-host:") {
 			continue
 		}
 		if launchconfig.IsSetting(k) {
@@ -165,6 +167,8 @@ func TestLaunchConfigObjectIsContentAddressed(t *testing.T) {
 // source a real launch tags.
 func maximalLaunch() LaunchConfig {
 	cfg := maximalConfig()
+	// What maximalConfig leaves out to keep its slack (#1652).
+	cfg.SessionTimeout, cfg.PreStopTimeout, cfg.CompletionDelay = "8h", "5m", "1m"
 	allSporedSettings(&cfg)
 	every := everyLaunchConfigSetting()
 	cfg.ActivePortsRaw, cfg.ActiveProcessesRaw = every.ActivePortsRaw, every.ActiveProcessesRaw
@@ -181,23 +185,27 @@ func maximalLaunch() LaunchConfig {
 // launch, and 11 kept, 10 for spored (its 5 on every instance, 3 for the web
 // app's readiness, 2 for DNS status) and 1 for the Spot price. Spored's Spot
 // compute accrual (spawn:spot-accrual, #1497) makes it 57: 12 kept, 11 for
-// spored. A key added to a launch that pushes
+// spored. The spore.host tags (spore-host:managed-by, created and schema,
+// #1652) make it 60: 48 at launch. A key added to a launch that pushes
 // maximalLaunchTags up has been classified as staying a tag
 // (pkg/launchconfig.TagKeys); raise this with that reason, or move the key
 // into the object.
 const (
-	maximalLaunchTags    = 45
+	maximalLaunchTags    = 48
 	maximalLaunchReserve = 12
 )
 
 // withoutOverTheLimit drops the settings of maximalLaunch that, with the
-// reserve kept, take it past AWS's 50: a job array's five tags on a sweep member, and a web
-// app's three readiness tags. Without them it is 49, 1 to spare since #1497
-// (48 after #1428); either alone is not enough (52 without the job array, 54
-// without the web app).
+// reserve kept, take it past AWS's 50: a job array's five tags on a sweep member, a web
+// app's three readiness tags, and since the spore.host tags (#1652)
+// spawn:metrics-enabled and spawn:completion-delay too. Without them it is 50;
+// without only the first two it was 49 after #1497 and 48 after #1428, and is
+// now 52.
 func withoutOverTheLimit(c *LaunchConfig) {
 	c.JobArrayID, c.JobArrayName, c.JobArraySize, c.JobArrayIndex = "", "", 0, 0
 	c.AppMode, c.ReadyPort, c.ReadyHealthPath, c.WebAuth = "", 0, "", ""
+	c.Observability.MetricsEnabled, c.Observability.MetricsPort, c.Observability.MetricsBind, c.Observability.MetricsPath = false, 0, "", ""
+	c.CompletionDelay = ""
 }
 
 // The tag count, with the reserve (#1355): the maximal launch less the

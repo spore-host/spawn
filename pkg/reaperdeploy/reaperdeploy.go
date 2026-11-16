@@ -24,6 +24,10 @@ package reaperdeploy
 import (
 	"fmt"
 	"strings"
+
+	libtags "github.com/spore-host/libs/tags"
+
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 const (
@@ -113,13 +117,30 @@ func EnvVars(regions string, dryRun bool) map[string]string {
 
 // Tags mark what spawn created, so a teardown (and a human) can tell these resources
 // apart from anything else in the account.
+//
+// They include the spore.host tags (spore-host:managed-by=spawn, created,
+// schema, and spore-host:component=ttl-reaper; #1652), with no scope: each
+// resource's own adds it (scopedTags). The self-hosted reaper is tool
+// infrastructure in the user's account that `spawn reaper teardown` removes,
+// so it carries no spore-host:role (pkg/sporetags).
 func Tags(version string) map[string]string {
-	return map[string]string{
-		"spawn:managed":    "true",
-		"spawn:created-by": "spawn reaper deploy",
-		"spawn:component":  "ttl-reaper",
-		"spawn:version":    strings.TrimPrefix(strings.TrimSpace(version), "v"),
+	t := sporetags.For("", "")
+	t[libtags.Component] = "ttl-reaper"
+	t["spawn:managed"] = "true"
+	t["spawn:created-by"] = "spawn reaper deploy"
+	t["spawn:component"] = "ttl-reaper"
+	t["spawn:version"] = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	return t
+}
+
+// scopedTags is Tags with spore-host:scope: the region for a regional
+// resource, sporetags.ScopeGlobal for the IAM role.
+func scopedTags(version, scope string) map[string]string {
+	t := Tags(version)
+	if scope != "" {
+		t[libtags.Scope] = scope
 	}
+	return t
 }
 
 // AssumeRolePolicy is the trust policy for the execution role: Lambda only.

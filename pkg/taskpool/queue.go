@@ -39,6 +39,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	smithy "github.com/aws/smithy-go"
 	"github.com/spore-host/spawn/pkg/poolqueue"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // SQSAPI is the slice of the SQS SDK the queue needs. An interface (not the
@@ -98,7 +99,7 @@ func QueueName(runID string) string {
 // idempotent when attributes match), so first-worker-or-submitter-wins is safe.
 //
 // The queue is created tagged poolqueue.Tags(runID) — spawn:managed=true and
-// spawn:pool-run-id — which is what lets `spawn cleanup --pool-queues` and the
+// spawn:pool-run-id, plus the spore.host tags (#1652) — which is what lets `spawn cleanup --pool-queues` and the
 // reaper recognise and delete it once the pool is abandoned (#1351). Tagging on
 // create also needs sqs:TagQueue; a caller without it gets an untagged queue
 // rather than a failed pool, and TagErr says why (only `spawn pool drain` then
@@ -113,7 +114,8 @@ func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTim
 			// still expires. 12h: far longer than any interactive fan-out.
 			"MessageRetentionPeriod": "43200",
 		},
-		Tags: poolqueue.Tags(runID),
+		// And the spore.host tags (#1652), scoped to the queue's region.
+		Tags: sporetags.Fill(poolqueue.Tags(runID), sporetags.For(clientRegion(client), "")),
 	}
 	out, err := client.CreateQueue(ctx, in)
 	var tagErr error
@@ -131,6 +133,15 @@ func CreateQueue(ctx context.Context, client SQSAPI, runID string, visibilityTim
 		return nil, fmt.Errorf("create queue %s: %w", name, err)
 	}
 	return &Queue{client: client, url: aws.ToString(out.QueueUrl), name: name, tagErr: tagErr}, nil
+}
+
+// clientRegion is the region of an *sqs.Client (anything with its Options),
+// or "" for another SQSAPI.
+func clientRegion(client SQSAPI) string {
+	if o, ok := client.(interface{ Options() sqs.Options }); ok {
+		return o.Options().Region
+	}
+	return ""
 }
 
 // TagErr is non-nil when CreateQueue could not tag the queue (the caller

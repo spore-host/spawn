@@ -5,6 +5,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // CreatedTagKey is the creation timestamp the reaper's net-resource sweep reads
@@ -38,7 +40,17 @@ const CreatedTagKey = "spawn:created"
 // Returned as a slice so a caller can append its own tags, and kept in one place
 // so a new creation path cannot forget the stamp. TestEveryNetResourceCreationIsTagged
 // enforces that.
+//
+// It also carries the spore.host tags (spore-host:managed-by=spawn, created,
+// schema; #1652), with no scope or owner: a [Client] method that creates one
+// adds those through lifecycleTagsIn.
 func LifecycleTags(name, purpose string, now time.Time) []types.Tag {
+	return lifecycleTagsIn("", "", name, purpose, now)
+}
+
+// lifecycleTagsIn is [LifecycleTags] with spore-host:scope (the region) and
+// spore-host:owner, each left out when empty.
+func lifecycleTagsIn(region, owner, name, purpose string, now time.Time) []types.Tag {
 	tags := []types.Tag{
 		{Key: aws.String("spawn:managed"), Value: aws.String("true")},
 		{Key: aws.String(CreatedTagKey), Value: aws.String(now.UTC().Format(time.RFC3339))},
@@ -49,5 +61,10 @@ func LifecycleTags(name, purpose string, now time.Time) []types.Tag {
 	if purpose != "" {
 		tags = append(tags, types.Tag{Key: aws.String("spawn:purpose"), Value: aws.String(purpose)})
 	}
-	return tags
+	return appendMissingTags(tags, sporetags.At(region, owner, now))
+}
+
+// lifecycleTags is lifecycleTagsIn for a resource c creates now in region.
+func (c *Client) lifecycleTags(region, name, purpose string) []types.Tag {
+	return lifecycleTagsIn(region, c.ownerTag(), name, purpose, time.Now())
 }

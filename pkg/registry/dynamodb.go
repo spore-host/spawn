@@ -12,7 +12,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/spore-host/libs/tags/dynamodbtags"
 	"github.com/spore-host/spawn/pkg/provider"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 const (
@@ -344,7 +346,8 @@ func EnsureTable(ctx context.Context, cfg aws.Config) error {
 			},
 		},
 		BillingMode: types.BillingModePayPerRequest,
-		Tags: []types.Tag{
+		// And the spore.host tags (#1652).
+		Tags: append([]types.Tag{
 			{
 				Key:   aws.String("Application"),
 				Value: aws.String("spawn"),
@@ -353,7 +356,7 @@ func EnsureTable(ctx context.Context, cfg aws.Config) error {
 				Key:   aws.String("Purpose"),
 				Value: aws.String("hybrid-compute-registry"),
 			},
-		},
+		}, dynamodbtags.FromMap(sporetags.For(cfg.Region, ""))...),
 	})
 
 	if err != nil {

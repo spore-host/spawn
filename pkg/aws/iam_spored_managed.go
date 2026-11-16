@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags/iamtags"
 )
 
 // Spored grants as customer-managed policies (#1573).
@@ -154,6 +155,9 @@ type sporedGrant struct {
 	// Partition is the account's AWS partition ("aws" when empty).
 	Partition string
 	Schema    int
+	// Tags are the managed policy's tags: the spore.host set (#1652). A new
+	// policy is created with them; an existing one gets those it lacks.
+	Tags map[string]string
 }
 
 func (g sporedGrant) managedName() string { return versionedPolicyName(g.ManagedBase, g.Schema) }
@@ -378,26 +382,31 @@ var iamConsistencyWait = func(try int) { time.Sleep(time.Duration(try+1) * 500 *
 // was found and then deleted before it could be read.
 func ensureSporedPolicy(ctx context.Context, api sporedPolicyAPI, g sporedGrant) (why string, gone bool) {
 	arn := g.managedARN()
-	versionID, err := sporedPolicyDefaultVersion(ctx, api, arn)
+	versionID, policyTags, err := sporedPolicyDefaultVersion(ctx, api, arn)
 	switch {
 	case err == nil:
+		// An existing policy, perhaps untagged by an older spawn (#1652).
+		convergePolicyTags(ctx, api, arn, policyTags, g.Tags)
 	case isNoSuchEntity(err):
-		cerr := retryIAMWrite(func() error {
-			_, e := api.CreatePolicy(ctx, &iam.CreatePolicyInput{
-				PolicyName:     aws.String(g.managedName()),
-				Path:           aws.String(sporedPolicyPath),
-				PolicyDocument: aws.String(g.Doc),
-				Description: aws.String(fmt.Sprintf("spawn: the spored grants (policy schema v%d), attached to spawn's "+
-					"instance roles. Created by spawn; spawn deletes it once no role uses it.", g.Schema)),
+		cerr := createPolicyTagged(ctx, func(in *iam.CreatePolicyInput) error {
+			return retryIAMWrite(func() error {
+				_, e := api.CreatePolicy(ctx, in)
+				return e
 			})
-			return e
+		}, &iam.CreatePolicyInput{
+			PolicyName:     aws.String(g.managedName()),
+			Path:           aws.String(sporedPolicyPath),
+			PolicyDocument: aws.String(g.Doc),
+			Description: aws.String(fmt.Sprintf("spawn: the spored grants (policy schema v%d), attached to spawn's "+
+				"instance roles. Created by spawn; spawn deletes it once no role uses it.", g.Schema)),
+			Tags: iamtags.FromMap(g.Tags),
 		})
 		switch {
 		case cerr == nil:
 			return "", false // this document, just written
 		case isEntityAlreadyExists(cerr):
 			// A concurrent launch created it: compare it, as any other.
-			if versionID, err = sporedPolicyDefaultVersion(ctx, api, arn); err != nil {
+			if versionID, _, err = sporedPolicyDefaultVersion(ctx, api, arn); err != nil {
 				if isNoSuchEntity(err) {
 					return "", true
 				}
@@ -449,20 +458,22 @@ func readFailure(arn string, err error) string {
 }
 
 // sporedPolicyDefaultVersion returns the default version id of the managed
-// policy arn.
-func sporedPolicyDefaultVersion(ctx context.Context, api sporedPolicyAPI, arn string) (string, error) {
+// policy arn, and its tags.
+func sporedPolicyDefaultVersion(ctx context.Context, api sporedPolicyAPI, arn string) (string, []types.Tag, error) {
 	var id string
+	var tags []types.Tag
 	err := retryIAMWrite(func() error {
 		out, e := api.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(arn)})
 		if e == nil && out.Policy != nil {
 			id = aws.ToString(out.Policy.DefaultVersionId)
+			tags = out.Policy.Tags
 		}
 		return e
 	})
 	if err == nil && id == "" {
 		id = "v1"
 	}
-	return id, err
+	return id, tags, err
 }
 
 // samePolicyDocument reports whether two policy documents grant the same. IAM

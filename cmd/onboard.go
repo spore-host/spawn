@@ -36,10 +36,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/spf13/cobra"
+	libtags "github.com/spore-host/libs/tags"
+	"github.com/spore-host/libs/tags/iamtags"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/orgaccount"
+	"github.com/spore-host/spawn/pkg/sporetags"
 	"github.com/spore-host/spawn/pkg/trustboundary"
 )
 
@@ -309,6 +312,7 @@ func ensurePortalOnboardRole(ctx context.Context, client onboardIAMAPI, progress
 			return "", "", fmt.Errorf("a role named %s exists but is not tagged Purpose=spore-portal-onboard, so spawn did not create it — refusing to rewrite its trust or policies", portalOnboardRoleName)
 		}
 		roleARN = aws.ToString(role.Arn)
+		convergePortalOnboardTags(ctx, client, progress, role.Tags)
 		trusted, perr := trustedExternalIDs(aws.ToString(role.AssumeRolePolicyDocument))
 		switch {
 		case requestedExternalID != "":
@@ -346,10 +350,10 @@ func ensurePortalOnboardRole(ctx context.Context, client onboardIAMAPI, progress
 			RoleName:                 aws.String(portalOnboardRoleName),
 			AssumeRolePolicyDocument: aws.String(portalTrustPolicy(phoneHomeRole, externalID)),
 			Description:              aws.String("Allows the spore.host portal to launch + manage EC2 in this account"),
-			Tags: []iamtypes.Tag{
+			Tags: append([]iamtypes.Tag{
 				{Key: aws.String("spawn:managed"), Value: aws.String("false")},
 				{Key: aws.String("Purpose"), Value: aws.String("spore-portal-onboard")},
-			},
+			}, iamtags.FromMap(portalOnboardSporeTags())...),
 		})
 		if err != nil {
 			return "", "", fmt.Errorf("create role: %w", err)
@@ -361,6 +365,30 @@ func ensurePortalOnboardRole(ctx context.Context, client onboardIAMAPI, progress
 		return "", "", err
 	}
 	return roleARN, externalID, nil
+}
+
+// portalOnboardSporeTags are the spore.host tags on the spore-portal-onboard
+// role (#1652): spawn created it and `spawn onboard` owns it. spawn:managed
+// stays false, so the cleanup paths that select on it leave the role alone.
+func portalOnboardSporeTags() map[string]string {
+	t := sporetags.For(sporetags.ScopeGlobal, "")
+	t[libtags.Component] = "portal-onboard"
+	return t
+}
+
+// convergePortalOnboardTags adds to an existing spore-portal-onboard role the
+// spore.host tags it lacks, keeping any it has. Best-effort.
+func convergePortalOnboardTags(ctx context.Context, client onboardIAMAPI, progress io.Writer, existing []iamtypes.Tag) {
+	add := sporetags.Converge(iamtags.ToMap(existing), portalOnboardSporeTags())
+	t, ok := client.(interface {
+		TagRole(context.Context, *iam.TagRoleInput, ...func(*iam.Options)) (*iam.TagRoleOutput, error)
+	})
+	if len(add) == 0 || !ok {
+		return
+	}
+	if _, err := t.TagRole(ctx, &iam.TagRoleInput{RoleName: aws.String(portalOnboardRoleName), Tags: iamtags.FromMap(add)}); err != nil {
+		fmt.Fprintf(progress, "  ! Could not add the spore-host:* tags to %s (%v); it works as before.\n", portalOnboardRoleName, err)
+	}
 }
 
 func hasTag(tags []iamtypes.Tag, key, value string) bool {

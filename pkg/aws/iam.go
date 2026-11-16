@@ -15,9 +15,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	smithy "github.com/aws/smithy-go"
+	"github.com/spore-host/libs/tags/iamtags"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/launchconfig"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // SporedRoleName and SporedInstanceProfileName are the SHARED, long-lived IAM
@@ -537,6 +539,11 @@ func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 		if err := ensureRoleBoundary(ctx, iamClient, roleName, accountID); err != nil {
 			return "", err
 		}
+		// An existing role, perhaps from a spawn older than the spore.host
+		// tags: add the ones it lacks, keeping any it has (#1652).
+		if got, gerr := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(roleName)}); gerr == nil && got.Role != nil {
+			convergeRoleTags(ctx, iamClient, roleName, got.Role.Tags, sporeKeys(c.iamTagMap(config.Tags)))
+		}
 		if len(config.Policies) > 0 || config.PolicyFile != "" || config.InlinePolicyJSON != "" {
 			// Caller specified policies — update the inline policy so that
 			// re-using a cached role (same hash) still picks up any new policy
@@ -639,6 +646,7 @@ func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 		if err := ensureRoleInProfile(ctx, iamClient, profileName, roleName, profile.InstanceProfile.Roles); err != nil {
 			return "", err
 		}
+		convergeProfileTags(ctx, iamClient, profileName, profile.InstanceProfile.Tags, sporeKeys(c.iamTagMap(config.Tags)))
 	}
 
 	// Return the profile name, not the ARN — EC2 RunInstances iamInstanceProfile.name
@@ -1417,28 +1425,45 @@ func sporedHybridRegistryStatementJSON() string {
 	return string(b)
 }
 
-// buildIAMTags creates IAM tags with spawn metadata
+// buildIAMTags is the tag set of an IAM role or instance profile spawn
+// creates for a caller that supplied tags (IAMRoleConfig.Tags).
+//
+// The spawn:* keys are spawn's and always set. spawn:created-at is the
+// canonical creation-timestamp tag across all resource types (#258);
+// spawn:created is kept for back-compat with anything already keying on it.
+//
+// The spore.host keys (spore-host:managed-by=spawn, scope global, created,
+// schema, owner; #1652) are set only where the caller did not set them:
+// calque and lagotto create their instance roles through this code and pass
+// spore-host:managed-by=calque (lagotto), which must survive. tags is not
+// modified.
 func (c *Client) buildIAMTags(tags map[string]string) []types.Tag {
-	if tags == nil {
-		tags = make(map[string]string)
-	}
+	return iamtags.FromMap(c.iamTagMap(tags))
+}
 
-	// Add spawn tags. spawn:created-at is the canonical creation-timestamp tag
-	// across all resource types (#258); spawn:created is kept for back-compat
-	// with anything already keying on it.
-	tags["spawn:managed"] = "true"
-	tags["spawn:created-by"] = "spawn"
-	tags["spawn:created-at"] = time.Now().UTC().Format(time.RFC3339)
-	tags["spawn:created"] = tags["spawn:created-at"]
-
-	iamTags := make([]types.Tag, 0, len(tags))
-	for key, value := range tags {
-		iamTags = append(iamTags, types.Tag{
-			Key:   aws.String(key),
-			Value: aws.String(value),
-		})
+// iamTagMap is buildIAMTags as a map.
+func (c *Client) iamTagMap(tags map[string]string) map[string]string {
+	out := make(map[string]string, len(tags)+9)
+	for k, v := range tags {
+		out[k] = v
 	}
-	return iamTags
+	out["spawn:managed"] = "true"
+	out["spawn:created-by"] = "spawn"
+	out["spawn:created-at"] = time.Now().UTC().Format(time.RFC3339)
+	out["spawn:created"] = out["spawn:created-at"]
+	return sporetags.Fill(out, c.sporeTags(sporetags.ScopeGlobal))
+}
+
+// sporeKeys is the spore-host:* part of m: what converging an existing
+// resource's tags writes (sporetags.Converge only ever adds these).
+func sporeKeys(m map[string]string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range m {
+		if strings.HasPrefix(k, "spore-host:") {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // roleExists checks if an IAM role exists
@@ -1571,6 +1596,7 @@ func (c *Client) putSporedGrants(ctx context.Context, api sporedPolicyAPI, role,
 		Account:     acct,
 		Partition:   partition,
 		Schema:      sporedPolicySchema,
+		Tags:        c.sporeTags(sporetags.ScopeGlobal),
 	}, warnSporedPolicy)
 }
 
@@ -1604,8 +1630,12 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	// The spored role and profile carry spawn:managed and the spore.host tags
+	// (#1652); an existing pair gets the spore.host ones it lacks.
+	sporedTags := sporetags.Fill(map[string]string{"spawn:managed": "true"}, c.sporeTags(sporetags.ScopeGlobal))
+
 	// 1. Check if role exists, create if not
-	_, err = iamClient.GetRole(ctx, &iam.GetRoleInput{
+	existingRole, err := iamClient.GetRole(ctx, &iam.GetRoleInput{
 		RoleName: aws.String(roleName),
 	})
 
@@ -1625,9 +1655,7 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 				Description:              aws.String("IAM role for spored daemon on EC2 instances"),
 				// Capped at creation (iam_boundary.go).
 				PermissionsBoundary: aws.String(spawnInstanceBoundaryARN(accountID)),
-				Tags: []types.Tag{
-					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-				},
+				Tags:                iamtags.FromMap(sporedTags),
 			})
 			return e
 		})
@@ -1640,6 +1668,9 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		// it.
 		if err := ensureRoleBoundary(ctx, iamClient, roleName, accountID); err != nil {
 			return "", err
+		}
+		if existingRole != nil && existingRole.Role != nil {
+			convergeRoleTags(ctx, iamClient, roleName, existingRole.Role.Tags, sporeKeys(sporedTags))
 		}
 	}
 
@@ -1662,9 +1693,12 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 	}
 
 	// 3. Check if instance profile exists, create if not
-	_, err = iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
+	existingProfile, err := iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
 		InstanceProfileName: aws.String(instanceProfileName),
 	})
+	if err == nil && existingProfile != nil && existingProfile.InstanceProfile != nil {
+		convergeProfileTags(ctx, iamClient, instanceProfileName, existingProfile.InstanceProfile.Tags, sporeKeys(sporedTags))
+	}
 
 	if err != nil {
 		profileCreated = true
@@ -1674,9 +1708,7 @@ func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
 		err = retryIAM(func() error {
 			_, e := iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
 				InstanceProfileName: aws.String(instanceProfileName),
-				Tags: []types.Tag{
-					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-				},
+				Tags:                iamtags.FromMap(sporedTags),
 			})
 			return e
 		})

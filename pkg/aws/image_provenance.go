@@ -111,7 +111,7 @@ func checkImageTagCount(action string, tags map[string]string) error {
 	}
 	custom := 0
 	for k := range tags {
-		if !strings.HasPrefix(k, "spawn:") {
+		if !strings.HasPrefix(k, "spawn:") && !strings.HasPrefix(k, "spore-host:") {
 			custom++
 		}
 	}

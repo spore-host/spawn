@@ -22,7 +22,9 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/spf13/cobra"
+	libtags "github.com/spore-host/libs/tags"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 var setupAccountRegion string
@@ -83,6 +85,10 @@ func runSetupAccount(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(out, ".")
 	default:
 		fmt.Fprintf(out, "The spawn permissions boundary %s is already current in account %s.\n", res.ARN, account)
+	}
+	if res.Tagged {
+		fmt.Fprintf(out, "Tagged the boundary %s=spawn and %s=%s, the one spawn resource kept on purpose.\n",
+			libtags.ManagedBy, sporetags.PermanentKey, sporetags.PermanentValue)
 	}
 	fmt.Fprintln(out, "spawn now caps every role it creates in this account with this boundary.")
 	return nil

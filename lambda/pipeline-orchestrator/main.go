@@ -27,11 +27,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/libs/tags/snstags"
 	"github.com/spore-host/spawn/internal/shellmin"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/buildinfo"
 	"github.com/spore-host/spawn/pkg/pipeline"
 	"github.com/spore-host/spawn/pkg/sporedinstall"
+	"github.com/spore-host/spawn/pkg/sporetags"
 	"github.com/spore-host/spawn/pkg/ttl"
 )
 
@@ -1827,7 +1829,7 @@ func sendNotification(ctx context.Context, state *pipeline.PipelineState, subjec
 	}
 
 	// Get or create SNS topic
-	topicARN, err := getOrCreateNotificationTopic(ctx, state.PipelineID)
+	topicARN, err := getOrCreateNotificationTopic(ctx, state.PipelineID, state.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("get notification topic: %w", err)
 	}
@@ -1847,22 +1849,36 @@ func sendNotification(ctx context.Context, state *pipeline.PipelineState, subjec
 	return err
 }
 
-func getOrCreateNotificationTopic(ctx context.Context, pipelineID string) (string, error) {
+func getOrCreateNotificationTopic(ctx context.Context, pipelineID string, createdAt time.Time) (string, error) {
 	topicName := fmt.Sprintf("spawn-pipeline-%s", pipelineID)
+	legacy := []snstypes.Tag{{Key: aws.String("spawn:pipeline-id"), Value: aws.String(pipelineID)}}
 
-	// Try to create topic (idempotent)
+	// Try to create topic (idempotent). SNS refuses a CreateTopic for an
+	// existing topic whose tags differ, so the tags are the same on every call
+	// for a pipeline: spore-host:created is the pipeline's CreatedAt, not now
+	// (#1652).
 	result, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{
 		Name: aws.String(topicName),
-		Tags: []snstypes.Tag{
-			{Key: aws.String("spawn:pipeline-id"), Value: aws.String(pipelineID)},
-		},
+		Tags: append(legacy, snstags.FromMap(pipelineTopicTags(snsClient.Options().Region, createdAt))...),
 	})
+	if err != nil && strings.Contains(err.Error(), "Tags") {
+		// A topic created before the spore.host tags: it carries only the
+		// pipeline id, and re-creating it with those still matches.
+		result, err = snsClient.CreateTopic(ctx, &sns.CreateTopicInput{Name: aws.String(topicName), Tags: legacy})
+	}
 
 	if err != nil {
 		return "", err
 	}
 
 	return *result.TopicArn, nil
+}
+
+// pipelineTopicTags are the spore.host tags of a pipeline's notification topic
+// in region (#1652). createdAt fixes spore-host:created, so every call for one
+// pipeline sends the same tags.
+func pipelineTopicTags(region string, createdAt time.Time) map[string]string {
+	return sporetags.At(region, "", createdAt)
 }
 
 func ensureEmailSubscription(ctx context.Context, topicARN, email string) error {

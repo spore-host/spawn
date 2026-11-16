@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	libtags "github.com/spore-host/libs/tags"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/ttl"
 	truffleaws "github.com/spore-host/truffle/pkg/aws"
@@ -138,7 +139,8 @@ func (t *LaunchTagger) tags(ctx context.Context, lc *LaunchConfig) ([]types.Tag,
 }
 
 // launchAnchoredTags are the tags whose values are instants buildTags fixes at
-// the launch. [AnchorLaunchTags] rewrites exactly these.
+// the launch. [AnchorLaunchTags] rewrites exactly these, and spore-host:created
+// (libtags.Created, #1652).
 const (
 	launchTimeTag       = "spawn:launch-time"
 	ttlTag              = "spawn:ttl"
@@ -148,10 +150,10 @@ const (
 )
 
 // AnchorLaunchTags returns tags, rendered by a [LaunchTagger] at some earlier
-// time, as they would have been rendered at launchAt: spawn:launch-time is
-// launchAt, spawn:ttl-deadline is launchAt plus spawn:ttl, and a persistent Spot
-// request's spawn:spot-valid-until and spawn:job-array-created follow. Every
-// other tag is unchanged.
+// time, as they would have been rendered at launchAt: spawn:launch-time and
+// spore-host:created are launchAt, spawn:ttl-deadline is launchAt plus
+// spawn:ttl, and a persistent Spot request's spawn:spot-valid-until and
+// spawn:job-array-created follow. Every other tag is unchanged.
 //
 // The TTL counts from the real launch, not from when the CLI rendered the tags:
 // a detached sweep's member can launch hours after `spawn launch` returned, and
@@ -179,7 +181,7 @@ func AnchorLaunchTags(tags []types.Tag, launchAt time.Time) ([]types.Tag, error)
 		k := aws.ToString(tg.Key)
 		v := tg.Value
 		switch k {
-		case launchTimeTag, jobArrayCreatedTag:
+		case launchTimeTag, jobArrayCreatedTag, libtags.Created:
 			v = stamp(launchAt)
 		case ttlDeadlineTag:
 			if deadline.IsZero() {

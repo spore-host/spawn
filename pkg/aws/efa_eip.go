@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
+	libtags "github.com/spore-host/libs/tags"
 	"github.com/spore-host/spawn/pkg/elasticip"
 )
 
@@ -165,7 +166,11 @@ func launchElasticIPOwnerTags(instanceID, instanceARN string, instanceTags []typ
 		tags = append(tags, types.Tag{Key: aws.String(elasticip.InstanceARNTagKey), Value: aws.String(instanceARN)})
 	}
 	for _, t := range instanceTags {
-		if aws.ToString(t.Key) == "spawn:iam-user" {
+		switch aws.ToString(t.Key) {
+		// The address is the instance's and goes with it, so it is managed by
+		// whoever manages the instance: a calque or lagotto instance's
+		// spore-host:managed-by (and its scope and owner) carry over (#1652).
+		case "spawn:iam-user", libtags.ManagedBy, libtags.Scope, libtags.Owner:
 			tags = append(tags, types.Tag{Key: t.Key, Value: t.Value})
 		}
 	}
@@ -202,8 +207,10 @@ func attachLaunchElasticIP(ctx context.Context, api launchElasticIPAPI, name, in
 			Domain: types.DomainTypeVpc,
 			TagSpecifications: []types.TagSpecification{{
 				ResourceType: types.ResourceTypeElasticIp,
-				Tags: append(LifecycleTags(name, ElasticIPPurpose, time.Now()),
-					launchElasticIPOwnerTags(instanceID, instanceARN, instanceTags)...),
+				// The instance's tags first, so its spore-host:managed-by wins
+				// over LifecycleTags' default (dedupeTags keeps the first).
+				Tags: dedupeTags(append(launchElasticIPOwnerTags(instanceID, instanceARN, instanceTags),
+					LifecycleTags(name, ElasticIPPurpose, time.Now())...)),
 			}},
 		})
 		if aerr != nil {

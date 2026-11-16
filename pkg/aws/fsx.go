@@ -102,6 +102,7 @@ func (c *Client) startFSxCreate(ctx context.Context, config FSxConfig) (filesyst
 	fsxClient = fsx.NewFromConfig(c.regionalConfig(config.Region))
 
 	input := buildFSxCreateInput(config, subnetID, importPath, exportPath)
+	input.Tags = appendMissingFSxTags(input.Tags, c.sporeTags(config.Region)) // #1652
 	result, cerr := fsxClient.CreateFileSystem(ctx, input)
 	if cerr != nil {
 		return "", nil, "", "", fmt.Errorf("failed to create FSx filesystem: %w", cerr)
@@ -256,6 +257,10 @@ func (c *Client) associateFSxS3(ctx context.Context, fsxClient *fsx.Client, file
 	if exportPath != "" {
 		dra.DataRepositoryPath = aws.String(exportPath)
 	}
+	// The association is part of its filesystem and goes with it, but it is
+	// a taggable resource of its own, so it carries the spore.host tags too
+	// (#1652). The filesystem's create already needed fsx:TagResource.
+	dra.Tags = appendMissingFSxTags(nil, c.sporeTags(fsxClient.Options().Region))
 	if _, err := fsxClient.CreateDataRepositoryAssociation(ctx, dra); err != nil {
 		return fmt.Errorf("create data repository association for %s: %w", filesystemID, err)
 	}
@@ -581,4 +586,18 @@ func pickSubnet(subnets []ec2types.Subnet, vpcID, az string) (ec2types.Subnet, b
 		}
 	}
 	return best, found
+}
+
+// appendMissingFSxTags is appendMissingTags for FSx tags.
+func appendMissingFSxTags(ts []types.Tag, m map[string]string) []types.Tag {
+	have := make(map[string]bool, len(ts))
+	for _, t := range ts {
+		have[aws.ToString(t.Key)] = true
+	}
+	for _, k := range sortedKeys(m) {
+		if !have[k] {
+			ts = append(ts, types.Tag{Key: aws.String(k), Value: aws.String(m[k])})
+		}
+	}
+	return ts
 }

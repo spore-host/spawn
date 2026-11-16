@@ -12,6 +12,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
+	libtags "github.com/spore-host/libs/tags"
+
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // CopiedFromTagKey records which AMI a `spawn ami copy` was made from, as
@@ -122,7 +125,7 @@ func copyAMI(ctx context.Context, src, dst copyAMIEC2, in CopyAMIInput) (*CopyAM
 	if name == "" {
 		name = aws.ToString(img.Name)
 	}
-	tags := copiedAMITags(srcTags, srcID, in.SourceRegion)
+	tags := copiedAMITags(srcTags, srcID, in.SourceRegion, in.TargetRegion)
 	if err := checkImageTagCount("copy "+srcID, tags); err != nil {
 		return nil, err
 	}
@@ -211,16 +214,20 @@ func resolveSourceAMI(ctx context.Context, src copyAMIEC2, ref, region string) (
 //     region. DeleteAMI deletes the Image Builder resource an AMI carries that
 //     tag for, so a copy that inherited it would, when deleted, try to delete
 //     the SOURCE's Image Builder image.
-func copiedAMITags(src map[string]string, srcID, srcRegion string) map[string]string {
+//
+// The copy is a new resource, so its spore-host:created is now and its
+// spore-host:scope is dstRegion; the source's spore-host:managed-by and
+// owner carry over (#1652), and are filled in for a source older than them.
+func copiedAMITags(src map[string]string, srcID, srcRegion, dstRegion string) map[string]string {
 	out := make(map[string]string, len(src)+1)
 	for k, v := range src {
-		if strings.HasPrefix(k, "aws:") || k == "Ec2ImageBuilderArn" {
+		if strings.HasPrefix(k, "aws:") || k == "Ec2ImageBuilderArn" || k == libtags.Created || k == libtags.Scope {
 			continue
 		}
 		out[k] = v
 	}
 	out[CopiedFromTagKey] = srcID + "@" + srcRegion
-	return out
+	return sporetags.Fill(out, sporetags.For(dstRegion, ""))
 }
 
 func tagList(m map[string]string) []types.Tag {

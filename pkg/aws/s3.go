@@ -13,8 +13,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/libs/tags/s3tags"
 	"github.com/spore-host/spawn/pkg/bucketsweep"
 	"github.com/spore-host/spawn/pkg/launchconfig"
+	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
 // S3BucketConfig contains configuration for creating/tagging S3 buckets
@@ -39,8 +41,12 @@ type S3BucketConfig struct {
 //
 // For a bucket that exists, spawn-staging-* or spawn-results-* loses any
 // spawn:empty-since stamp, since the caller is about to use it (#1301).
+//
+// The bucket also carries the spore.host tags (#1652); an existing bucket
+// spawn made gets the ones it lacks.
 func (c *Client) CreateS3BucketIfNotExists(ctx context.Context, bucketName, region string) error {
-	return createPlainBucket(ctx, s3.NewFromConfig(c.regionalConfig(region)), bucketName, region)
+	return createBucketIfNotExists(ctx, s3.NewFromConfig(c.regionalConfig(region)), bucketName, region,
+		appendMissingS3Tags(plainBucketTags(bucketName), c.sporeTags(region)))
 }
 
 func createPlainBucket(ctx context.Context, api bucketCreateS3, bucketName, region string) error {
@@ -48,8 +54,10 @@ func createPlainBucket(ctx context.Context, api bucketCreateS3, bucketName, regi
 }
 
 // CreateS3BucketWithTags creates an S3 bucket with FSx configuration tags
+// and the spore.host tags (#1652).
 func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConfig) error {
-	return createBucketIfNotExists(ctx, s3.NewFromConfig(c.regionalConfig(config.Region)), config.BucketName, config.Region, fsxBucketTags(config))
+	return createBucketIfNotExists(ctx, s3.NewFromConfig(c.regionalConfig(config.Region)), config.BucketName, config.Region,
+		appendMissingS3Tags(fsxBucketTags(config), c.sporeTags(config.Region)))
 }
 
 // resultsBucketPurpose is the spawn:purpose tag on spawn's results bucket.
@@ -118,6 +126,10 @@ type bucketCreateS3 interface {
 }
 
 func createBucketIfNotExists(ctx context.Context, s3Client bucketCreateS3, bucketName, region string, tags []types.Tag) error {
+	// Every bucket spawn creates carries the spore.host tags (#1652); a caller
+	// that already put them in tags keeps its values.
+	tags = appendMissingS3Tags(tags, sporetags.For(region, ""))
+
 	// Check if bucket exists
 	_, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucketName),
@@ -128,6 +140,10 @@ func createBucketIfNotExists(ctx context.Context, s3Client bucketCreateS3, bucke
 		// caller is about to use it: best-effort, take off its empty stamp.
 		if bucketsweep.IsSweptName(bucketName) {
 			_ = bucketsweep.ClearEmptySince(ctx, s3Client, bucketName, "")
+			// And one spawn made before the spore.host tags gets them
+			// (#1652). Only a bucket with spawn's own name: any other is
+			// someone's data bucket, and is not touched.
+			convergeBucketTags(ctx, s3Client, bucketName, "", s3SporeKeys(tags))
 		}
 		return nil
 	}
@@ -180,6 +196,9 @@ func createBucketIfNotExists(ctx context.Context, s3Client bucketCreateS3, bucke
 	// Some other error occurred
 	return fmt.Errorf("failed to check if bucket exists: %w", err)
 }
+
+// s3SporeKeys is the spore-host:* part of an S3 tag list.
+func s3SporeKeys(ts []types.Tag) map[string]string { return sporeKeys(s3tags.ToMap(ts)) }
 
 // isCrossRegionRedirect reports whether a HeadBucket error is the 301 redirect
 // AWS returns when the bucket exists but lives in another region. The SDK
@@ -460,7 +479,7 @@ func ensureStagingBucket(ctx context.Context, api stagingS3, bucket, region, own
 		}
 		// Exists without the expiry rule: re-apply everything, not just the
 		// rule, since whoever removed it may have changed the rest.
-		return configureStagingBucket(ctx, api, bucket, owner)
+		return configureStagingBucket(ctx, api, bucket, owner, sporetags.For(region, ""))
 	case isNotFound(err):
 	default:
 		// 403 here is a bucket of this name owned by someone else (or no
@@ -480,7 +499,7 @@ func ensureStagingBucket(ctx context.Context, api stagingS3, bucket, region, own
 			return fmt.Errorf("create staging bucket %s: %w", bucket, err)
 		}
 	}
-	return configureStagingBucket(ctx, api, bucket, owner)
+	return configureStagingBucket(ctx, api, bucket, owner, sporetags.For(region, ""))
 }
 
 func isNotFound(err error) bool {
@@ -558,7 +577,7 @@ func sameStagingRule(r, want types.LifecycleRule) bool {
 		aws.ToInt32(r.AbortIncompleteMultipartUpload.DaysAfterInitiation) == aws.ToInt32(want.AbortIncompleteMultipartUpload.DaysAfterInitiation)
 }
 
-func configureStagingBucket(ctx context.Context, api stagingS3, bucket, owner string) error {
+func configureStagingBucket(ctx context.Context, api stagingS3, bucket, owner string, spore map[string]string) error {
 	b, o := aws.String(bucket), aws.String(owner)
 	steps := []struct {
 		what string
@@ -590,11 +609,18 @@ func configureStagingBucket(ctx context.Context, api stagingS3, bucket, owner st
 			return err
 		}},
 		{"tag", func() error {
+			// The whole set is written, so a re-configured bucket keeps the
+			// spore-host:created it was first given (#1652).
+			ts := []types.Tag{
+				{Key: aws.String("spawn:managed"), Value: aws.String("true")},
+				{Key: aws.String("spawn:purpose"), Value: aws.String("bootstrap-staging")},
+			}
+			if got, err := api.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{Bucket: b, ExpectedBucketOwner: o}); err == nil {
+				ts = appendMissingS3Tags(ts, sporeKeys(s3tags.ToMap(got.TagSet)))
+			}
+			ts = appendMissingS3Tags(ts, spore)
 			_, err := api.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{Bucket: b, ExpectedBucketOwner: o,
-				Tagging: &types.Tagging{TagSet: []types.Tag{
-					{Key: aws.String("spawn:managed"), Value: aws.String("true")},
-					{Key: aws.String("spawn:purpose"), Value: aws.String("bootstrap-staging")},
-				}}})
+				Tagging: &types.Tagging{TagSet: ts}})
 			return err
 		}},
 	}

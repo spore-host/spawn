@@ -11,7 +11,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags/iamtags"
 
+	"github.com/spore-host/spawn/pkg/sporetags"
 	"github.com/spore-host/spawn/pkg/sweep"
 	"github.com/spore-host/spawn/pkg/trustboundary"
 )
@@ -444,6 +446,13 @@ type SweepRoleOutcome struct {
 	PreviousTrust string
 }
 
+// sweepRoleTags are the sweep role's tags: spawn:managed and the spore.host
+// set (#1652). It is tool infrastructure `spawn sweep teardown` removes, so it
+// carries no spore-host:role.
+func sweepRoleTags() map[string]string {
+	return sporetags.Fill(map[string]string{"spawn:managed": "true"}, sporetags.For(sporetags.ScopeGlobal, ""))
+}
+
 // EnsureSweepCrossAccountRole creates SpawnSweepCrossAccountRole in
 // computeAccount (the account api acts in) trusting the orchestrator in
 // orchestratorAccount, or adopts the one that is there, and converges its
@@ -491,7 +500,7 @@ func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeA
 				Description: aws.String("spawn: the sweep orchestrator launches, tags and cancels detached sweep " +
 					"members here through this role. Created by spawn; `spawn sweep teardown` removes it."),
 				PermissionsBoundary: aws.String(spawnInstanceBoundaryARN(computeAccount)),
-				Tags:                []types.Tag{{Key: aws.String("spawn:managed"), Value: aws.String("true")}},
+				Tags:                iamtags.FromMap(sweepRoleTags()),
 			})
 			return e
 		})
@@ -512,6 +521,8 @@ func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeA
 	}
 
 	if out.Found {
+		// Adopted, perhaps from a spawn older than the spore.host tags (#1652).
+		convergeRoleTags(ctx, api, role, current.Tags, sporeKeys(sweepRoleTags()))
 		doc, derr := url.QueryUnescape(aws.ToString(current.AssumeRolePolicyDocument))
 		if derr != nil {
 			doc = aws.ToString(current.AssumeRolePolicyDocument)

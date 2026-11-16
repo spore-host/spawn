@@ -249,8 +249,8 @@ func TestCopyAMI_RefusesMoreThanFiftyTags(t *testing.T) {
 		src[fmt.Sprintf("k%02d", i)] = "v"
 	}
 	dst, _, err := runCopy(t, src, false, CopyAMIInput{})
-	if err == nil || !strings.Contains(err.Error(), "51 tags") {
-		t.Fatalf("err = %v, want a refusal naming 51 tags (50 + spawn:copied-from)", err)
+	if err == nil || !strings.Contains(err.Error(), "55 tags") {
+		t.Fatalf("err = %v, want a refusal naming 55 tags (50 + spawn:copied-from + the copy's four spore-host:* tags, #1652)", err)
 	}
 	if len(dst.copyIn) != 0 {
 		t.Errorf("CopyImage was called; EC2 would have rejected it")
