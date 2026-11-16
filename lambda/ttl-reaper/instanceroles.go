@@ -83,6 +83,13 @@ func (r *reaper) reapInstanceRolesAccount(ctx context.Context, acct account, now
 	}
 	reap := r.instanceRoles == instanceRolesReap && !r.dryRun
 
+	// Never in the infra account, nor one the reaper could not identify
+	// (#750). Each role is also kept when it or its profile is tagged
+	// spore-host:role=service: pkg/instancerole's KeepService.
+	if err := GuardTeardown(acct.accountID); err != nil {
+		log.Printf("instance-roles: %s: not swept: %v", acct.label, err)
+		return
+	}
 	if acct.regionsFor == nil {
 		log.Printf("instance-roles: %s: not swept, no way to list the account's enabled regions", acct.label)
 		return

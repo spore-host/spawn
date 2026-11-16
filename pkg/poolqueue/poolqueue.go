@@ -63,6 +63,7 @@ import (
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/spawn/pkg/instancerole"
+	"github.com/spore-host/spawn/pkg/servicetags"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -106,6 +107,9 @@ const (
 	KeepNotEmpty      = "queue holds messages"
 	KeepNoCreated     = "queue creation time unknown"
 	KeepYoung         = "queue younger than the 24h grace"
+	// KeepService: the queue is part of spore.host's own service
+	// (spore-host/spore-host#750), which cleanup never deletes.
+	KeepService = "queue tagged spore-host:role=service"
 
 	SpecKeepQueueExists = "the pool's queue still exists"
 	SpecKeepYoung       = "a spec was staged within the 24h grace"
@@ -169,6 +173,8 @@ func Decide(f Facts, now time.Time) (bool, string) {
 	switch {
 	case !ok:
 		return false, KeepNotPool
+	case servicetags.IsService(f.Tags):
+		return false, KeepService
 	case f.Tags[ManagedTagKey] != ManagedTagValue:
 		return false, KeepUntagged
 	case f.Tags[RunIDTagKey] != runID:

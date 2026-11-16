@@ -50,6 +50,14 @@ Resources:
           Value: spawn
         - Key: Component
           Value: scheduler
+        # spore-host:* service tags (spore-host/spore-host#750). The same three
+        # as the stack tags scripts/setup-schedules-dynamodb.sh passes.
+        - Key: spore-host:role
+          Value: service
+        - Key: spore-host:component
+          Value: scheduler-handler
+        - Key: spore-host:deployed-by
+          Value: scripts/setup-schedules-dynamodb.sh
 
   SpawnScheduleHistoryTable:
     Type: AWS::DynamoDB::Table
@@ -89,6 +97,14 @@ Resources:
           Value: spawn
         - Key: Component
           Value: scheduler
+        # spore-host:* service tags (spore-host/spore-host#750). The same three
+        # as the stack tags scripts/setup-schedules-dynamodb.sh passes.
+        - Key: spore-host:role
+          Value: service
+        - Key: spore-host:component
+          Value: scheduler-handler
+        - Key: spore-host:deployed-by
+          Value: scripts/setup-schedules-dynamodb.sh
 
 Outputs:
   SchedulesTableName:

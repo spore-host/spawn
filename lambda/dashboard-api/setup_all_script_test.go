@@ -49,8 +49,12 @@ const fakeZip = `#!/bin/bash
 const traceScripts = `echo "$PWD|$(ps -o args= -p $$)" >> "$FAKE_DIR/scripts"
 `
 
-// scriptArgRe is the script operand of a traced `bash <script> ...` line.
-var scriptArgRe = regexp.MustCompile(`(?:^|\s)(\S+\.sh)(?:\s|$)`)
+// scriptArgRe is the script operand of a traced `bash <script> ...` line: the
+// word after the interpreter, not any word ending in .sh. The fake aws is a
+// bash script too, so its own command line is traced, and a tag value such as
+// spore-host:deployed-by=lambda/dashboard-api/scripts/setup-dashboard-lambda-role.sh
+// (#750) is an argument to it, not a script that ran.
+var scriptArgRe = regexp.MustCompile(`^\s*\S+\s+(\S+\.sh)(?:\s|$)`)
 
 // invokedScriptRe matches a line of setup-all.sh that runs a script by a
 // relative path. Anchored on the start of the line so the echoed banners and

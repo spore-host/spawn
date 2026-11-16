@@ -176,8 +176,8 @@ Run this once after installing the app in a workspace:
 
   spawn notify workspace add \
     --platform teams \
-    --workspace-id <TEAMS_TENANT_ID> \
-    --bot-token <AZURE_BOT_CLIENT_SECRET>
+    --workspace-id &lt;TEAMS_TENANT_ID&gt; \
+    --bot-token &lt;AZURE_BOT_CLIENT_SECRET&gt;
 
 ```
 spawn notify workspace add [flags]

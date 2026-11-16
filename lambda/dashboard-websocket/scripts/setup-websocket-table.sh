@@ -14,6 +14,12 @@ AWS_PROFILE=$1
 TABLE_NAME="spawn-websocket-connections"
 REGION="us-east-1"
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=dashboard-websocket
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-websocket/scripts/setup-websocket-table.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../../scripts/lib/service-tags.sh"
+
 echo "Setting up $TABLE_NAME table in region $REGION with profile $AWS_PROFILE"
 
 # Check if table already exists
@@ -40,6 +46,8 @@ if aws dynamodb describe-table --table-name "$TABLE_NAME" --region "$REGION" --p
         echo "TTL already enabled"
     fi
 
+    # create-table's --tags below never ran for it (#750).
+    spore_tag_table "$TABLE_NAME" "$REGION" --profile "$AWS_PROFILE"
     exit 0
 fi
 
@@ -59,6 +67,7 @@ aws dynamodb create-table \
     --tags \
         Key=spawn:managed,Value=true \
         Key=spawn:purpose,Value=websocket \
+        "${SPORE_SERVICE_TAGS_LIST[@]}" \
     --region "$REGION" \
     --profile "$AWS_PROFILE"
 

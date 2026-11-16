@@ -681,7 +681,7 @@ func TestDeploySweepOrchestratorDeploysOnlyAPublishedRelease(t *testing.T) {
 		"fetch the body published for the version":      `(?m)^BODY_URL="https://spawn-binaries-us-east-1\.s3\.us-east-1\.amazonaws\.com/spawn/versions/\$\{SPAWN_VERSION\}/bootstrap\.sh"`,
 		"refuse a body that differs":                    `(?m)^if \[ "\$GOT_BODY_SHA" != "\$WANT_BODY_SHA" \]; then\n\s+echo[^\n]*\n\s+exit 1`,
 		"inject the version into the build":             `(?m)^GOOS=linux [^\n]*go build [^\n]*-ldflags "-X main\.Version=\$\{SPAWN_VERSION\}"`,
-		"stamp the version it built, not a re-describe": `--tags "[^"]*spawn:version=\$SPAWN_VERSION"`,
+		"stamp the version it built, not a re-describe": `--tags "[^"]*spawn:version=\$SPAWN_VERSION(,\$\{SPORE_SERVICE_TAGS_MAP\})?"`,
 	} {
 		if !regexp.MustCompile(re).MatchString(s) {
 			t.Errorf("deploy-sweep-orchestrator.sh does not %s", what)
@@ -694,5 +694,115 @@ func TestDeploySweepOrchestratorDeploysOnlyAPublishedRelease(t *testing.T) {
 	// And the checks come before the build.
 	if strings.Index(s, "GOT_BODY_SHA\" != ") > strings.Index(s, "go build") {
 		t.Error("the body check runs after the build")
+	}
+}
+
+// serviceCreate is the start of an AWS CLI command that creates a resource a
+// service deploy path must tag (spore-host/spore-host#750): an invocation at
+// the start of a line, after `$(`, or after `||`/`&&`, so a grep pattern or an
+// echo naming the command is not one.
+var serviceCreate = regexp.MustCompile(`(^\s*|\$\(\s*|\|\|\s*|&&\s*)aws (iam create-role|dynamodb create-table|logs create-log-group|lambda create-function|sqs create-queue|apigatewayv2 create-(api|domain-name)|cloudformation (create-stack|update-stack|deploy)|s3api create-bucket|s3 mb)(\s|$)`)
+
+// lambdaTagResource is an invocation of `aws lambda tag-resource`.
+var lambdaTagResource = regexp.MustCompile(`(^\s*|\$\(\s*)aws lambda tag-resource\b`)
+
+// awsCommand returns the command starting on lines[i]: that line and its
+// backslash continuations, including the lines of a single-quoted argument
+// that spans several (a --global-secondary-indexes JSON document).
+func awsCommand(lines []string, i int) string {
+	var b strings.Builder
+	quotes := 0
+	for j := i; j < len(lines); j++ {
+		b.WriteString(lines[j])
+		b.WriteString("\n")
+		quotes += strings.Count(lines[j], "'")
+		if quotes%2 == 0 && !strings.HasSuffix(strings.TrimRight(lines[j], " \t"), `\`) {
+			break
+		}
+	}
+	return b.String()
+}
+
+// Gate (#750): every resource a service deploy script creates carries the
+// spore-host:* service tags, and every function it stamps gets them too.
+//
+// The infra account's service resources mostly carried only spawn:managed=true,
+// the tag spawn also puts on workload litter, and a litter classifier marked 12
+// live ones as litter. scripts/lib/service-tags.sh is the one source of the
+// tags; this checks every script that creates something uses it:
+//
+//   - a role, table, log group, function, queue, API, domain or stack create
+//     passes --tags with a SPORE_SERVICE_TAGS_* value from the library;
+//   - a bucket create is followed by spore_merge_bucket_tags (S3 takes no tags
+//     on create-bucket);
+//   - every `aws lambda tag-resource` includes SPORE_SERVICE_TAGS_MAP;
+//   - the script names itself as SPORE_SERVICE_DEPLOYED_BY and sources the
+//     library.
+//
+// DISCOVERED: any .sh with such a create. The one exclusion is a script that
+// asserts a MEMBER account (SPAWN_MEMBER_ACCOUNT), which onboards a user's
+// account and creates nothing of the service.
+func TestServiceCreatesCarryTheServiceTags(t *testing.T) {
+	deployedBy := regexp.MustCompile(`(?m)^\s*SPORE_SERVICE_DEPLOYED_BY=(\S+)\s*$`)
+	sourced := regexp.MustCompile(`(?m)^\s*(\.|source) "\$\(dirname "\$0"\)/[./]*(scripts/)?lib/service-tags\.sh"`)
+	mergeCall := regexp.MustCompile(`^\s*spore_merge_bucket_tags\b`)
+	found := 0
+	for _, rel := range shellScripts(t) {
+		if rel == "scripts/lib/service-tags.sh" {
+			continue
+		}
+		src := readRel(t, rel)
+		if strings.Contains(src, "SPAWN_MEMBER_ACCOUNT") {
+			continue
+		}
+		lines := strings.Split(src, "\n")
+		var creates []int
+		for i, l := range lines {
+			if serviceCreate.MatchString(l) {
+				creates = append(creates, i)
+			}
+		}
+		if len(creates) == 0 {
+			continue
+		}
+		found++
+		if m := deployedBy.FindStringSubmatch(src); m == nil || m[1] != rel {
+			got := "(none)"
+			if m != nil {
+				got = m[1]
+			}
+			t.Errorf("%s creates service resources but sets SPORE_SERVICE_DEPLOYED_BY=%s; it must name itself (%s)", rel, got, rel)
+		}
+		if !sourced.MatchString(src) {
+			t.Errorf("%s creates service resources but does not source scripts/lib/service-tags.sh", rel)
+		}
+		for _, i := range creates {
+			cmd := awsCommand(lines, i)
+			verb := serviceCreate.FindStringSubmatch(lines[i])[2]
+			if strings.HasPrefix(verb, "s3") {
+				ok := false
+				for _, l := range lines[i+1:] {
+					if mergeCall.MatchString(l) {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					t.Errorf("%s:%d `aws %s` is never followed by spore_merge_bucket_tags", rel, i+1, verb)
+				}
+				continue
+			}
+			if !strings.Contains(cmd, "--tags") || !strings.Contains(cmd, "SPORE_SERVICE_TAGS_") {
+				t.Errorf("%s:%d `aws %s` does not pass the service tags (--tags with a SPORE_SERVICE_TAGS_* value):\n%s", rel, i+1, verb, cmd)
+			}
+		}
+		for i, l := range lines {
+			if lambdaTagResource.MatchString(l) && !strings.Contains(awsCommand(lines, i), "SPORE_SERVICE_TAGS_MAP") {
+				t.Errorf("%s:%d stamps a function without SPORE_SERVICE_TAGS_MAP", rel, i+1)
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("found no script that creates a service resource — the discovery is broken, not the repo")
 	}
 }

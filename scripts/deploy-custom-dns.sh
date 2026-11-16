@@ -128,6 +128,13 @@ for a in "${ALLOW_ACCOUNTS[@]}"; do
 done
 info "Allowed accounts: ${ALLOW_ACCOUNTS[*]}"
 
+# The spore-host:* service tags (spore-host/spore-host#750). Sourced before the
+# cd below, because the path is relative to this script.
+SPORE_SERVICE_COMPONENT=dns-updater
+SPORE_SERVICE_DEPLOYED_BY=scripts/deploy-custom-dns.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
+
 # Step 1: Build Lambda function
 echo "Step 1: Building Lambda function..."
 cd lambda/dns-updater
@@ -170,12 +177,15 @@ ROLE_NAME="${SPAWN_DNS_ROLE_NAME:-SpawnDNSLambdaExecutionRole}"
 # Check if role exists
 if aws iam get-role --role-name "$ROLE_NAME" &>/dev/null; then
   warn "IAM role $ROLE_NAME already exists"
+  # create-role's --tags below never runs for it, so tag it here (#750).
+  spore_tag_role "$ROLE_NAME"
 else
   info "Creating IAM role: $ROLE_NAME"
   aws iam create-role \
     --role-name "$ROLE_NAME" \
     --assume-role-policy-document file://deployment/trust-policy.json \
     --description "Execution role for spawn DNS Lambda function" \
+    --tags "${SPORE_SERVICE_TAGS_LIST[@]}" \
     > /dev/null
 
   info "IAM role created"
@@ -475,6 +485,7 @@ else
     --memory-size 256 \
     --environment "$MERGED_ENV" \
     --description "DNS updater for spawn managed instances" \
+    --tags "spawn:managed=true,spawn:component=dns-updater,${SPORE_SERVICE_TAGS_MAP}" \
     > /dev/null
 
   info "Lambda function created"
@@ -498,7 +509,7 @@ info "Lambda ARN: $LAMBDA_ARN"
 SPAWN_VERSION=$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo unknown)
 aws lambda tag-resource \
   --resource "$LAMBDA_ARN" \
-  --tags "spawn:managed=true,spawn:component=dns-updater,spawn:created-by=deploy-custom-dns.sh,spawn:version=$SPAWN_VERSION" \
+  --tags "spawn:managed=true,spawn:component=dns-updater,spawn:created-by=deploy-custom-dns.sh,spawn:version=$SPAWN_VERSION,${SPORE_SERVICE_TAGS_MAP}" \
   > /dev/null
 # Set log retention (#653). A log group Lambda auto-creates on first invocation
 # has NO retention and keeps logs forever: a footprint audit found 10 such groups
@@ -513,6 +524,7 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
 # making its own, so this is safe and idempotent.
 aws logs create-log-group \
   --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --tags "$SPORE_SERVICE_TAGS_MAP" \
   --region "$REGION" 2>/dev/null || true  # swallow-ok: already exists; any other failure fails put-retention-policy next
 # Fatal now: with the group created above, a failure here is real.
 aws logs put-retention-policy \
@@ -520,6 +532,9 @@ aws logs put-retention-policy \
   --retention-in-days "$LOG_RETENTION_DAYS" \
   --region "$REGION"
 echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME"
+# The --tags above reach only a group this run created; an existing one is
+# tagged here, on every deploy (#750).
+spore_tag_log_group "/aws/lambda/$FUNCTION_NAME" "$REGION" "$ACCOUNT_ID"
 
 info "Stamped spawn:version=$SPAWN_VERSION"
 echo ""

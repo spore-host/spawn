@@ -9,6 +9,13 @@ FUNCTION_NAME="spawn-dashboard-api"
 ROLE_NAME="SpawnDashboardLambdaRole"
 REGION="us-east-1"
 
+# The spore-host:* service tags (spore-host/spore-host#750). Sourced before the
+# cd below, because the path is relative to this script.
+SPORE_SERVICE_COMPONENT=dashboard-api
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-api/deploy.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../scripts/lib/service-tags.sh"
+
 # Build from this script's own directory: `go build .` and the function.zip it
 # uploads are relative paths, so run from anywhere else this built the wrong
 # package (or none) (#1447).
@@ -88,7 +95,7 @@ if [ -z "$FUNCTION_EXISTS" ]; then
         --timeout 30 \
         --memory-size 512 \
         --description "Spawn Dashboard API - read-only instance viewer" \
-        --tags spawn:managed=true,spawn:purpose=dashboard-api \
+        --tags "spawn:managed=true,spawn:purpose=dashboard-api,${SPORE_SERVICE_TAGS_MAP}" \
         --output json > /dev/null
 
     echo -e "  ${GREEN}✓${NC} Function created"
@@ -140,7 +147,7 @@ FUNCTION_ARN=$(aws lambda get-function-configuration --profile "$PROFILE" \
   --query FunctionArn --output text)
 aws lambda tag-resource --profile "$PROFILE" \
   --resource "$FUNCTION_ARN" \
-  --tags "spawn:managed=true,spawn:component=dashboard-api,spawn:created-by=lambda/dashboard-api/deploy.sh,spawn:version=$SPAWN_VERSION" \
+  --tags "spawn:managed=true,spawn:component=dashboard-api,spawn:created-by=lambda/dashboard-api/deploy.sh,spawn:version=$SPAWN_VERSION,${SPORE_SERVICE_TAGS_MAP}" \
   --region "$REGION" >/dev/null
 echo "stamped spawn:version=$SPAWN_VERSION"
 
@@ -154,6 +161,7 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
 # making its own, so this is safe and idempotent.
 aws logs create-log-group \
   --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --tags "$SPORE_SERVICE_TAGS_MAP" \
   --profile "$PROFILE" --region "$REGION" 2>/dev/null || true  # swallow-ok: already exists; any other failure fails put-retention-policy next
 # Fatal now: with the group created above, a failure here is real.
 aws logs put-retention-policy --profile "$PROFILE" \
@@ -161,6 +169,9 @@ aws logs put-retention-policy --profile "$PROFILE" \
   --retention-in-days "$LOG_RETENTION_DAYS" \
   --region "$REGION"
 echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME"
+# The --tags above reach only a group this run created; an existing one is
+# tagged here, on every deploy (#750).
+spore_tag_log_group "/aws/lambda/$FUNCTION_NAME" "$REGION" "$ACCOUNT_ID" --profile "$PROFILE"
 
 # Clean up. Via trap because `set -e` skipped this line on the failure mode above
 # and left a 20 MB binary and a 6.6 MB zip behind — a script cannot be trusted to

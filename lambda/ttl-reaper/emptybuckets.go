@@ -71,6 +71,12 @@ func (r *reaper) reapEmptyBucketsRegion(ctx context.Context, acct account, regio
 		log.Printf("empty-buckets: %s/%s: account id unknown, so its buckets cannot be named; skipped", acct.label, region)
 		return
 	}
+	// Never in the infra account (#750). Each bucket is also kept when it is
+	// tagged spore-host:role=service: pkg/bucketsweep's first keep rule.
+	if err := GuardTeardown(acct.accountID); err != nil {
+		log.Printf("empty-buckets: %s/%s: not swept: %v", acct.label, region, err)
+		return
+	}
 	reportOnly := r.emptyBucketsReportOnly()
 	api := acct.s3For(region)
 	for _, b := range bucketsweep.Buckets(acct.accountID, region) {

@@ -118,6 +118,11 @@ func (r *reaper) reapNetResourcesRegion(ctx context.Context, acct account, regio
 	if acct.netFor == nil || (!groups && !eips) {
 		return
 	}
+	// Never in the infra account, nor one the reaper could not identify (#750).
+	if err := GuardTeardown(acct.accountID); err != nil {
+		log.Printf("net-resources: %s/%s: not swept: %v", acct.label, region, err)
+		return
+	}
 	cli := acct.netFor(region)
 
 	// One DescribeInstances for the whole region: which groups and placement
@@ -241,6 +246,10 @@ func (r *reaper) reapLaunchElasticIPs(ctx context.Context, cli netResourceAPI, a
 			continue
 		}
 		sum.ElasticIPsScanned++
+		if err := GuardDelete(acct.accountID, "Elastic IP "+alloc, tagMap(a.Tags)); err != nil {
+			log.Printf("net-resources: %s/%s: kept: %v", acct.label, region, err)
+			continue
+		}
 		if awssdk.ToString(a.AssociationId) != "" || awssdk.ToString(a.InstanceId) != "" || awssdk.ToString(a.NetworkInterfaceId) != "" {
 			continue // attached: in use, or held by a stopped instance
 		}
@@ -445,6 +454,11 @@ func (r *reaper) reapSecurityGroups(ctx context.Context, cli netResourceAPI, acc
 		if name == "default" {
 			continue
 		}
+		// Before the discovery stamp too: a service resource is not aged at all.
+		if err := GuardDelete(acct.accountID, "security group "+id, tagMap(sg.Tags)); err != nil {
+			log.Printf("net-resources: %s/%s: kept: %v", acct.label, region, err)
+			continue
+		}
 		age, ok := netResourceAge(sg.Tags, now)
 		grace := netResourceGrace
 		if tagValue(sg.Tags, tagprefix.Tag("purpose")) == windowsGroupPurpose {
@@ -547,6 +561,10 @@ func (r *reaper) reapPlacementGroups(ctx context.Context, cli netResourceAPI, ac
 		}
 		if pg.State != ec2types.PlacementGroupStateAvailable {
 			continue // creating/deleting/failed: nothing to do, and delete would fail
+		}
+		if err := GuardDelete(acct.accountID, "placement group "+name, tagMap(pg.Tags)); err != nil {
+			log.Printf("net-resources: %s/%s: kept: %v", acct.label, region, err)
+			continue
 		}
 		age, ok := netResourceAge(pg.Tags, now)
 		grace := netResourceGrace

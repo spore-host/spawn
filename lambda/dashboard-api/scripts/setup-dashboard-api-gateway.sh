@@ -10,6 +10,12 @@ API_NAME="spawn-dashboard-api"
 REGION="us-east-1"
 DOMAIN_NAME="api.spore.host"
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=dashboard-api
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-api/scripts/setup-dashboard-api-gateway.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../../scripts/lib/service-tags.sh"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Setting up API Gateway for Dashboard"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -50,7 +56,7 @@ API_ID=$(aws apigatewayv2 create-api \
     --protocol-type HTTP \
     --description "Dashboard API for spawn instance viewer" \
     --cors-configuration AllowOrigins='*',AllowMethods='GET,POST,OPTIONS',AllowHeaders='Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token',AllowCredentials=false \
-    --tags spawn:managed=true,spawn:purpose=dashboard-api \
+    --tags "spawn:managed=true,spawn:purpose=dashboard-api,${SPORE_SERVICE_TAGS_MAP}" \
     --query 'ApiId' \
     --output text 2>/dev/null || aws apigatewayv2 get-apis --profile "$PROFILE" --region "$REGION" --query "Items[?Name=='${API_NAME}'].ApiId" --output text)
 

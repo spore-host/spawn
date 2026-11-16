@@ -131,7 +131,7 @@ func runNetSweepMode(t *testing.T, f *fakeNetAPI, dryRun bool, mode string) (*Su
 	// The Elastic IP sweep has its own switch (#1232); these tests are about the
 	// group sweep, so it is off here unless a test asks for it.
 	r := &reaper{dryRun: dryRun, netResources: mode, elasticIPs: elasticIPsOff}
-	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
+	acct := account{label: "self", accountID: "111111111111", netFor: func(string) netResourceAPI { return f }}
 	sum := &Summary{}
 	out := &accountOutcome{}
 	r.reapNetResourcesRegion(context.Background(), acct, "us-east-1", time.Now(), sum, out)
@@ -312,7 +312,7 @@ func TestNetSweepReadsEveryPageOfGroups(t *testing.T) {
 		sg("sg-3", "spawn-mpi-3", netResourceGrace+time.Hour, now),
 	}}}
 	r := &reaper{netResources: netResourcesReap, elasticIPs: elasticIPsOff}
-	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
+	acct := account{label: "self", accountID: "111111111111", netFor: func(string) netResourceAPI { return f }}
 	r.reapNetResourcesRegion(context.Background(), acct, "us-east-1", now, &Summary{}, &accountOutcome{})
 	if got := strings.Join(f.deletedSG, ","); got != "sg-1,sg-2,sg-3" || f.describeSGCalls != 3 {
 		t.Errorf("deleted %q over %d describe calls, want all three groups over three pages", got, f.describeSGCalls)

@@ -5,7 +5,9 @@
 # Usage: ./setup-lambda-deploy-ci-role.sh [--delete]
 #
 # What it may do, and nothing else: replace a named function's code, read its
-# configuration, and restamp its spawn:* tags. It cannot touch IAM, a function's
+# configuration, restamp its spawn:* tags, and add the spore-host:role,
+# spore-host:component and spore-host:deployed-by service tags
+# (spore-host/spore-host#750). It cannot touch IAM, a function's
 # configuration or environment, an event-source mapping or a CloudFormation
 # stack; those stay manual deploys, listed as such by scripts/deploychecklist
 # (#1444).
@@ -37,6 +39,13 @@ FUNCTIONS=(
   spawn-sweep-orchestrator
   spawn-ttl-reaper-production
 )
+
+# The role's own service tags (#750). It belongs to no one Lambda, so its
+# component is lambda-deploy-ci.
+SPORE_SERVICE_COMPONENT=lambda-deploy-ci
+SPORE_SERVICE_DEPLOYED_BY=scripts/setup-lambda-deploy-ci-role.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
 
 EXPECTED_ACCOUNT="${SPAWN_LAMBDA_ACCOUNT:-966362334030}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -109,7 +118,7 @@ POLICY_DOCUMENT=$(cat <<EOF
       "Resource": [${ARNS}],
       "Condition": {
         "ForAllValues:StringEquals": {
-          "aws:TagKeys": ["spawn:version", "spawn:managed", "spawn:component", "spawn:created-by"]
+          "aws:TagKeys": ["spawn:version", "spawn:managed", "spawn:component", "spawn:created-by", "spore-host:role", "spore-host:component", "spore-host:deployed-by"]
         }
       }
     }
@@ -121,13 +130,15 @@ EOF
 if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
   aws iam update-assume-role-policy --role-name "$ROLE_NAME" --policy-document "$TRUST_POLICY"
   echo "updated trust policy of $ROLE_NAME"
+  # create-role's --tags below never ran for it (#750). tag-role merges.
+  spore_tag_role "$ROLE_NAME"
 else
   aws iam create-role \
     --role-name "$ROLE_NAME" \
     --assume-role-policy-document "$TRUST_POLICY" \
     --max-session-duration 3600 \
     --description "GitHub Actions (spore-host/spawn, production environment): code-only deploys of the operated Lambdas (#1445)" \
-    --tags Key=spawn:managed,Value=true Key=spawn:purpose,Value=lambda-deploy-ci Key=spawn:created-by,Value=scripts/setup-lambda-deploy-ci-role.sh \
+    --tags Key=spawn:managed,Value=true Key=spawn:purpose,Value=lambda-deploy-ci Key=spawn:created-by,Value=scripts/setup-lambda-deploy-ci-role.sh "${SPORE_SERVICE_TAGS_LIST[@]}" \
     >/dev/null
   echo "created role $ROLE_NAME"
 fi

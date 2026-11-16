@@ -9,6 +9,16 @@ STACK_NAME="${SPAWN_STACK_NAME:-spawn-schedules}"
 REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${SPAWN_ENVIRONMENT:-production}"
 
+# The spore-host:* service tags (spore-host/spore-host#750), as stack tags, which
+# CloudFormation propagates to both tables. The template carries the same three
+# on each table, so a stack deployed some other way gets them too. Passed on
+# update as well: update-stack with --tags REPLACES the stack's tag set, so it
+# carries the original two alongside.
+SPORE_SERVICE_COMPONENT=scheduler-handler
+SPORE_SERVICE_DEPLOYED_BY=scripts/setup-schedules-dynamodb.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
+
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
@@ -75,7 +85,7 @@ if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$RE
         --template-body "file://${TEMPLATE_FILE}" \
         --parameters "ParameterKey=Environment,ParameterValue=${ENVIRONMENT}" \
         --region "$REGION" \
-        --tags "Key=Application,Value=spawn" "Key=Component,Value=scheduler"
+        --tags "Key=Application,Value=spawn" "Key=Component,Value=scheduler" "${SPORE_SERVICE_TAGS_LIST[@]}"
 
     echo "Waiting for stack creation to complete..."
     aws cloudformation wait stack-create-complete \
@@ -97,6 +107,7 @@ else
         --stack-name "$STACK_NAME" \
         --template-body "file://${TEMPLATE_FILE}" \
         --parameters "ParameterKey=Environment,ParameterValue=${ENVIRONMENT}" \
+        --tags "Key=Application,Value=spawn" "Key=Component,Value=scheduler" "${SPORE_SERVICE_TAGS_LIST[@]}" \
         --region "$REGION" 2>&1 >/dev/null)
     UPDATE_RC=$?
     set -e

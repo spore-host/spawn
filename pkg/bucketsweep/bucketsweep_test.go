@@ -426,3 +426,21 @@ func TestClearEmptySince(t *testing.T) {
 		t.Errorf("unstamped bucket: err = %v, calls = %v", err, g.calls)
 	}
 }
+
+// A bucket tagged spore-host:role=service is part of spore.host's own service
+// (spore-host/spore-host#750): kept, unstamped and undeleted, even when it is
+// empty and long past the grace.
+func TestAServiceBucketIsNeverDeleted(t *testing.T) {
+	for _, b := range []Bucket{staging, results} {
+		tags := stampedDaysAgo(30)
+		tags["spore-host:role"] = "service"
+		f := &fakeS3{tags: tags}
+		got := Sweep(context.Background(), f, b, reap)
+		if got.Action != Kept {
+			t.Errorf("%s: action = %s (%s), want %s", b.Name, got.Action, got.Reason, Kept)
+		}
+		if f.called("DeleteBucket") || f.wrote() {
+			t.Errorf("%s: a service bucket was deleted or retagged", b.Name)
+		}
+	}
+}

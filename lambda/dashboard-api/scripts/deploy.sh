@@ -17,6 +17,13 @@ if [ "$ACCOUNT_ID" != "$EXPECTED_ACCOUNT" ]; then
   exit 1
 fi
 
+# The spore-host:* service tags (spore-host/spore-host#750). Sourced before the
+# cd below, because the path is relative to this script.
+SPORE_SERVICE_COMPONENT=dashboard-api
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-api/scripts/deploy.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../../scripts/lib/service-tags.sh"
+
 echo "Building Lambda function..."
 cd "$(dirname "$0")/.."
 GOOS=linux GOARCH=amd64 go build -o bootstrap .
@@ -46,7 +53,7 @@ FUNCTION_ARN=$(aws lambda get-function-configuration --profile "$PROFILE" \
   --query FunctionArn --output text)
 aws lambda tag-resource --profile "$PROFILE" \
   --resource "$FUNCTION_ARN" \
-  --tags "spawn:managed=true,spawn:component=dashboard-api,spawn:created-by=lambda/dashboard-api/scripts/deploy.sh,spawn:version=$SPAWN_VERSION" \
+  --tags "spawn:managed=true,spawn:component=dashboard-api,spawn:created-by=lambda/dashboard-api/scripts/deploy.sh,spawn:version=$SPAWN_VERSION,${SPORE_SERVICE_TAGS_MAP}" \
   --region "us-east-1" >/dev/null
 echo "stamped spawn:version=$SPAWN_VERSION"
 
@@ -60,6 +67,7 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
 # making its own, so this is safe and idempotent.
 aws logs create-log-group \
   --log-group-name "/aws/lambda/$FUNCTION_NAME" \
+  --tags "$SPORE_SERVICE_TAGS_MAP" \
   --profile "$PROFILE" --region "us-east-1" 2>/dev/null || true  # swallow-ok: already exists; any other failure fails put-retention-policy next
 # Fatal now: with the group created above, a failure here is real.
 aws logs put-retention-policy --profile "$PROFILE" \
@@ -67,6 +75,9 @@ aws logs put-retention-policy --profile "$PROFILE" \
   --retention-in-days "$LOG_RETENTION_DAYS" \
   --region "us-east-1"
 echo "log retention: ${LOG_RETENTION_DAYS}d on /aws/lambda/$FUNCTION_NAME"
+# The --tags above reach only a group this run created; an existing one is
+# tagged here, on every deploy (#750).
+spore_tag_log_group "/aws/lambda/$FUNCTION_NAME" "us-east-1" "$ACCOUNT_ID" --profile "$PROFILE"
 
 # Cleanup
 rm -f bootstrap dashboard-api.zip

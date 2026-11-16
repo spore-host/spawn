@@ -85,10 +85,13 @@ type prepared struct {
 	beforeSha  string
 	prevTag    string
 	hadPrevTag bool
-	stack      string
-	zip        string // path to the built zip
-	localSha   string
-	saved      string // path to the live code, for rollback
+	// service is the spore-host:* service tags the function lacks (#750),
+	// written with the version stamp.
+	service  map[string]string
+	stack    string
+	zip      string // path to the built zip
+	localSha string
+	saved    string // path to the live code, for rollback
 }
 
 func (d *deployer) getConfig(ctx context.Context, fn string) (map[string]any, error) {
@@ -254,6 +257,7 @@ func (d *deployer) save(ctx context.Context, p *prepared) error {
 		return fmt.Errorf("%s: code changed during pre-flight (%s, then %s)", fn, p.beforeSha, g.Configuration.CodeSha256)
 	}
 	p.prevTag, p.hadPrevTag = g.Tags[versionTag]
+	p.service = missingServiceTags(g.Tags, serviceTags(p.t.Lambda))
 	p.stack = g.Tags["aws:cloudformation:stack-name"]
 	b, err := d.fetch(ctx, g.Code.Location)
 	if err != nil {
@@ -304,16 +308,24 @@ func (d *deployer) pushCode(ctx context.Context, fn, zip, wantSha, revision stri
 	return cfg, nil
 }
 
-func (d *deployer) stamp(ctx context.Context, p *prepared, value string) error {
-	if _, err := d.callLambda(ctx, "tag-resource", "--resource", p.arn, "--tags", versionTag+"="+value); err != nil {
+// stamp writes spawn:version=value and any extra tags in one call, and reads
+// them all back.
+func (d *deployer) stamp(ctx context.Context, p *prepared, value string, extra map[string]string) error {
+	tags := map[string]string{versionTag: value}
+	for k, v := range extra {
+		tags[k] = v
+	}
+	if _, err := d.callLambda(ctx, "tag-resource", "--resource", p.arn, "--tags", tagList(tags)); err != nil {
 		return err
 	}
 	g, err := d.getFunction(ctx, p.t.Function)
 	if err != nil {
 		return err
 	}
-	if got := g.Tags[versionTag]; got != value {
-		return fmt.Errorf("%s: %s reads %q after stamping %q", p.t.Function, versionTag, got, value)
+	for k, v := range tags {
+		if got := g.Tags[k]; got != v {
+			return fmt.Errorf("%s: %s reads %q after stamping %q", p.t.Function, k, got, v)
+		}
 	}
 	return nil
 }
@@ -367,10 +379,13 @@ func (d *deployer) deployOne(ctx context.Context, p *prepared, r *result) error 
 	if b, a := p.snapshot["RuntimeVersionConfig"], after["RuntimeVersionConfig"]; !reflect.DeepEqual(b, a) {
 		r.Notes = append(r.Notes, fmt.Sprintf("runtime version moved with the update (Lambda runtime management): %v -> %v", b, a))
 	}
-	if p.prevTag != d.version || !p.hadPrevTag {
+	if p.prevTag != d.version || !p.hadPrevTag || len(p.service) > 0 {
 		stamped = true
-		if err := d.stamp(ctx, p, d.version); err != nil {
+		if err := d.stamp(ctx, p, d.version, p.service); err != nil {
 			return fail(err)
+		}
+		if len(p.service) > 0 {
+			r.Notes = append(r.Notes, "service tags added (verified): "+tagList(p.service))
 		}
 	}
 	r.VersionStamp = fmt.Sprintf("%s=%s (verified)", versionTag, d.version)
@@ -415,10 +430,15 @@ func (d *deployer) rollback(ctx context.Context, p *prepared, r *result, stamped
 			notes = append(notes, "after rollback the configuration still differs: "+strings.Join(diff, ", "))
 		}
 	}
+	if stamped && len(p.service) > 0 {
+		// Left in place: they describe what the function is, not which
+		// release it runs, so they are as true after the rollback as before.
+		notes = append(notes, "service tags kept: "+tagList(p.service))
+	}
 	if stamped {
 		switch {
 		case p.hadPrevTag:
-			if err := d.stamp(ctx, p, p.prevTag); err != nil {
+			if err := d.stamp(ctx, p, p.prevTag, nil); err != nil {
 				ok = false
 				notes = append(notes, "restoring "+versionTag+"="+p.prevTag+" FAILED: "+err.Error())
 			} else {
@@ -536,6 +556,9 @@ func (d *deployer) run(ctx context.Context, c *checklist) (rec *record, err erro
 					prev = "(none)"
 				}
 				r.Notes = append(r.Notes, fmt.Sprintf("would stamp %s=%s (now %s)", versionTag, d.version, prev))
+			}
+			if len(p.service) > 0 {
+				r.Notes = append(r.Notes, "would add service tags "+tagList(p.service))
 			}
 			r.VersionStamp = "not stamped (dry run)"
 			r.ConfigDiff = "not checked (dry run)"

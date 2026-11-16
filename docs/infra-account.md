@@ -226,6 +226,63 @@ backfill, not a gap — **0.126.1 and `spored-windows-amd64.exe` are present in
 every region checked**, so bootstrap is unaffected. Verified rather than assumed,
 because an agent missing from one region would be a silent regional failure.
 
+## Service tags
+
+Every resource above that this repo deploys carries three tags besides its
+`spawn:*` ones (spore-host/spore-host#750):
+
+| tag | value |
+|---|---|
+| `spore-host:role` | `service` |
+| `spore-host:component` | `dashboard-api`, `dashboard-websocket`, `dashboard-websocket-processor`, `dns-updater`, `pipeline-orchestrator`, `sweep-orchestrator`, `cost-history-collector`, `scheduler-handler`, `ttl-reaper`, or `lambda-deploy-ci` for the CI deploy role. spore-host's own components use `rest-api` and `spore-bot` |
+| `spore-host:deployed-by` | the repo-relative path of the deploy mechanism, for example `scripts/deploy-sweep-orchestrator.sh` or `lambda/ttl-reaper/template.yaml` |
+
+They exist because `spawn:managed=true` is also the tag on workload litter, so
+a classifier working from it marked 12 live service resources as litter.
+`spawn:managed` stays: the CI role's tag allow-list and other code rely on it.
+
+**Where they are set.** Shell scripts take the keys from
+`scripts/lib/service-tags.sh`. Go code takes them from `pkg/servicetags`, and the
+CI deployer from `scripts/deploylambdas/servicetags.go`. A test keeps the three
+copies in step.
+
+- Lambda deploy scripts tag the function and its log group on every deploy,
+  and the role they create on create. `deploy-custom-dns.sh` also tags an
+  existing role.
+- Role and table setup scripts tag on create, and tag an existing role or
+  table when they run again. Bucket setup merges the tags into the bucket's
+  existing set.
+- The SAM templates tag the function (with `PropagateTags`, so the generated
+  role and schedule rule too), the log group, the table and the event bus.
+- `scripts/setup-schedules-dynamodb.sh` passes them as stack tags, and
+  `schedules-tables.yaml` and `scheduler-handler-role.yaml` declare them on
+  their resources.
+- The CI deployer adds whichever of the three a function lacks, in the same
+  `tag-resource` call as `spawn:version`. It overwrites a wrong role or
+  component, but keeps an existing `deployed-by`.
+- `spawn schedule create` tags a `spawn-schedules-<region>` bucket that it
+  creates.
+
+**Gates.** `TestServiceCreatesCarryTheServiceTags` in
+`scripts/deploy_scripts_test.go` fails a script that creates a role, table, log
+group, function, queue, bucket, API, domain or stack without the tags.
+`make lambda-versions` fails a SAM template whose function lacks
+`spore-host:role: service`.
+
+**Resources no deploy path covers.** These were built by hand, or their deploy
+path tags only on create: the umbrella repo's `spore-rest-api`, its tables,
+`spawn-ws-tickets` and the existing tables, buckets, rules and APIs. They are
+tagged once by spore-host's [retag-service-resources.sh](https://github.com/spore-host/spore-host/blob/main/scripts/retag-service-resources.sh). It runs as a
+dry run by default, needs `--apply` to write, and refuses any account but this
+one.
+
+**What the tags buy.** The TTL reaper's orphan sweeps refuse this account
+outright: `GuardTeardown` in `lambda/ttl-reaper/serviceguard.go`. They also
+refuse an account whose ID they could not resolve. In every account they keep
+anything tagged `spore-host:role=service` (`GuardDelete`, and the same rule in
+`pkg/bucketsweep`, `pkg/instancerole` and `pkg/poolqueue`). The idle teardown
+(#1654) must call the same two checks.
+
 ## What nothing reaps
 
 The reaper and `spawn cleanup` cover instances and their attachments. Nothing
@@ -285,7 +342,9 @@ the main module's `go` directive, and the deploy script or template itself.
 - **removed**: nothing deploys it any more, so tear down what it created.
 
 **The CI deploy role.** `GitHubActions-spawn-lambda-deploy` (#1445) is what
-the deploy job assumes for **code-only** lines. Create or update it with
+the deploy job assumes for **code-only** lines. It may tag a function with
+`spawn:version`, `spawn:managed`, `spawn:component`, `spawn:created-by` and the
+three `spore-host:*` service keys, and nothing else. Create or update it with
 `AWS_PROFILE=spore-host-infra scripts/setup-lambda-deploy-ci-role.sh`, and
 remove it with `--delete`. It trusts only
 `repo:spore-host/spawn:environment:production`, so its strength is that
@@ -380,7 +439,8 @@ Then, one function at a time:
    the code, update-status and runtime-version fields. Lambda moves the runtime
    version on an update under automatic runtime management, and the record
    notes when it does.
-5. Stamp `spawn:version` and read it back.
+5. Stamp `spawn:version` and read it back. Any service tag the function lacks
+   is added in the same call and read back too.
 
 A function that already runs the identical build (a re-run, since the zip is
 reproducible) is only stamped.

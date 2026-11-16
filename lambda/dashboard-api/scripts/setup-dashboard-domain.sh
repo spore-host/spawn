@@ -7,6 +7,12 @@ set -e
 PROFILE=${1:-default}
 API_NAME="spawn-dashboard-api"
 REGION="us-east-1"
+
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=dashboard-api
+SPORE_SERVICE_DEPLOYED_BY=lambda/dashboard-api/scripts/setup-dashboard-domain.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/../../../scripts/lib/service-tags.sh"
 DOMAIN_NAME="api.spore.host"
 HOSTED_ZONE_NAME="spore.host"
 
@@ -93,7 +99,7 @@ DOMAIN_NAME_ID=$(aws apigatewayv2 create-domain-name \
     --region "$REGION" \
     --domain-name "$DOMAIN_NAME" \
     --domain-name-configurations CertificateArn="$CERT_ARN" \
-    --tags spawn:managed=true,spawn:purpose=dashboard-api \
+    --tags "spawn:managed=true,spawn:purpose=dashboard-api,${SPORE_SERVICE_TAGS_MAP}" \
     --query 'DomainName' \
     --output text 2>/dev/null || echo "$DOMAIN_NAME")
 

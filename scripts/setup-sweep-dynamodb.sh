@@ -4,6 +4,12 @@ set -e
 TABLE_NAME="spawn-sweep-orchestration"
 REGION="us-east-1"
 
+# The spore-host:* service tags (spore-host/spore-host#750).
+SPORE_SERVICE_COMPONENT=sweep-orchestrator
+SPORE_SERVICE_DEPLOYED_BY=scripts/setup-sweep-dynamodb.sh
+# shellcheck source=scripts/lib/service-tags.sh
+. "$(dirname "$0")/lib/service-tags.sh"
+
 echo "Creating DynamoDB table for sweep orchestration..."
 
 # Create table
@@ -30,6 +36,7 @@ aws dynamodb create-table \
   }]' \
   --billing-mode PROVISIONED \
   --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+  --tags Key=spawn:managed,Value=true "${SPORE_SERVICE_TAGS_LIST[@]}" \
   2>/dev/null || echo "Table already exists"
 
 # Wait for table to be active
@@ -47,5 +54,8 @@ aws dynamodb update-continuous-backups \
   --table-name "$TABLE_NAME" \
   --region "$REGION" \
   --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true 2>/dev/null || true
+
+# create-table's --tags reach only a table this run created (#750).
+spore_tag_table "$TABLE_NAME" "$REGION"
 
 echo "✅ DynamoDB table $TABLE_NAME configured successfully"

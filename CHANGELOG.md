@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Every deploy path for spore.host's own service now tags what it deploys
+  `spore-host:role=service`, `spore-host:component=<id>` and
+  `spore-host:deployed-by=<repo path of the deploy mechanism>`
+  (spore-host/spore-host#750). Most of the infra account's service resources
+  carried only `spawn:managed=true`, the tag spawn also puts on workload
+  litter, and a litter classifier marked 12 live ones as litter. Covered: the
+  Lambda deploy scripts (function, log group and, where they create it, role),
+  the role, table, bucket and API Gateway setup scripts, both SAM templates
+  (function, generated role and schedule rule, log group, table, event bus),
+  the schedules-tables stack and the scheduler-handler role template, and the
+  CI deployer, which adds any service tag a function lacks with its
+  `spawn:version` stamp. `spawn:managed` stays. The tags come from
+  `scripts/lib/service-tags.sh` and `pkg/servicetags`; a test fails a deploy
+  script that creates a role, table, log group, function, queue, bucket, API or
+  stack without them, and the version census fails a SAM template that
+  declares a function without `spore-host:role: service`. Taking effect needs a
+  redeploy of each component, and `scripts/setup-lambda-deploy-ci-role.sh`
+  rerun so the CI role may write the three new keys.
+- The TTL reaper refuses to run its orphan sweeps (network resources, empty
+  buckets, per-task roles, pool queues) against spore.host's infra account,
+  966362334030, or against an account whose ID it could not resolve, and never
+  deletes a resource tagged `spore-host:role=service` in any account
+  (spore-host/spore-host#750). `GuardTeardown` and `GuardDelete` in
+  `lambda/ttl-reaper/serviceguard.go` are the checks the idle teardown
+  (#1654) will call. The same keep rule is in the bucket, role and pool-queue
+  sweeps `spawn cleanup` shares, so it keeps a service-tagged resource too.
+- A `spawn-schedules-<region>` bucket that `spawn schedule create` creates is
+  tagged as a service bucket of `scheduler-handler`. The command now also calls
+  `s3:PutBucketTagging` when it creates the bucket; without the grant it warns
+  and carries on (spore-host/spore-host#750).
+
 ### Fixed
 
 - `spawn egress-proxy delete` no longer leaves the VPC's two security groups
@@ -28,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DescribeSecurityGroups`, not only the first, and logs a security group it
   cannot delete because something still references it (`DependencyViolation`)
   instead of skipping it silently (#1651).
+
+### Documentation
+
+- `spawn notify`'s reference page shows its `<TEAMS_TENANT_ID>` and
+  `<AZURE_BOT_CLIENT_SECRET>` placeholders again: libs v0.52.0 (taken for its
+  `tags` package) carries libs v0.51.5's docgen fix for wrapped help lines.
 
 ## [0.167.0] - 2026-11-15
 

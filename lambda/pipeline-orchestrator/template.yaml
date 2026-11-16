@@ -56,6 +56,13 @@ Resources:
           Value: spawn
         - Key: Component
           Value: pipeline-orchestrator
+        # spore-host:* service tags (spore-host/spore-host#750).
+        - Key: spore-host:role
+          Value: service
+        - Key: spore-host:component
+          Value: pipeline-orchestrator
+        - Key: spore-host:deployed-by
+          Value: lambda/pipeline-orchestrator/template.yaml
 
   # Lambda function
   PipelineOrchestratorFunction:
@@ -177,6 +184,14 @@ Resources:
         spawn:component: pipeline-orchestrator
         spawn:created-by: sam deploy
         spawn:version: !Ref Version
+        # spore-host:* service tags (spore-host/spore-host#750): this is spore.host's
+        # own service, not workload litter. Cleanup never deletes role=service.
+        spore-host:role: service
+        spore-host:component: pipeline-orchestrator
+        spore-host:deployed-by: lambda/pipeline-orchestrator/template.yaml
+      # Tags reach the generated role and every other generated resource, not
+      # only the function.
+      PropagateTags: true
 
   # CloudWatch Log Group with retention
   PipelineOrchestratorLogGroup:
@@ -184,6 +199,14 @@ Resources:
     Properties:
       LogGroupName: /aws/lambda/spawn-pipeline-orchestrator
       RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        # spore-host:* service tags (spore-host/spore-host#750).
+        - Key: spore-host:role
+          Value: service
+        - Key: spore-host:component
+          Value: pipeline-orchestrator
+        - Key: spore-host:deployed-by
+          Value: lambda/pipeline-orchestrator/template.yaml
 
   # EventBridge rule for scheduled execution (optional) - Commented out to avoid circular dependency
   # Can be added manually if needed
