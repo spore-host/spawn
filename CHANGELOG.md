@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Linux bootstrap installs AWS CLI 2.40.3 instead of 2.39.3 on an image with no aws CLI** (#1495). This changes the published bootstrap body, so deploy the sweep orchestrator from the release that ships it, as the deploy checklist says. Both installer zips' signatures verified against the AWS CLI team's PGP key (`FB5DB77FD5C118B80511ADA8A6310ACC4672475C`) before their sha256s were pinned: x86_64 `4770c06c4ecfc8ba94b60d89e6c7018ab7ea2cf5341b1ef05f6f93c5d6e8b705`, aarch64 `4c5f080c6c294eb0da77734c4520f5b5089cf45a4ee757ca34ddf7f9e512e66a`. Opened by the weekly AWS CLI pin workflow.
+
 ## [0.167.0] - 2026-11-15
 
 ### Changed
