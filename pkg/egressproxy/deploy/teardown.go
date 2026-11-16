@@ -21,11 +21,17 @@ import (
 const (
 	// TerminateTimeout bounds the wait for proxies to reach terminated.
 	TerminateTimeout = 5 * time.Minute
-	// GroupDeleteTimeout bounds the retries of a group delete EC2 refuses
-	// with DependencyViolation: a terminated instance's interface is
-	// released a little after the instance reports terminated.
-	GroupDeleteTimeout = 2 * time.Minute
-	// teardownPoll is the gap between polls of both waits.
+	// ENIReleaseTimeout bounds the wait, once no instance carries a group,
+	// for the network interfaces still carrying it to be released: a
+	// terminated instance's interface outlives it for a while (#1651).
+	ENIReleaseTimeout = 5 * time.Minute
+	// GroupDeleteTimeout bounds the retries, with backoff, of a group delete
+	// EC2 refuses with DependencyViolation, for both groups together. It was
+	// two minutes, which a real teardown outlasted, leaving both groups
+	// behind (#1651).
+	GroupDeleteTimeout = 10 * time.Minute
+	// teardownPoll is the gap between polls of the terminate and interface
+	// waits.
 	teardownPoll = 10 * time.Second
 )
 
@@ -70,24 +76,51 @@ type DeleteResult struct {
 	Terminated []string
 	// DeletedGroups are the group IDs it deleted.
 	DeletedGroups []string
-	// Kept is the group it left because an instance still carries it, and
-	// every group after it in [DeleteGroups]'s order; nil when none.
-	Kept *GroupInUseError
+	// Kept are the groups it left because something still uses or
+	// references them, each with why; nil when none. Each is also in the
+	// error Delete returns.
+	Kept []*GroupInUseError
 }
 
-// Delete carries out plan: it terminates plan.Terminate, waits up to timeout
-// ([TerminateTimeout] when zero) for them and plan.Await to be terminated,
-// then deletes the VPC's groups with [DeleteGroups], the proxy group first. A
-// group an instance still carries is kept and reported in Kept, not an error:
-// the clients group stays while members carry it, and the TTL reaper's
-// managed-network sweep collects it once nothing does. A refused instance is
-// never touched; if it carries the proxy group, that group is kept too.
-func Delete(ctx context.Context, d Deps, plan DeletePlan, timeout time.Duration) (DeleteResult, error) {
+// DeleteOptions bound [Delete]'s waits; each is its default when zero.
+type DeleteOptions struct {
+	// Terminate bounds the wait for the proxies to be terminated
+	// ([TerminateTimeout]).
+	Terminate time.Duration
+	// ENIRelease bounds the wait for network interfaces to release the
+	// groups ([ENIReleaseTimeout]).
+	ENIRelease time.Duration
+	// GroupDelete bounds the DependencyViolation retries ([GroupDeleteTimeout]).
+	GroupDelete time.Duration
+}
+
+// Delete carries out plan, leaving nothing behind it can remove (#1651):
+//
+//  1. it terminates plan.Terminate and waits up to opts.Terminate for them
+//     and plan.Await to be terminated;
+//  2. it waits up to opts.ENIRelease until no network interface carries
+//     either group;
+//  3. it revokes the rules where one group names the other;
+//  4. it deletes both groups, retrying a DependencyViolation with backoff for
+//     up to opts.GroupDelete, and trying each whatever happened to the other.
+//
+// A step that fails does not stop the ones after it: a proxy that did not
+// finish terminating still carries its group, so that group is kept rather
+// than deleted, and is reported. A group something still uses (members carry
+// the clients group; a refused instance, which is never touched, may carry
+// the proxy group) is kept and reported in Kept; the TTL reaper's
+// managed-network sweep collects it once nothing does.
+//
+// The error joins every failure, kept groups among them, so it is nil only
+// when the proxies are terminated and both groups are gone.
+func Delete(ctx context.Context, d Deps, plan DeletePlan, opts DeleteOptions) (DeleteResult, error) {
 	var res DeleteResult
+	var errs []error
 	var wait []string
 	for _, p := range plan.Terminate {
 		if err := Terminate(ctx, d.EC2, p.InstanceID); err != nil {
-			return res, err
+			errs = append(errs, err)
+			continue
 		}
 		res.Terminated = append(res.Terminated, p.InstanceID)
 		wait = append(wait, p.InstanceID)
@@ -95,17 +128,16 @@ func Delete(ctx context.Context, d Deps, plan DeletePlan, timeout time.Duration)
 	for _, p := range plan.Await {
 		wait = append(wait, p.InstanceID)
 	}
-	if err := WaitTerminated(ctx, d, wait, timeout); err != nil {
-		return res, err
+	if err := WaitTerminated(ctx, d, wait, opts.Terminate); err != nil {
+		errs = append(errs, err)
 	}
-	deleted, err := deleteGroupsRetrying(ctx, d, plan.VPCID, GroupDeleteTimeout)
-	res.DeletedGroups = deleted
-	var inUse *GroupInUseError
-	if errors.As(err, &inUse) {
-		res.Kept = inUse
-		return res, nil
-	}
-	return res, err
+	deleted, kept, err := groupDeleter{
+		d: d, vpcID: plan.VPCID,
+		eniWait:    orDefault(opts.ENIRelease, ENIReleaseTimeout),
+		deleteWait: orDefault(opts.GroupDelete, GroupDeleteTimeout),
+	}.run(ctx)
+	res.DeletedGroups, res.Kept = deleted, kept
+	return res, errors.Join(append(errs, err)...)
 }
 
 // ErrTerminateTimeout is wrapped when proxies did not reach terminated in time.
@@ -158,23 +190,6 @@ func notTerminated(ctx context.Context, api EC2, ids []string) ([]string, error)
 		}
 	}
 	return left, nil
-}
-
-// deleteGroupsRetrying is [DeleteGroups], retried while EC2 refuses a delete
-// with DependencyViolation (an interface still being released), up to timeout.
-func deleteGroupsRetrying(ctx context.Context, d Deps, vpcID string, timeout time.Duration) ([]string, error) {
-	deadline := d.now().Add(timeout)
-	var all []string
-	for {
-		deleted, err := DeleteGroups(ctx, d.EC2, vpcID)
-		all = append(all, deleted...)
-		if err == nil || !strings.Contains(err.Error(), "DependencyViolation") || !d.now().Before(deadline) {
-			return all, err
-		}
-		if serr := d.sleep(ctx, minDuration(teardownPoll, deadline.Sub(d.now()))); serr != nil {
-			return all, err
-		}
-	}
 }
 
 func minDuration(a, b time.Duration) time.Duration {

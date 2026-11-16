@@ -82,8 +82,11 @@ var egressProxyDeleteCmd = &cobra.Command{
 	Use:   "delete",
 	Short: "Terminate a VPC's egress proxy and delete its security groups",
 	Long: `Terminate the egress proxy instances of a VPC (--vpc) or of every VPC in
-the region (--all), wait until they are terminated, then delete the two
-security groups: the proxy's group first, then the clients group.
+the region (--all), wait until they are terminated and until no network
+interface carries either security group, revoke the rule where one group names
+the other, then delete both groups. Each group is tried whatever happened to
+the other, and a delete EC2 refuses while an interface is being released is
+retried for up to 10 minutes.
 
 Only instances spawn can tell it launched as the VPC's proxy are terminated:
 tagged spawn:egress-proxy=<vpc>, carrying exactly the proxy group, running with
@@ -91,10 +94,12 @@ spored-instance-profile, and with a deadline no later than launch plus the
 proxy's life. A tagged instance that fails these checks is refused, left
 alone, and named with the reason; the command then exits non-zero.
 
-A clients group that member instances still carry is kept, and its users are
-named; the TTL reaper's managed-network sweep deletes it once nothing uses it.
-Members that have finished their bootstrap do not use the proxy, so deleting it
-does not affect them.`,
+A group something still uses (member instances carrying the clients group, a
+network interface not yet released) is kept, and what uses it is named; the TTL
+reaper's managed-network sweep deletes it once nothing does. The command exits
+non-zero whenever a group or proxy it should have removed is left. Members that
+have finished their bootstrap do not use the proxy, so deleting it does not
+affect them.`,
 	Args: cobra.NoArgs,
 	RunE: runEgressProxyDelete,
 }
@@ -583,9 +588,9 @@ func runEgressProxyDelete(cmd *cobra.Command, _ []string) error {
 	if !egressProxyConfirm(egressProxyDeleteYes, "Terminate and delete the above?") {
 		return newAborted("Aborted: no egress proxy was terminated and no group was deleted.")
 	}
-	var failed []string
+	var failed []error
 	for _, p := range plans {
-		res, err := egressProxyDelete(ctx, client.Deps, p, 0)
+		res, err := egressProxyDelete(ctx, client.Deps, p, deploy.DeleteOptions{})
 		for _, id := range res.Terminated {
 			env.audit.LogOperationWithRegion("egress_proxy_terminate", id, region, "success", nil)
 		}
@@ -595,11 +600,13 @@ func runEgressProxyDelete(cmd *cobra.Command, _ []string) error {
 		printEgressProxyDeleteResult(out, p.VPCID, res)
 		if err != nil {
 			env.audit.LogOperationWithRegion("egress_proxy_delete", p.VPCID, region, "failed", err)
-			failed = append(failed, fmt.Sprintf("%s: %v", p.VPCID, err))
+			failed = append(failed, fmt.Errorf("%s: %w", p.VPCID, err))
 		}
 	}
 	if len(failed) > 0 {
-		return errors.Join(fmt.Errorf("egress proxy delete failed in %d VPC(s): %s", len(failed), strings.Join(failed, "; ")), refusedErr())
+		// %w, not %v: a kept group (deploy.ErrGroupsInUse) and a timeout stay
+		// matchable through the wrapper.
+		return errors.Join(fmt.Errorf("egress proxy delete failed in %d VPC(s): %w", len(failed), errors.Join(failed...)), refusedErr())
 	}
 	return refusedErr()
 }
@@ -652,10 +659,10 @@ func printEgressProxyDeleteResult(w io.Writer, vpcID string, res deploy.DeleteRe
 	for _, id := range res.DeletedGroups {
 		fmt.Fprintf(w, "✓ %s: deleted security group %s\n", vpcID, id)
 	}
-	if k := res.Kept; k != nil {
-		fmt.Fprintf(w, "• %s: kept %s (%s): still used by %s. The TTL reaper's managed-network sweep deletes it once no "+
-			"instance uses it (and it is older than the sweep's grace), or run this command again then.\n",
-			vpcID, k.Name, k.ID, strings.Join(k.Users, ", "))
+	for _, k := range res.Kept {
+		fmt.Fprintf(w, "• %s: kept %s (%s): still %s. The TTL reaper's managed-network sweep deletes it once nothing "+
+			"uses it (and it is older than the sweep's grace), or run this command again then.\n",
+			vpcID, k.Name, k.ID, k.Reason())
 	}
 }
 

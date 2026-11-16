@@ -307,8 +307,9 @@ func TestEnsureGroupsRefusesAForeignGroup(t *testing.T) {
 	}
 }
 
-// The deleter: refused while any instance uses a group; otherwise the proxy
-// group first (its rule references the clients group), then the clients one.
+// The deleter: refused while any instance uses a group (and the clients group
+// kept with it, since the kept proxy group's rule names it); otherwise both
+// go, the proxy group first.
 func TestDeleteGroups(t *testing.T) {
 	f := &fakeEC2{}
 	g, err := EnsureGroups(context.Background(), f, testVPC, t0)
@@ -316,14 +317,19 @@ func TestDeleteGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.instances = []types.Instance{goodProxy("i-live", g.ProxyID)}
-	if _, err := DeleteGroups(context.Background(), f, testVPC); !errors.Is(err, ErrGroupsInUse) {
+	_, kept, err := DeleteGroups(context.Background(), f, testVPC)
+	if !errors.Is(err, ErrGroupsInUse) {
 		t.Fatalf("in use: err = %v, want ErrGroupsInUse", err)
 	}
 	if len(f.deleted) != 0 {
 		t.Fatalf("deleted %v while in use", f.deleted)
 	}
+	if len(kept) != 2 || kept[0].ID != g.ProxyID || strings.Join(kept[0].Users, ",") != "i-live" ||
+		kept[1].ID != g.ClientsID || strings.Join(kept[1].ReferencedBy, ",") != g.ProxyID {
+		t.Fatalf("kept %+v, want the proxy group (used by i-live) and the clients group (named by it)", kept)
+	}
 	f.instances[0].State.Name = types.InstanceStateNameTerminated
-	deleted, err := DeleteGroups(context.Background(), f, testVPC)
+	deleted, _, err := DeleteGroups(context.Background(), f, testVPC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +337,7 @@ func TestDeleteGroups(t *testing.T) {
 		t.Errorf("deleted %v, want the proxy group then the clients group", deleted)
 	}
 	// Nothing left: not an error.
-	if deleted, err := DeleteGroups(context.Background(), f, testVPC); err != nil || len(deleted) != 0 {
+	if deleted, _, err := DeleteGroups(context.Background(), f, testVPC); err != nil || len(deleted) != 0 {
 		t.Errorf("second delete: %v, %v", deleted, err)
 	}
 }

@@ -79,7 +79,7 @@ func stubEgressProxyCommands(t *testing.T, inv []deploy.VPCInventory) *egressPro
 		}
 		return out, nil
 	}
-	egressProxyDelete = func(_ context.Context, _ deploy.Deps, p deploy.DeletePlan, _ time.Duration) (deploy.DeleteResult, error) {
+	egressProxyDelete = func(_ context.Context, _ deploy.Deps, p deploy.DeletePlan, _ deploy.DeleteOptions) (deploy.DeleteResult, error) {
 		f.deletes = append(f.deletes, p)
 		return f.deleteRes, f.deleteErr
 	}
@@ -327,17 +327,21 @@ func TestEgressProxyDeleteRefusesAStructuralFailure(t *testing.T) {
 }
 
 // The clients group members still carry is kept, its users named, and the
-// reaper named as what collects it.
+// reaper named as what collects it; and since a group is left behind, the
+// command exits non-zero (#1651: a kept group used to exit 0, so a delete that
+// left both groups looked clean).
 func TestEgressProxyDeleteKeepsAClientsGroupInUse(t *testing.T) {
 	inv := deleteInventory()
 	inv[0].Proxies = inv[0].Proxies[:1]
 	f := stubEgressProxyCommands(t, inv)
 	egressProxyDeleteVPC, egressProxyDeleteYes = "vpc-1", true
+	kept := &deploy.GroupInUseError{Name: "spawn-egress-clients-vpc-1", ID: "sg-clients", Users: []string{"i-m1", "i-m2"}}
 	f.deleteRes = deploy.DeleteResult{Terminated: []string{"i-p"}, DeletedGroups: []string{"sg-proxy"},
-		Kept: &deploy.GroupInUseError{Name: "spawn-egress-clients-vpc-1", ID: "sg-clients", Users: []string{"i-m1", "i-m2"}}}
+		Kept: []*deploy.GroupInUseError{kept}}
+	f.deleteErr = kept
 	out, err := runEP(t, runEgressProxyDelete)
-	if err != nil {
-		t.Fatalf("err = %v: keeping an in-use clients group is not a failure", err)
+	if !errors.Is(err, deploy.ErrGroupsInUse) || exitForError(err) == 0 {
+		t.Fatalf("err = %v (exit %d): a kept group must exit non-zero", err, exitForError(err))
 	}
 	for _, want := range []string{"terminated i-p", "deleted security group sg-proxy",
 		"kept spawn-egress-clients-vpc-1 (sg-clients): still used by i-m1, i-m2", "TTL reaper's managed-network sweep"} {

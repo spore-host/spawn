@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"slices"
 	"strings"
 	"testing"
@@ -255,14 +257,22 @@ func TestNetSweepNeverTouchesTheDefaultSecurityGroup(t *testing.T) {
 
 // TestNetSweepToleratesDependencyViolation: a security group can be referenced by
 // another group's rule or an ENI, which DescribeInstances does not show. That is
-// not an error worth alarming on — the next cycle retries.
+// not an error worth alarming on — the next cycle retries — but it is logged,
+// naming the group and the error, not skipped silently (#1651).
 func TestNetSweepToleratesDependencyViolation(t *testing.T) {
 	now := time.Now()
 	f := &fakeNetAPI{
 		sgs:      []ec2types.SecurityGroup{sg("sg-dep", "spawn-mpi-x", netResourceGrace+time.Hour, now)},
 		sgDelErr: errors.New("DependencyViolation: resource sg-dep has a dependent object"),
 	}
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
 	sum, out := runNetSweep(t, f, false)
+	log.SetOutput(prev)
+	if logged := buf.String(); !strings.Contains(logged, "sg-dep") || !strings.Contains(logged, "DependencyViolation") {
+		t.Errorf("the DependencyViolation was not logged with the group and the error:\n%s", logged)
+	}
 
 	if sum.NetReaped != 0 {
 		t.Errorf("counted a failed delete as reaped")
@@ -273,6 +283,39 @@ func TestNetSweepToleratesDependencyViolation(t *testing.T) {
 	if out.errorsToCount() != 0 {
 		t.Errorf("a DependencyViolation was recorded as an error (%d); it is an expected "+
 			"transient and would alarm on every cycle", out.errorsToCount())
+	}
+}
+
+// pagedNetAPI is fakeNetAPI listing its security groups one per page.
+type pagedNetAPI struct{ *fakeNetAPI }
+
+func (f *pagedNetAPI) DescribeSecurityGroups(_ context.Context, in *ec2.DescribeSecurityGroupsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error) {
+	f.describeSGCalls++
+	i := 0
+	if in.NextToken != nil {
+		i = int(awssdk.ToString(in.NextToken)[0] - '0')
+	}
+	out := &ec2.DescribeSecurityGroupsOutput{SecurityGroups: f.sgs[i : i+1]}
+	if i+1 < len(f.sgs) {
+		out.NextToken = awssdk.String(string(rune('0' + i + 1)))
+	}
+	return out, nil
+}
+
+// TestNetSweepReadsEveryPageOfGroups: a group on a later page of
+// DescribeSecurityGroups is swept too; the sweep read only the first (#1651).
+func TestNetSweepReadsEveryPageOfGroups(t *testing.T) {
+	now := time.Now()
+	f := &pagedNetAPI{&fakeNetAPI{sgs: []ec2types.SecurityGroup{
+		sg("sg-1", "spawn-mpi-1", netResourceGrace+time.Hour, now),
+		sg("sg-2", "spawn-mpi-2", netResourceGrace+time.Hour, now),
+		sg("sg-3", "spawn-mpi-3", netResourceGrace+time.Hour, now),
+	}}}
+	r := &reaper{netResources: netResourcesReap, elasticIPs: elasticIPsOff}
+	acct := account{label: "self", netFor: func(string) netResourceAPI { return f }}
+	r.reapNetResourcesRegion(context.Background(), acct, "us-east-1", now, &Summary{}, &accountOutcome{})
+	if got := strings.Join(f.deletedSG, ","); got != "sg-1,sg-2,sg-3" || f.describeSGCalls != 3 {
+		t.Errorf("deleted %q over %d describe calls, want all three groups over three pages", got, f.describeSGCalls)
 	}
 }
 

@@ -18,8 +18,11 @@ spawn egress-proxy
 ### `spawn egress-proxy delete`
 
 Terminate the egress proxy instances of a VPC (--vpc) or of every VPC in
-the region (--all), wait until they are terminated, then delete the two
-security groups: the proxy's group first, then the clients group.
+the region (--all), wait until they are terminated and until no network
+interface carries either security group, revoke the rule where one group names
+the other, then delete both groups. Each group is tried whatever happened to
+the other, and a delete EC2 refuses while an interface is being released is
+retried for up to 10 minutes.
 
 Only instances spawn can tell it launched as the VPC's proxy are terminated:
 tagged spawn:egress-proxy=&lt;vpc&gt;, carrying exactly the proxy group, running with
@@ -27,10 +30,12 @@ spored-instance-profile, and with a deadline no later than launch plus the
 proxy's life. A tagged instance that fails these checks is refused, left
 alone, and named with the reason; the command then exits non-zero.
 
-A clients group that member instances still carry is kept, and its users are
-named; the TTL reaper's managed-network sweep deletes it once nothing uses it.
-Members that have finished their bootstrap do not use the proxy, so deleting it
-does not affect them.
+A group something still uses (member instances carrying the clients group, a
+network interface not yet released) is kept, and what uses it is named; the TTL
+reaper's managed-network sweep deletes it once nothing does. The command exits
+non-zero whenever a group or proxy it should have removed is left. Members that
+have finished their bootstrap do not use the proxy, so deleting it does not
+affect them.
 
 ```
 spawn egress-proxy delete [flags]

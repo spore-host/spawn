@@ -33,6 +33,23 @@ type fakeEC2 struct {
 	// by ID returns it (a heartbeat appearing, say).
 	onDescribe func(i *types.Instance, call int)
 	describes  int
+
+	// enis are network interfaces that exist apart from any listed
+	// instance's (a terminated proxy's, not yet released, say). One named in
+	// enisFor is released after that many more DescribeNetworkInterfaces
+	// calls, whatever their filter; one not named stays.
+	enis    []types.NetworkInterface
+	enisFor map[string]int
+	// deleteErrs are the errors DeleteSecurityGroup returns for a group
+	// before it deletes it, one per call; deleteErrAlways it returns every
+	// time.
+	deleteErrs      map[string][]error
+	deleteErrAlways map[string]error
+	// eniErr, when set, is DescribeNetworkInterfaces's answer.
+	eniErr error
+	// deleteAttempts are the group IDs DeleteSecurityGroup was called with,
+	// in order, whatever it returned.
+	deleteAttempts []string
 }
 
 func (f *fakeEC2) call(name string) {
@@ -266,6 +283,22 @@ func (f *fakeEC2) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityG
 	defer f.mu.Unlock()
 	f.call("DeleteSecurityGroup")
 	id := aws.ToString(in.GroupId)
+	f.deleteAttempts = append(f.deleteAttempts, id)
+	if err := f.deleteErrAlways[id]; err != nil {
+		return nil, err
+	}
+	if errs := f.deleteErrs[id]; len(errs) > 0 {
+		f.deleteErrs[id] = errs[1:]
+		return nil, errs[0]
+	}
+	// EC2 refuses a group a network interface carries.
+	for _, ni := range f.interfaces() {
+		for _, g := range ni.Groups {
+			if aws.ToString(g.GroupId) == id {
+				return nil, errors.New("api error DependencyViolation: resource " + id + " has a dependent object")
+			}
+		}
+	}
 	// EC2 refuses a group another group's rule references.
 	for _, g := range f.groups {
 		for _, r := range rulesOf(g.IpPermissions) {
@@ -283,6 +316,65 @@ func (f *fakeEC2) DeleteSecurityGroup(_ context.Context, in *ec2.DeleteSecurityG
 	f.groups = keep
 	f.deleted = append(f.deleted, id)
 	return &ec2.DeleteSecurityGroupOutput{}, nil
+}
+
+// interfaces are every network interface: each instance's that is not
+// terminated (one built from its groups when it lists none), and f.enis.
+func (f *fakeEC2) interfaces() []types.NetworkInterface {
+	var out []types.NetworkInterface
+	for _, inst := range f.instances {
+		if inst.State != nil && inst.State.Name == types.InstanceStateNameTerminated {
+			continue
+		}
+		att := &types.NetworkInterfaceAttachment{InstanceId: inst.InstanceId}
+		if len(inst.NetworkInterfaces) == 0 {
+			out = append(out, types.NetworkInterface{NetworkInterfaceId: aws.String("eni-" + aws.ToString(inst.InstanceId)),
+				Groups: inst.SecurityGroups, Attachment: att, Status: types.NetworkInterfaceStatusInUse})
+			continue
+		}
+		for _, ni := range inst.NetworkInterfaces {
+			out = append(out, types.NetworkInterface{NetworkInterfaceId: ni.NetworkInterfaceId,
+				Groups: ni.Groups, Attachment: att, Status: types.NetworkInterfaceStatusInUse})
+		}
+	}
+	return append(out, f.enis...)
+}
+
+func (f *fakeEC2) DescribeNetworkInterfaces(_ context.Context, in *ec2.DescribeNetworkInterfacesInput, _ ...func(*ec2.Options)) (*ec2.DescribeNetworkInterfacesOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.call("DescribeNetworkInterfaces")
+	if f.eniErr != nil {
+		return nil, f.eniErr
+	}
+	var out []types.NetworkInterface
+	for _, ni := range f.interfaces() {
+		if v := filterValues(in.Filters, "group-id"); v != nil {
+			ok := false
+			for _, g := range ni.Groups {
+				ok = ok || contains(v, aws.ToString(g.GroupId))
+			}
+			if !ok {
+				continue
+			}
+		}
+		out = append(out, ni)
+	}
+	// An interface with a count is released after that many listings.
+	var keep []types.NetworkInterface
+	for _, ni := range f.enis {
+		id := aws.ToString(ni.NetworkInterfaceId)
+		if n, ok := f.enisFor[id]; ok {
+			if n <= 1 {
+				delete(f.enisFor, id)
+				continue
+			}
+			f.enisFor[id] = n - 1
+		}
+		keep = append(keep, ni)
+	}
+	f.enis = keep
+	return &ec2.DescribeNetworkInterfacesOutput{NetworkInterfaces: out}, nil
 }
 
 // fakeProber answers the readiness probe.
