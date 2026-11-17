@@ -52,8 +52,11 @@ var creatingExempt = map[string]string{
 // program with a static call to Mark. Each command's reachable code is then
 // walked with the markers as cuts (Program.Calls), and any creating action
 // still reachable is a path that creates without marking. A marker is trusted
-// to mark before it creates; that order, and that a mark never fails the
-// create, are pkg/lifecyclemark's and its callers' unit tests.
+// to mark before it creates; that order, that a mark never fails the create,
+// and that a denied mark shows the user nothing (only a diagnostic log line)
+// are pkg/lifecyclemark's tests and pkg/aws's
+// TestADeniedLeaseMarkIsSilentAndTheCreateProceeds, which runs a real
+// creator with a denied lease.
 func TestEveryCreatorMarksTheLease(t *testing.T) {
 	creating := map[string]bool{}
 	for _, typ := range fs.DeletableTypes() {
@@ -120,6 +123,7 @@ func TestEveryCreatorMarksTheLease(t *testing.T) {
 	if creators == 0 {
 		t.Fatal("no command reaches a creating action at all: the action mapping or the walk has broken")
 	}
+	checkFailIsSilent(t, prog)
 	t.Logf("%d marker functions; %d commands create something", len(markers)-len(creatingExempt), creators)
 }
 
@@ -169,6 +173,52 @@ func checkMarked(t *testing.T, prog *Program, what string, inv Inventory, creati
 
 // callsStatically reports whether f has a call (or go/defer) whose static
 // callee is the function named name.
+// markFail is where every failed mark goes.
+const markFail = "(*github.com/spore-host/spawn/pkg/lifecyclemark.marker).fail"
+
+// checkFailIsSilent: a failed mark prints nothing the user sees. Most users'
+// IAM lacks the lease actions (spawn#1666) and each CLI invocation is a new
+// process, so a print here, even once per process, is a line on every
+// launch. fail may only log, through the marker's diagnostic logger (a call
+// through a func value, which cmd routes to ~/.spawn/spawn.log); it must make
+// no fmt or log call of its own and must not name os.Stdout or os.Stderr.
+// The behaviour, through a real creator, is pkg/aws's
+// TestADeniedLeaseMarkIsSilentAndTheCreateProceeds.
+func checkFailIsSilent(t *testing.T, prog *Program) {
+	t.Helper()
+	f, err := prog.Func(markFail)
+	if err != nil {
+		t.Fatalf("%s: %v (the failure path moved; point this check at it)", markFail, err)
+	}
+	logs := 0
+	for _, b := range f.Blocks {
+		for _, ins := range b.Instrs {
+			for _, op := range ins.Operands(nil) {
+				if g, ok := (*op).(*ssa.Global); ok && (g.String() == "os.Stdout" || g.String() == "os.Stderr") {
+					t.Errorf("%s names %s: a failed mark must not print to the user", markFail, g.String())
+				}
+			}
+			c, ok := ins.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			if callee := c.Common().StaticCallee(); callee != nil {
+				if pkg := callee.Package(); pkg != nil && (pkg.Pkg.Path() == "fmt" && strings.HasPrefix(callee.Name(), "Fprint") ||
+					pkg.Pkg.Path() == "fmt" && strings.HasPrefix(callee.Name(), "Print") || pkg.Pkg.Path() == "log") {
+					t.Errorf("%s calls %s: a failed mark may only use the marker's diagnostic logger", markFail, callee)
+				}
+				continue
+			}
+			if !c.Common().IsInvoke() {
+				logs++ // a call through a func value: the marker's debugf
+			}
+		}
+	}
+	if logs == 0 {
+		t.Errorf("%s makes no diagnostic log call: a failed mark must leave a line in spawn's log", markFail)
+	}
+}
+
 func callsStatically(f *ssa.Function, name string) bool {
 	for _, b := range f.Blocks {
 		for _, ins := range b.Instrs {
@@ -185,7 +235,8 @@ func callsStatically(f *ssa.Function, name string) bool {
 }
 
 // TestLeaseRequiredActionsAreWhatMarkCalls: the actions pkg/lifecyclemark's
-// warning names, and the documented baseline repeats, are exactly the
+// diagnostic log line and `spawn doctor` name, and the documented baseline
+// repeats, are exactly the
 // DynamoDB actions Mark can make (spawn#1654). A list that missed one would
 // send a user to grant something that still fails; one that over-asks is a
 // grant nothing uses.

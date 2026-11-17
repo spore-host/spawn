@@ -10,15 +10,19 @@ import (
 	"strings"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/smithy-go"
+	"github.com/spore-host/libs/lifecycle"
 
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/footprintspawn"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/orgaccount"
 	"github.com/spore-host/spawn/pkg/sshkey"
 	"github.com/spore-host/spawn/pkg/sweep"
@@ -264,6 +268,30 @@ func (p *awsProber) SSMAvailable(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return "reachable", nil
+}
+
+func (p *awsProber) IdleTeardownLease(ctx context.Context) (string, error) {
+	acct, principal, err := p.client.GetCallerIdentityInfo(ctx)
+	if err != nil {
+		return "", fmt.Errorf("could not resolve this identity to check the %s lease table: %v", lifecycle.TableName, err)
+	}
+	if acct == footprintspawn.InfraAccountID {
+		return "not used in spore.host's infra account", nil
+	}
+	region := p.cfg.Region
+	c := p.cfg.Copy()
+	c.Region = region
+	switch err := lifecyclemark.Probe(ctx, dynamodb.NewFromConfig(c)); {
+	case err == nil:
+		return fmt.Sprintf("%s is writable in %s", lifecycle.TableName, region), nil
+	case errors.Is(err, lifecyclemark.ErrNoTable):
+		return fmt.Sprintf("no %s table in %s yet; the first launch creates it", lifecycle.TableName, region), nil
+	default:
+		return "", fmt.Errorf("idle teardown unavailable: the %s lease table isn't writable by %s (%v). Launches are unaffected, "+
+			"but spawn's idle teardown never tears this account down. spore.host does not provision this yet (spawn#1666); "+
+			"an administrator can grant %s on %s", lifecycle.TableName, principal, err,
+			strings.Join(lifecyclemark.RequiredActions, ", "), lifecyclemark.TableARNPattern)
+	}
 }
 
 func (p *awsProber) ReaperConfigured(ctx context.Context) (string, error) {

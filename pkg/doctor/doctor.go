@@ -135,6 +135,12 @@ type Prober interface {
 	// Optional features → Warn (not Fail) when unavailable.
 	ReaperConfigured(ctx context.Context) (detail string, err error)
 	Route53Available(ctx context.Context) (detail string, err error)
+	// IdleTeardownLease reports whether this identity can write the
+	// shared-account lifecycle lease (spore-host-lifecycle, spawn#1654).
+	// Launches never depend on it: a refused mark is silent, and only makes
+	// the account "lease unavailable", never idle-torn-down. This check is
+	// where that is said.
+	IdleTeardownLease(ctx context.Context) (detail string, err error)
 	// NitroCoverage reports what the resolved region's Nitro fleet looks like.
 	//
 	// An environment fact, not an instance-type one — which is why it belongs
@@ -196,7 +202,7 @@ func Run(ctx context.Context, p Prober) *Report {
 		for _, name := range []string{
 			"account", "region", "EC2 describe permission", "EC2 launch permission",
 			"IAM instance-profile permission", "spored role", "VPC & subnet",
-			"Session Manager", "sweep cross-account role", "TTL reaper backstop", "Route 53 (DNS)", "Nitro fleet",
+			"Session Manager", "sweep cross-account role", "TTL reaper backstop", "idle teardown", "Route 53 (DNS)", "Nitro fleet",
 		} {
 			add(name, Skip, "", "requires valid credentials")
 		}
@@ -279,6 +285,14 @@ func Run(ctx context.Context, p Prober) *Report {
 		add("TTL reaper backstop", Warn, "", errText(err))
 	} else {
 		add("TTL reaper backstop", Pass, detail, "")
+	}
+
+	// Leave-no-trace's idle teardown (spawn#1654): informational, never a
+	// Fail, since no launch depends on the lease.
+	if detail, err := p.IdleTeardownLease(ctx); err != nil {
+		add("idle teardown", Warn, "", errText(err))
+	} else {
+		add("idle teardown", Pass, detail, "")
 	}
 
 	if detail, err := p.Route53Available(ctx); err != nil {

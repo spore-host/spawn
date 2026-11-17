@@ -3,6 +3,8 @@ package lifecyclemark
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -31,16 +33,19 @@ func (fs fakes) factory(_ aws.Config, region string) (lifecycle.API, error) {
 	return f, nil
 }
 
-// install points the process's marker at fs and buf, with a fixed clock and
-// no real sleeps.
-func install(t *testing.T, f Factory, buf *bytes.Buffer) {
+// install points the process's marker at fs, its user-visible output at buf,
+// and its diagnostic log at the buffer it returns, with a fixed clock and no
+// real sleeps.
+func install(t *testing.T, f Factory, buf *bytes.Buffer) *bytes.Buffer {
 	t.Helper()
-	restore := Override(f, buf)
+	debug := &bytes.Buffer{}
+	restore := Override(f, buf, func(format string, args ...any) { fmt.Fprintf(debug, format+"\n", args...) })
 	std.mu.Lock()
 	std.now = func() time.Time { return testNow }
 	std.sleep = func(context.Context, time.Duration) error { return nil }
 	std.mu.Unlock()
 	t.Cleanup(restore)
+	return debug
 }
 
 func cfgFor(key string) aws.Config {
@@ -119,27 +124,33 @@ func TestMarkCaches(t *testing.T) {
 	}
 }
 
-// A refused identity warns once, naming what to grant, and is not asked again:
-// the call returns normally every time, so the launch goes on.
-func TestMarkDeniedWarnsOnceAndContinues(t *testing.T) {
+// A refused identity prints nothing the user sees: a user without the lease
+// actions is the normal case, and each CLI invocation is a new process, so
+// even a once-per-process warning would be one on every launch. It logs one
+// diagnostic line naming what is missing, is not asked again, and the call
+// returns normally every time, so the launch goes on.
+func TestMarkDeniedIsSilentLogsOnceAndContinues(t *testing.T) {
 	denied := lifecycletest.New()
 	denied.Err = func(string, any) error {
 		return &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform dynamodb:DescribeTable"}
 	}
 	calls := 0
 	var buf bytes.Buffer
-	install(t, func(aws.Config, string) (lifecycle.API, error) { calls++; return denied, nil }, &buf)
+	debug := install(t, func(aws.Config, string) (lifecycle.API, error) { calls++; return denied, nil }, &buf)
 
 	for i := 0; i < 3; i++ {
 		Mark(context.Background(), cfgFor("AKIA1"), "us-east-1", ScopeGlobal)
 	}
-	out := buf.String()
-	if n := strings.Count(out, "warning:"); n != 1 {
-		t.Fatalf("%d warnings, want exactly 1:\n%s", n, out)
+	if buf.Len() != 0 {
+		t.Fatalf("a denied mark printed to the user:\n%s", buf.String())
 	}
-	for _, want := range append([]string{lifecycle.TableName, "Continuing", "never tears the account down", TableARNPattern}, RequiredActions...) {
-		if !strings.Contains(out, want) {
-			t.Errorf("the warning does not say %q:\n%s", want, out)
+	log := debug.String()
+	if n := strings.Count(log, "could not mark spawn active"); n != 1 {
+		t.Fatalf("%d diagnostic lines, want exactly 1:\n%s", n, log)
+	}
+	for _, want := range append([]string{lifecycle.TableName, "never tears it down", "spawn doctor", TableARNPattern}, RequiredActions...) {
+		if !strings.Contains(log, want) {
+			t.Errorf("the diagnostic line does not say %q:\n%s", want, log)
 		}
 	}
 	if calls != 1 {
@@ -147,9 +158,9 @@ func TestMarkDeniedWarnsOnceAndContinues(t *testing.T) {
 	}
 }
 
-// A passing failure (throttling) also warns only once, but does not stop the
-// next mark from trying.
-func TestMarkTransientFailureWarnsOnce(t *testing.T) {
+// A passing failure (throttling) is also silent and logged once, but does
+// not stop the next mark from trying.
+func TestMarkTransientFailureIsSilent(t *testing.T) {
 	f := lifecycletest.New()
 	fail := true
 	f.Err = func(string, any) error {
@@ -159,13 +170,16 @@ func TestMarkTransientFailureWarnsOnce(t *testing.T) {
 		return nil
 	}
 	var buf bytes.Buffer
-	install(t, func(aws.Config, string) (lifecycle.API, error) { return f, nil }, &buf)
+	debug := install(t, func(aws.Config, string) (lifecycle.API, error) { return f, nil }, &buf)
 	Mark(context.Background(), cfgFor("AKIA1"), "us-east-1")
 	Mark(context.Background(), cfgFor("AKIA1"), "us-east-1")
 	fail = false
 	Mark(context.Background(), cfgFor("AKIA1"), "us-east-1")
-	if n := strings.Count(buf.String(), "warning:"); n != 1 {
-		t.Errorf("%d warnings, want 1:\n%s", n, buf.String())
+	if buf.Len() != 0 {
+		t.Errorf("a failed mark printed to the user:\n%s", buf.String())
+	}
+	if n := strings.Count(debug.String(), "could not mark spawn active"); n != 1 {
+		t.Errorf("%d diagnostic lines, want 1:\n%s", n, debug.String())
 	}
 	if it := item(t, f, "us-east-1"); attr(it, "state") != string(lifecycle.StateActive) {
 		t.Errorf("after the throttling cleared, state %q, want ACTIVE", attr(it, "state"))
@@ -179,7 +193,7 @@ func TestDefaultFactoryRefusesInTests(t *testing.T) {
 		t.Fatalf("defaultFactory in a test binary: %v, want errInTest", err)
 	}
 	var buf bytes.Buffer
-	restore := Override(defaultFactory, &buf)
+	restore := Override(defaultFactory, &buf, func(string, ...any) {})
 	defer restore()
 	Mark(context.Background(), cfgFor("AKIA1"), "us-east-1")
 	if buf.Len() != 0 {
@@ -202,5 +216,63 @@ func TestMarkSkipsTheInfraAccount(t *testing.T) {
 	Mark(context.Background(), cfgFor("AKIA1"), "us-east-1", ScopeGlobal)
 	if len(fs) != 0 || buf.Len() != 0 {
 		t.Errorf("marked in the infra account: tables in %d regions, output %q", len(fs), buf.String())
+	}
+}
+
+// A long wait on the lease (a teardown holds it) is the one thing a user
+// sees, and only past waitNotice; the table being created on a region's first
+// mark is a short wait and only logged.
+func TestMarkSaysWhenItWaitsLong(t *testing.T) {
+	var buf bytes.Buffer
+	debug := install(t, fakes{}.factory, &buf)
+	sleep := std.sleeper([]string{"us-east-1"})
+	for waited := time.Duration(0); waited < waitNotice-lifecycle.DefaultTablePollInterval; waited += lifecycle.DefaultTablePollInterval {
+		_ = sleep(context.Background(), lifecycle.DefaultTablePollInterval)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("a short wait printed to the user: %q", buf.String())
+	}
+	if !strings.Contains(debug.String(), "waiting on the") {
+		t.Errorf("the wait was not logged: %q", debug.String())
+	}
+	for i := 0; i < 5; i++ {
+		_ = sleep(context.Background(), lifecycle.DefaultPollInterval)
+	}
+	if n := strings.Count(buf.String(), "waiting for spawn's teardown lease"); n != 1 {
+		t.Errorf("a long wait said so %d times, want once: %q", n, buf.String())
+	}
+}
+
+// Probe (spawn doctor) tells a usable table from a refused one and an absent
+// one, and writes nothing.
+func TestProbe(t *testing.T) {
+	ctx := context.Background()
+	f := lifecycletest.New()
+	if err := Probe(ctx, f); !errors.Is(err, ErrNoTable) {
+		t.Fatalf("no table: %v, want ErrNoTable", err)
+	}
+	c, err := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return f, nil },
+		Sleep: func(context.Context, time.Duration) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.MarkActive(ctx, Tool, "us-east-1"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.Keys(lifecycle.TableName))
+	if err := Probe(ctx, f); err != nil {
+		t.Fatalf("a usable table: %v", err)
+	}
+	if after := len(f.Keys(lifecycle.TableName)); after != before {
+		t.Errorf("the probe wrote an item (%d -> %d keys): it would keep the table from ever closing", before, after)
+	}
+	f.Err = func(op string, _ any) error {
+		if op == "UpdateItem" {
+			return &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform: dynamodb:UpdateItem"}
+		}
+		return nil
+	}
+	if err := Probe(ctx, f); err == nil || errors.Is(err, ErrNoTable) || !strings.Contains(err.Error(), "UpdateItem") {
+		t.Errorf("a refused write: %v, want the UpdateItem refusal", err)
 	}
 }

@@ -38,15 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first marks spawn active in the shared-account lease (DynamoDB
   `spore-host-lifecycle`, per region, and `global` in us-east-1): launches,
   pools, tasks, detached sweeps, schedules, the egress proxy, FSx, buckets,
-  IAM, and `spawn reaper deploy` (#1654). **It never fails a launch**: if the
-  mark is denied or fails, spawn warns once per process and carries on, and
-  that account counts as "lease unavailable", which the idle teardown never
-  tears down. Nothing is marked in spore.host's infra account. The actions are
-  `dynamodb:ConditionCheckItem`, `UpdateItem`, `PutItem`, `DeleteItem`,
-  `DescribeTable`, `CreateTable` and `TagResource` on
+  IAM, and `spawn reaper deploy` (#1654). **It never fails a launch, and a
+  failed mark prints nothing**: it goes to spawn's diagnostic log
+  (`~/.spawn/spawn.log`, and stderr with `--verbose`), the create carries on,
+  and the account counts as "lease unavailable", which the idle teardown never
+  tears down. The only thing a user sees is a wait of more than 30 s, when a
+  teardown really holds the lease. Nothing is marked in spore.host's infra
+  account. The actions are `dynamodb:ConditionCheckItem`, `UpdateItem`,
+  `PutItem`, `DeleteItem`, `DescribeTable`, `CreateTable` and `TagResource` on
   `arn:aws:dynamodb:*:*:table/spore-host-lifecycle` (see
-  `docs/reference/cli-iam-actions.md`). The orchestrator Lambdas' own launches
-  do not mark; the reaper's verdict counts their records as activity.
+  `docs/reference/cli-iam-actions.md`); spore.host does not provision them for
+  users yet (#1666). The orchestrator Lambdas' own launches do not mark; the
+  reaper's verdict counts their records as activity.
+- `spawn doctor` has an "idle teardown" check: whether this identity can write
+  the lifecycle lease table, read-only (a DescribeTable, and an UpdateItem
+  whose condition can never hold). A Warn names the principal and what is
+  missing; launches are unaffected either way (#1654).
 - `teardown.NewReportOnly` (pkg/teardown): the footprint deleter with every
   delete refused, so a report-only caller cannot reach a delete, nor be asked
   to grant one. `(*aws.Client).GatherFootprint` and `AccountFootprint`

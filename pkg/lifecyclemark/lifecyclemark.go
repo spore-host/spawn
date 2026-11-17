@@ -14,11 +14,19 @@
 //
 // # A launch never fails because of the lease
 //
-// Mark returns nothing. Whatever goes wrong (the caller's identity may not
-// read or write the table, DynamoDB is throttling, a teardown lease is held
-// past lifecycle's 10 minute wait), it prints one warning per process and the
-// launch goes on. An identity that is refused is not asked again in the same
-// process, so a pool of a hundred workers waits for the lease at most once.
+// Mark returns nothing, and prints nothing a user sees when it fails. Whatever
+// goes wrong (the caller's identity may not read or write the table, DynamoDB
+// is throttling, a teardown lease is held past lifecycle's 10 minute wait), it
+// writes a line to spawn's diagnostic log (~/.spawn/spawn.log, and stderr with
+// --verbose: the standard log package, which cmd routes there) and the launch
+// goes on. A user whose IAM lacks the lease actions is the normal case today,
+// and every CLI invocation is a new process, so even a once-per-process
+// warning would be a warning on every launch. `spawn doctor` reports it
+// instead ("idle teardown", Probe). An identity that is refused is not asked
+// again in the same process, so a pool of a hundred workers waits for the
+// lease at most once. The one thing a user does see is a long wait: when a
+// teardown really holds the lease, a mark waits (up to lifecycle's 10
+// minutes), and after waitNotice it says why on stderr.
 //
 // Nothing is marked in spore.host's own infra account
 // (footprintspawn.InfraAccountID): no idle teardown ever runs there (the
@@ -32,7 +40,9 @@
 // whose creators can never mark it is never torn down for idleness. In a
 // shared account where some users can mark and some cannot, a launch by one
 // who cannot is still seen by the teardown's own activity re-check, but not
-// fenced by the lease; grant the actions in RequiredActions to every user.
+// fenced by the lease. spore.host does not yet provision these actions for
+// users (spawn#1666); until it does, an account is lease-enabled only where an
+// administrator has granted RequiredActions.
 package lifecyclemark
 
 import (
@@ -40,6 +50,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -48,6 +59,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/libs/lifecycle"
@@ -94,6 +106,11 @@ const TableARNPattern = "arn:aws:dynamodb:*:*:table/" + lifecycle.TableName
 // creator creates within the grace of its MarkActive).
 const cacheFor = time.Hour
 
+// waitNotice is how long a mark waits on the lease before it tells the user
+// on stderr. Creating the table on a region's first mark takes a few seconds
+// and is not worth a line; a teardown holding the lease is.
+const waitNotice = 30 * time.Second
+
 // Factory returns the DynamoDB client for one region of cfg's account.
 type Factory func(cfg aws.Config, region string) (lifecycle.API, error)
 
@@ -101,13 +118,17 @@ type Factory func(cfg aws.Config, region string) (lifecycle.API, error)
 type marker struct {
 	mu      sync.Mutex
 	factory Factory
-	out     io.Writer
-	now     func() time.Time
-	sleep   func(ctx context.Context, d time.Duration) error
+	// out is user-visible (stderr): only the long-wait notice goes there.
+	out io.Writer
+	// debugf is spawn's diagnostic log; every failure goes there, and only
+	// there.
+	debugf func(format string, args ...any)
+	now    func() time.Time
+	sleep  func(ctx context.Context, d time.Duration) error
 	// refused: an identity was refused the table; no more marks this process.
 	refused bool
-	warned  bool
-	waiting map[string]bool
+	logged  bool
+	waiting map[string]time.Duration
 	marked  map[string]time.Time
 	// accountOf resolves cfg's account (sts:GetCallerIdentity, which needs no
 	// permission); accounts caches it by access key.
@@ -119,8 +140,9 @@ func newMarker() *marker {
 	return &marker{
 		factory:   defaultFactory,
 		out:       os.Stderr,
+		debugf:    log.Printf,
 		now:       time.Now,
-		waiting:   map[string]bool{},
+		waiting:   map[string]time.Duration{},
 		marked:    map[string]time.Time{},
 		accountOf: defaultAccountOf,
 		accounts:  map[string]string{},
@@ -154,32 +176,36 @@ func defaultFactory(cfg aws.Config, region string) (lifecycle.API, error) {
 	return dynamodb.NewFromConfig(c), nil
 }
 
-// Override replaces the client factory and the warning writer (nil keeps the
-// current one), and clears the process's state, for a test. It returns the
-// function that restores them.
-func Override(f Factory, out io.Writer) (restore func()) {
+// Override replaces the client factory, the user-visible writer and the
+// diagnostic logger (nil keeps the current one), and clears the process's
+// state, for a test. It returns the function that restores them.
+func Override(f Factory, out io.Writer, debugf func(format string, args ...any)) (restore func()) {
 	std.mu.Lock()
 	defer std.mu.Unlock()
 	saved := struct {
 		factory Factory
 		out     io.Writer
+		debugf  func(format string, args ...any)
 		now     func() time.Time
 		sleep   func(ctx context.Context, d time.Duration) error
-	}{std.factory, std.out, std.now, std.sleep}
+	}{std.factory, std.out, std.debugf, std.now, std.sleep}
 	if f != nil {
 		std.factory = f
 	}
 	if out != nil {
 		std.out = out
 	}
-	std.refused, std.warned = false, false
-	std.waiting, std.marked, std.accounts = map[string]bool{}, map[string]time.Time{}, map[string]string{}
+	if debugf != nil {
+		std.debugf = debugf
+	}
+	std.refused, std.logged = false, false
+	std.waiting, std.marked, std.accounts = map[string]time.Duration{}, map[string]time.Time{}, map[string]string{}
 	return func() {
 		std.mu.Lock()
 		defer std.mu.Unlock()
-		std.factory, std.out, std.now, std.sleep = saved.factory, saved.out, saved.now, saved.sleep
-		std.refused, std.warned = false, false
-		std.waiting, std.marked, std.accounts = map[string]bool{}, map[string]time.Time{}, map[string]string{}
+		std.factory, std.out, std.debugf, std.now, std.sleep = saved.factory, saved.out, saved.debugf, saved.now, saved.sleep
+		std.refused, std.logged = false, false
+		std.waiting, std.marked, std.accounts = map[string]time.Duration{}, map[string]time.Time{}, map[string]string{}
 	}
 }
 
@@ -245,16 +271,22 @@ func (m *marker) mark(ctx context.Context, cfg aws.Config, scopes ...string) {
 	}
 }
 
-// sleeper is lifecycle's Sleep, saying once per scope that the mark is
-// waiting: MarkActive waits while a teardown holds the lease.
+// sleeper is lifecycle's Sleep. MarkActive waits while the table is being
+// created (seconds, on a region's first mark) or a teardown holds the lease
+// (up to 10 minutes). The wait goes to the diagnostic log at once, and to the
+// user once it passes waitNotice.
 func (m *marker) sleeper(scopes []string) func(ctx context.Context, d time.Duration) error {
 	what := strings.Join(scopes, ", ")
 	return func(ctx context.Context, d time.Duration) error {
 		m.mu.Lock()
-		if !m.waiting[what] {
-			m.waiting[what] = true
-			fmt.Fprintf(m.out, "waiting for spawn's teardown lease in %s (the %s table is being created, or a teardown holds the lease; up to %s)...\n",
-				what, lifecycle.TableName, lifecycle.DefaultWaitTimeout)
+		before := m.waiting[what]
+		m.waiting[what] = before + d
+		if before == 0 {
+			m.debugf("lifecyclemark: waiting on the %s table in %s (being created, or a teardown holds the lease)", lifecycle.TableName, what)
+		}
+		if before < waitNotice && before+d >= waitNotice {
+			fmt.Fprintf(m.out, "waiting for spawn's teardown lease in %s (a teardown holds it; up to %s)...\n",
+				what, lifecycle.DefaultWaitTimeout)
 		}
 		sleep := m.sleep
 		m.mu.Unlock()
@@ -274,7 +306,7 @@ func (m *marker) sleeper(scopes []string) func(ctx context.Context, d time.Durat
 
 // isInfra reports whether cfg's account is spore.host's infra account. An
 // account that cannot be resolved is marked as any other: the mark itself
-// will then most likely fail, and warn.
+// will then most likely fail, and log.
 func (m *marker) isInfra(ctx context.Context, cfg aws.Config, who string) bool {
 	m.mu.Lock()
 	acct, ok := m.accounts[who]
@@ -300,8 +332,8 @@ func (m *marker) isRefused() bool {
 	return m.refused
 }
 
-// fail records a failed mark: one warning per process, and no more marks
-// after a refusal.
+// fail records a failed mark: one diagnostic log line per process, nothing
+// the user sees, and no more marks after a refusal.
 func (m *marker) fail(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -312,14 +344,13 @@ func (m *marker) fail(err error) {
 	if isRefusal(err) {
 		m.refused = true
 	}
-	if m.warned {
+	if m.logged {
 		return
 	}
-	m.warned = true
-	fmt.Fprintf(m.out, "warning: could not mark spawn active in the shared-account lifecycle lease (DynamoDB table %s): %v\n"+
-		"  Continuing: this does not stop the launch. Until it can be marked, spawn's idle teardown treats the lease\n"+
-		"  in this account as unavailable and never tears the account down for idleness. To enable it, grant\n"+
-		"  %s on %s.\n",
+	m.logged = true
+	m.debugf("lifecyclemark: could not mark spawn active in the shared-account lifecycle lease (DynamoDB table %s): %v. "+
+		"The create goes on; the idle teardown treats this account's lease as unavailable and never tears it down for idleness. "+
+		"It needs %s on %s; `spawn doctor` checks it.",
 		lifecycle.TableName, err, strings.Join(RequiredActions, ", "), TableARNPattern)
 }
 
@@ -347,4 +378,46 @@ func identity(ctx context.Context, cfg aws.Config) string {
 		return ""
 	}
 	return creds.AccessKeyID
+}
+
+// ErrNoTable is Probe's answer when the region has no lifecycle table yet:
+// the identity may describe it, and the first mark creates it if it may.
+var ErrNoTable = errors.New("no " + lifecycle.TableName + " table in this region yet")
+
+// probeKey is the item Probe's conditional write names. The condition can
+// never hold, so the item is never written: a stray item would stop
+// CloseTableIfEmpty from ever removing the table.
+const probeKey = "probe#spawn-doctor"
+
+// Probe reports, changing nothing, whether api's identity can use the lease
+// table, for `spawn doctor`: a DescribeTable, then an UpdateItem whose
+// condition can never hold. IAM authorizes the UpdateItem before DynamoDB
+// evaluates the condition, so a ConditionalCheckFailedException proves the
+// write is allowed and that nothing was written. nil means usable; ErrNoTable
+// that the table does not exist yet; any other error is the refusal.
+func Probe(ctx context.Context, api lifecycle.API) error {
+	_, err := api.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(lifecycle.TableName)})
+	var nf *ddbtypes.ResourceNotFoundException
+	switch {
+	case errors.As(err, &nf):
+		return ErrNoTable
+	case err != nil:
+		return fmt.Errorf("dynamodb:DescribeTable: %w", err)
+	}
+	_, err = api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 aws.String(lifecycle.TableName),
+		Key:                       map[string]ddbtypes.AttributeValue{"pk": &ddbtypes.AttributeValueMemberS{Value: probeKey}},
+		UpdateExpression:          aws.String("SET #p = :p"),
+		ConditionExpression:       aws.String("attribute_exists(#k) AND attribute_not_exists(#k)"),
+		ExpressionAttributeNames:  map[string]string{"#p": "probe", "#k": "pk"},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":p": &ddbtypes.AttributeValueMemberS{Value: "spawn doctor"}},
+	})
+	var ccf *ddbtypes.ConditionalCheckFailedException
+	switch {
+	case errors.As(err, &ccf):
+		return nil
+	case err == nil:
+		return errors.New("the probe's never-true condition held; the table is not behaving as DynamoDB")
+	}
+	return fmt.Errorf("dynamodb:UpdateItem: %w", err)
 }
