@@ -16,6 +16,7 @@ import (
 	"github.com/spore-host/libs/tags/s3tags"
 	"github.com/spore-host/spawn/pkg/bucketsweep"
 	"github.com/spore-host/spawn/pkg/launchconfig"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
@@ -45,6 +46,7 @@ type S3BucketConfig struct {
 // The bucket also carries the spore.host tags (#1652); an existing bucket
 // spawn made gets the ones it lacks.
 func (c *Client) CreateS3BucketIfNotExists(ctx context.Context, bucketName, region string) error {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the bucket (spawn#1654)
 	return createBucketIfNotExists(ctx, s3.NewFromConfig(c.regionalConfig(region)), bucketName, region,
 		appendMissingS3Tags(plainBucketTags(bucketName), c.sporeTags(region)))
 }
@@ -56,6 +58,7 @@ func createPlainBucket(ctx context.Context, api bucketCreateS3, bucketName, regi
 // CreateS3BucketWithTags creates an S3 bucket with FSx configuration tags
 // and the spore.host tags (#1652).
 func (c *Client) CreateS3BucketWithTags(ctx context.Context, config S3BucketConfig) error {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(config.Region).Region) // before the bucket (spawn#1654)
 	return createBucketIfNotExists(ctx, s3.NewFromConfig(c.regionalConfig(config.Region)), config.BucketName, config.Region,
 		appendMissingS3Tags(fsxBucketTags(config), c.sporeTags(config.Region)))
 }
@@ -442,6 +445,7 @@ const StagingBootstrapPrefix = "bootstrap/"
 // The next launch by this spawn restores these rules. A bucket of that name owned by another account is an error, and
 // nothing is written to it.
 func (c *Client) EnsureStagingBucket(ctx context.Context, bucket, region, ownerAccount string) error {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the bucket (spawn#1654)
 	return ensureStagingBucket(ctx, s3.NewFromConfig(c.regionalConfig(region)), bucket, region, ownerAccount)
 }
 

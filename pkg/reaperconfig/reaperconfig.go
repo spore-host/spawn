@@ -47,12 +47,35 @@ const (
 	// EnvLaunchConfigs is the unreferenced launch config object sweep
 	// (#1359). Unset means report, not reap: it is new deletion behaviour.
 	EnvLaunchConfigs = "REAPER_LAUNCH_CONFIGS"
+	// EnvAccountIdle is the account-idle sweep (#1654): off|report|reap,
+	// default report. It never deletes yet; reap reports until #1657.
+	EnvAccountIdle = "REAPER_ACCOUNT_IDLE"
+	// EnvAccountIdleGrace is how long a scope must be idle before the
+	// account-idle sweep plans its teardown (DefaultAccountIdleGrace).
+	EnvAccountIdleGrace = "REAPER_ACCOUNT_IDLE_GRACE"
 )
+
+// DefaultAccountIdleGrace is the account-idle sweep's grace: the
+// leave-no-trace epic's 24 h (spore-host/spore-host#752).
+const DefaultAccountIdleGrace = 24 * time.Hour
+
+// ParseAccountIdleGrace parses REAPER_ACCOUNT_IDLE_GRACE: a positive pkg/ttl
+// duration ("24h", "2d").
+func ParseAccountIdleGrace(v string) (time.Duration, error) {
+	d, err := ttl.ParseDuration(strings.TrimSpace(v))
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("account-idle grace must be positive, got %s", d)
+	}
+	return d, nil
+}
 
 // The three states of a sweep that can be previewed before it is allowed to
 // delete: REAPER_SPOT_REQUESTS, REAPER_NET_RESOURCES, REAPER_ELASTIC_IPS,
 // REAPER_EMPTY_BUCKETS, REAPER_INSTANCE_ROLES, REAPER_POOL_QUEUES,
-// REAPER_SCHEDULE_PARAMS and REAPER_LAUNCH_CONFIGS.
+// REAPER_SCHEDULE_PARAMS, REAPER_LAUNCH_CONFIGS and REAPER_ACCOUNT_IDLE.
 const (
 	// ModeOff skips the sweep entirely.
 	ModeOff = "off"
@@ -148,7 +171,7 @@ func Validate(name, value string) error {
 		}
 	}
 	switch name {
-	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles, EnvPoolQueues, EnvScheduleParams, EnvLaunchConfigs:
+	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles, EnvPoolQueues, EnvScheduleParams, EnvLaunchConfigs, EnvAccountIdle:
 		if _, ok := ParseMode(value); !ok {
 			return fmt.Errorf("%s: %q is not one of %s", name, value, strings.Join(Modes(), ", "))
 		}
@@ -168,6 +191,11 @@ func Validate(name, value string) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		return nil
+	case EnvAccountIdleGrace:
+		if _, err := ParseAccountIdleGrace(value); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
 	}
 	return fmt.Errorf("%s is not a setting spawn reaper deploy can set", name)
 }
@@ -175,7 +203,7 @@ func Validate(name, value string) error {
 var settable = map[string]struct{}{
 	EnvSpotRequests: {}, EnvNetResources: {}, EnvElasticIPs: {}, EnvMaxAge: {}, EnvNotifyURL: {},
 	EnvTTLGrace: {}, EnvEmptyBuckets: {}, EnvInstanceRoles: {}, EnvPoolQueues: {},
-	EnvScheduleParams: {}, EnvLaunchConfigs: {},
+	EnvScheduleParams: {}, EnvLaunchConfigs: {}, EnvAccountIdle: {}, EnvAccountIdleGrace: {},
 }
 
 // Settable lists the variables Validate accepts, sorted. Derived from the same

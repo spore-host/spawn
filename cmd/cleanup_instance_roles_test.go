@@ -214,12 +214,8 @@ func (f *cleanupPolicyIAM) DeletePolicy(_ context.Context, in *iam.DeletePolicyI
 	return &iam.DeletePolicyOutput{}, nil
 }
 
-func (f *cleanupPolicyIAM) ListPolicyVersions(context.Context, *iam.ListPolicyVersionsInput, ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error) {
-	return &iam.ListPolicyVersionsOutput{}, nil
-}
-
-func (f *cleanupPolicyIAM) DeletePolicyVersion(context.Context, *iam.DeletePolicyVersionInput, ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error) {
-	return &iam.DeletePolicyVersionOutput{}, nil
+func (f *cleanupPolicyIAM) ListPolicyTags(context.Context, *iam.ListPolicyTagsInput, ...func(*iam.Options)) (*iam.ListPolicyTagsOutput, error) {
+	return &iam.ListPolicyTagsOutput{}, nil
 }
 
 // `spawn cleanup --instance-roles` also deletes spawn's unattached spored
@@ -240,7 +236,9 @@ func TestCleanupInstanceRolesDeletesUnattachedSporedPolicies(t *testing.T) {
 		savedDry, savedYes := cleanupDryRun, cleanupYes
 		t.Cleanup(func() { cleanupDryRun, cleanupYes = savedDry, savedYes })
 		cleanupDryRun, cleanupYes = dryRun, true
-		p := &cleanupPolicyIAM{policies: []iamtypes.Policy{pol("spored-baseline-policy-v1", 0), pol("spored-policy-v1", 1)}}
+		// The boundary is unused and old, which is when the sweep used to
+		// delete it (#1664).
+		p := &cleanupPolicyIAM{policies: []iamtypes.Policy{pol("spored-baseline-policy-v1", 0), pol("spored-policy-v1", 1), pol(instancerole.BoundaryPolicyName, 0)}}
 		var out bytes.Buffer
 		c := &cobra.Command{}
 		c.SetOut(&out)
@@ -262,6 +260,9 @@ func TestCleanupInstanceRolesDeletesUnattachedSporedPolicies(t *testing.T) {
 	}
 	real, out := run(false)
 	if want := []string{"arn:aws:iam::111122223333:policy/spore-host/spored-baseline-policy-v1"}; strings.Join(real.deleted, "|") != strings.Join(want, "|") {
-		t.Errorf("deleted %v, want %v\n%s", real.deleted, want, out)
+		t.Errorf("deleted %v, want %v (never the boundary, #1664)\n%s", real.deleted, want, out)
+	}
+	if !strings.Contains(out, instancerole.KeepBoundaryPermanent) {
+		t.Errorf("the boundary is not reported as kept and permanent:\n%s", out)
 	}
 }

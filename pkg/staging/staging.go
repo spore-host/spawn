@@ -18,6 +18,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/libs/tags/s3tags"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/s3transfer"
 	"github.com/spore-host/spawn/pkg/servicetags"
 	"github.com/spore-host/spawn/pkg/sporetags"
@@ -132,6 +133,15 @@ func (c *Client) ensureBucket(ctx context.Context, bucket, region string, k para
 	_, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 	if err == nil {
 		return bucket, nil // already exists in our account
+	}
+
+	// A batch queue's config bucket is in the launching account and is
+	// spawn's to tear down there, so the lifecycle lease is marked first
+	// (spawn#1654). A schedule params bucket is spore.host's own service in
+	// the infra account, which no idle teardown ever runs in, so nothing is
+	// marked for it: a mark would create the lifecycle table there.
+	if k == kindQueueConfig {
+		lifecyclemark.Mark(ctx, c.cfg, region)
 	}
 
 	// Attempt to create

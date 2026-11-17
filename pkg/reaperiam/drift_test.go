@@ -249,27 +249,25 @@ func TestScanSelfPolicyDocumentIsValidJSON(t *testing.T) {
 // than native.
 const crossAccountRolePath = "../../deployment/cloudformation/ttl-reaper-cross-account-role.yaml"
 
-// crossAccountGrantedActions scrapes the actions the cross-account role allows.
+// crossAccountGrantedActions is the actions the cross-account reaper role
+// allows, from its parsed policies (loadCFN understands the CFN shorthand).
 //
-// A regex over the YAML rather than a parse: the template is full of CFN
-// shorthand (!Sub, !Ref, !GetAtt) that a plain YAML unmarshaller rejects, and
-// pulling in a CFN-aware parser to read a list of action strings is not worth it.
+// This used to be a regex over the file with a hand-written list of service
+// prefixes, which saw nothing of a service the list forgot: the #1654 grants
+// on cloudformation:, events:, lambda:, logs:, scheduler:, sns: and tag: were
+// invisible to it (CLAUDE.md, "discover the set, don't list it"). Reading the
+// one role's statements also keeps the instance-event forwarder's
+// events:PutEvents out of the reaper's set, where it does not belong.
 func crossAccountGrantedActions(t *testing.T) map[string]bool {
 	t.Helper()
-	b, err := os.ReadFile(crossAccountRolePath)
-	if err != nil {
-		t.Fatalf("read %s: %v", crossAccountRolePath, err)
-	}
-	// `                  - ec2:DescribeInstances` — a list item that looks like an
-	// IAM action. Condition keys (ec2:ResourceTag/...) are excluded by requiring
-	// no slash.
-	re := regexp.MustCompile(`(?m)^\s*-\s+((?:ec2|fsx|ssm|sts|iam|dynamodb|kms|route53|s3|sqs):[A-Za-z]+)\s*$`)
 	out := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
-		out[m[1]] = true
+	for g := range explode(t, crossAccountRolePath, crossAccountRoleStatements(t)) {
+		if g.Effect == "Allow" {
+			out[g.Action] = true
+		}
 	}
 	if len(out) == 0 {
-		t.Fatalf("scraped no actions from %s — has the shape changed?", crossAccountRolePath)
+		t.Fatalf("parsed no actions from %s — has the shape changed?", crossAccountRolePath)
 	}
 	return out
 }

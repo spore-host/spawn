@@ -9,6 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 )
 
 // MountSnapshotResult reports the volume created + attached for a snapshot mount.
@@ -35,6 +37,7 @@ func (c *Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*
 	az := idDoc.AvailabilityZone
 
 	ec2Client := c.regionalEC2(idDoc.Region)
+	lifecyclemark.Mark(ctx, c.cfg, idDoc.Region) // before the volume (spawn#1654)
 
 	// Create the volume from the snapshot, in this instance's AZ.
 	cv, err := ec2Client.CreateVolume(ctx, &ec2.CreateVolumeInput{

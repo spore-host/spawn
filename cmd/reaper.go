@@ -35,6 +35,8 @@ var (
 	reaperPoolQueues   string
 	reaperSchedParams  string
 	reaperLaunchCfgs   string
+	reaperAccountIdle  string
+	reaperIdleGrace    string
 	reaperTTLGrace     string
 	reaperEmptyBuckets string
 	reaperMaxAge       string
@@ -166,7 +168,7 @@ func init() {
 	reaperTeardownCmd.Flags().BoolVar(&reaperKeepArtifacts, "keep-artifacts", false,
 		"Leave the artifact bucket in place (it is removed by default)")
 	reaperTeardownCmd.Flags().DurationVar(&reaperIfIdleFor, "if-idle-for", 0,
-		"Only tear down if the reaper has reclaimed nothing for at least this long, at most 720h (the logs it reads); otherwise report and exit 0")
+		"Only tear down if nothing spawn manages has been active in this account for at least this long, by the reaper's lifecycle verdict, and at most the reaper's account-idle grace (24h unless deployed with --account-idle-grace) and 720h; otherwise report and exit 0")
 	reaperTeardownCmd.Flags().BoolVar(&reaperForceArtifacts, "force-artifacts", false,
 		"Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed)")
 }
@@ -195,6 +197,10 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 		"Orphaned schedule params sweep (spawn-schedules-*/schedules/<id>/params.yaml with no schedule record, 30 days old), REAPER_SCHEDULE_PARAMS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperLaunchCfgs, "launch-configs", "",
 		"Unreferenced launch config object sweep (spawn-staging-*/launch-config/config-<sha256>.json no instance or Spot request names, a day old), REAPER_LAUNCH_CONFIGS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
+	fs.StringVar(&reaperAccountIdle, "account-idle", "",
+		"Account-idle sweep (judges this account idle from every activity signal and, after the grace, logs the teardown it would do; never deletes yet), REAPER_ACCOUNT_IDLE: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report, and reap reports until spawn#1657)")
+	fs.StringVar(&reaperIdleGrace, "account-idle-grace", "",
+		"How long nothing spawn manages may be active before the account-idle sweep reports the teardown, REAPER_ACCOUNT_IDLE_GRACE, e.g. 24h or 30d; also the longest 'teardown --if-idle-for' can wait for (default: keep; the reaper's default is "+shortDuration(reaperconfig.DefaultAccountIdleGrace)+")")
 	fs.StringVar(&reaperEmptyBuckets, "empty-buckets", "",
 		"Empty spawn-staging/spawn-results bucket sweep, REAPER_EMPTY_BUCKETS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperTTLGrace, "ttl-grace", "",
@@ -273,17 +279,19 @@ var reaperDeployFlags = map[string]struct {
 	flag string
 	val  *string
 }{
-	reaperconfig.EnvSpotRequests:   {"spot-requests", &reaperSpotRequests},
-	reaperconfig.EnvNetResources:   {"net-resources", &reaperNetResources},
-	reaperconfig.EnvElasticIPs:     {"elastic-ips", &reaperElasticIPs},
-	reaperconfig.EnvMaxAge:         {"max-age", &reaperMaxAge},
-	reaperconfig.EnvTTLGrace:       {"ttl-grace", &reaperTTLGrace},
-	reaperconfig.EnvEmptyBuckets:   {"empty-buckets", &reaperEmptyBuckets},
-	reaperconfig.EnvInstanceRoles:  {"instance-roles", &reaperInstRoles},
-	reaperconfig.EnvPoolQueues:     {"pool-queues", &reaperPoolQueues},
-	reaperconfig.EnvScheduleParams: {"schedule-params", &reaperSchedParams},
-	reaperconfig.EnvLaunchConfigs:  {"launch-configs", &reaperLaunchCfgs},
-	reaperconfig.EnvNotifyURL:      {"notify-url", &reaperNotifyURL},
+	reaperconfig.EnvSpotRequests:     {"spot-requests", &reaperSpotRequests},
+	reaperconfig.EnvNetResources:     {"net-resources", &reaperNetResources},
+	reaperconfig.EnvElasticIPs:       {"elastic-ips", &reaperElasticIPs},
+	reaperconfig.EnvMaxAge:           {"max-age", &reaperMaxAge},
+	reaperconfig.EnvTTLGrace:         {"ttl-grace", &reaperTTLGrace},
+	reaperconfig.EnvEmptyBuckets:     {"empty-buckets", &reaperEmptyBuckets},
+	reaperconfig.EnvInstanceRoles:    {"instance-roles", &reaperInstRoles},
+	reaperconfig.EnvPoolQueues:       {"pool-queues", &reaperPoolQueues},
+	reaperconfig.EnvScheduleParams:   {"schedule-params", &reaperSchedParams},
+	reaperconfig.EnvLaunchConfigs:    {"launch-configs", &reaperLaunchCfgs},
+	reaperconfig.EnvAccountIdle:      {"account-idle", &reaperAccountIdle},
+	reaperconfig.EnvAccountIdleGrace: {"account-idle-grace", &reaperIdleGrace},
+	reaperconfig.EnvNotifyURL:        {"notify-url", &reaperNotifyURL},
 }
 
 // reaperDeployOptions turns the flags into deploy options. Only flags the user
@@ -534,28 +542,10 @@ func runReaperTeardown(cmd *cobra.Command, _ []string) error {
 	// So the capability lives here, under the caller's own credentials, which
 	// already carry those permissions. Put it in a cron if you want it automatic.
 	if reaperIfIdleFor > 0 {
-		idle := d.DetectIdleness(ctx, time.Now())
-		switch {
-		case !idle.Determined:
-			// Never remove on an inconclusive read. Exit 0: this is a scheduled
-			// no-op, not a failure.
-			fmt.Fprintf(out, "Not tearing down: could not determine idleness (%s).\n", idle.Why)
-			return nil
-		case idle.EverWorked:
-			fmt.Fprintf(out, "Not tearing down: the reaper reclaimed something at %s.\n",
-				idle.LastWorked.UTC().Format(time.RFC3339))
-			return nil
-		case !idle.Ran:
-			// A reaper that has not RUN is a broken schedule, not an unused
-			// feature. Removing it here would delete something that never got the
-			// chance to work — the opposite of the intent.
-			fmt.Fprintf(out, "Not tearing down: the reaper has not run at all, which is a broken "+
-				"schedule rather than an idle one. Check `spawn reaper status`.\n")
-			return nil
-		}
-		if got := idle.IdleFor(time.Now()); got < reaperIfIdleFor {
-			fmt.Fprintf(out, "Not tearing down: idle for %s, which is less than the %s required.\n",
-				got.Round(time.Hour), reaperIfIdleFor)
+		lr, lerr := reaperTeardownLease(ctx)
+		if why := d.IdleTeardownRefusal(ctx, lr, lerr, region, reaperIfIdleFor, time.Now()); why != "" {
+			// A scheduled no-op, not a failure: exit 0.
+			fmt.Fprintf(out, "Not tearing down: %s.\n", why)
 			return nil
 		}
 		fmt.Fprintf(out, "Idle for at least %s — tearing down.\n", reaperIfIdleFor)
@@ -601,11 +591,21 @@ func reaperTeardownBucket(ctx context.Context, fs *pflag.FlagSet, d *reaperdeplo
 // whether teardown reached AWS.
 var reaperTeardownDeployer = newReaperDeployer
 
+// reaperTeardownLease is the lifecycle client --if-idle-for reads the
+// verdict with, over the caller's credentials; a seam for tests.
+var reaperTeardownLease = func(ctx context.Context) (reaperdeploy.LeaseReader, error) {
+	client, err := spawnaws.NewClientWithRegion(ctx, reaperRegion)
+	if err != nil {
+		return nil, err
+	}
+	return reaperdeploy.NewLeaseReader(client.Config())
+}
+
 // checkIfIdleFor refuses an --if-idle-for the idle check can never satisfy.
 func checkIfIdleFor(d time.Duration) error {
 	if w := reaperdeploy.IdleWindow(); d > w {
-		return fmt.Errorf("--if-idle-for %s can never trigger: idleness is read from the reaper's logs, "+
-			"which cover at most %s (%d days), so it is never reported idle for longer. Use %s or less",
+		return fmt.Errorf("--if-idle-for %s can never trigger: teardown confirms the reaper runs from its logs, "+
+			"which cover at most %s (%d days), so it never waits longer. Use %s or less",
 			d, w, int(w.Hours()/24), w)
 	}
 	return nil

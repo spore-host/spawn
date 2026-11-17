@@ -27,6 +27,7 @@ import (
 	"github.com/spore-host/libs/tags/iamtags"
 	"github.com/spore-host/libs/tags/s3tags"
 
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
 	"github.com/spore-host/spawn/pkg/reaperiam"
 	"github.com/spore-host/spawn/pkg/sporetags"
@@ -90,6 +91,11 @@ type Deployer struct {
 	Lambda LambdaAPI
 	Events EventsAPI
 	S3     S3API
+
+	// Config is the account's config, for the lifecycle lease mark Deploy
+	// makes before it creates anything (spawn#1654). New sets it; a zero
+	// Config marks nothing.
+	Config awssdk.Config
 
 	// Fetch retrieves the artifact. Injectable so tests never reach the network and
 	// so --artifact can supply a local file.
@@ -388,6 +394,10 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 		opts.Bucket = DefaultBucketName(opts.AccountID, opts.Region)
 	}
 	res := &Result{Bucket: opts.Bucket, Key: ObjectKey(opts.Version)}
+
+	// The reaper's bucket, function and rules are regional; its role is IAM.
+	// Mark both scopes of the lifecycle lease before creating any (spawn#1654).
+	lifecyclemark.Mark(ctx, d.Config, opts.Region, lifecyclemark.ScopeGlobal)
 
 	roleARN, created, err := d.ensureRole(ctx, opts)
 	if err != nil {
@@ -904,6 +914,11 @@ type Info struct {
 	// ArtifactBucket is the bucket recorded at deploy time (ArtifactBucketTag);
 	// empty for a reaper deployed before it was recorded.
 	ArtifactBucket string
+	// AccountIdle and AccountIdleGrace are the account-idle sweep's mode and
+	// grace (REAPER_ACCOUNT_IDLE, REAPER_ACCOUNT_IDLE_GRACE, #1654), with the
+	// reaper's defaults for unset or unparseable values.
+	AccountIdle      string
+	AccountIdleGrace time.Duration
 }
 
 // Inspect reports the deployed state without changing anything.
@@ -923,6 +938,9 @@ func (d *Deployer) Inspect(ctx context.Context) (Info, error) {
 		if c.Environment != nil {
 			info.Armed = !strings.EqualFold(c.Environment.Variables["REAPER_DRY_RUN"], "true")
 			info.Regions = c.Environment.Variables["REAPER_REGIONS"]
+			info.AccountIdle, info.AccountIdleGrace = accountIdleSettings(c.Environment.Variables)
+		} else {
+			info.AccountIdle, info.AccountIdleGrace = accountIdleSettings(nil)
 		}
 	}
 	if out.Tags != nil {
@@ -1168,5 +1186,21 @@ func New(cfg awssdk.Config) *Deployer {
 		Events: eventbridge.NewFromConfig(cfg),
 		S3:     s3.NewFromConfig(cfg),
 		Logs:   cwlogs.NewFromConfig(cfg),
+		Config: cfg,
 	}
+}
+
+// accountIdleSettings reads the account-idle sweep's settings from a reaper's
+// environment the way the reaper does: an unset or unrecognised mode is
+// report, an unset or unparseable grace the default.
+func accountIdleSettings(env map[string]string) (string, time.Duration) {
+	mode, ok := reaperconfig.ParseMode(env[reaperconfig.EnvAccountIdle])
+	if !ok {
+		mode = reaperconfig.ModeReport
+	}
+	grace, err := reaperconfig.ParseAccountIdleGrace(env[reaperconfig.EnvAccountIdleGrace])
+	if err != nil {
+		grace = reaperconfig.DefaultAccountIdleGrace
+	}
+	return mode, grace
 }

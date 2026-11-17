@@ -18,6 +18,7 @@ import (
 	"github.com/spore-host/spawn/pkg/bot"
 	"github.com/spore-host/spawn/pkg/botsecret"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 )
 
@@ -212,6 +213,7 @@ func runBotRegister(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("No --role-arn provided — ensuring %s role exists in account %s...\n",
 			botCrossAccountRoleName, accountID)
+		lifecyclemark.Mark(ctx, cfg, lifecyclemark.ScopeGlobal) // before the role (spawn#1654)
 		roleARN, externalID, err = bot.EnsureCrossAccountRole(ctx, iam.NewFromConfig(cfg),
 			botPrincipal, botRepair, generateExternalID, os.Stdout)
 		if err != nil {

@@ -262,6 +262,38 @@ Parameters:
       and spec grants; until then the run summary counts the account in
       pool_queues_accounts_denied.
 
+  AccountIdle:
+    Type: String
+    Default: 'report'
+    AllowedValues: ['off', 'report', 'reap']
+    Description: >
+      The account-idle sweep (spawn#1654, leave-no-trace spore-host#752). Once
+      per member account per run it judges each scanned region, and the global
+      (IAM) scope, active or idle from every activity signal: spawn instances
+      pending through stopped, egress proxies, FSx being made or just made,
+      pool queues in use, calque's footprint, and this account's sweep,
+      pipeline and schedule tables for that account. A read that fails counts
+      as active. It records the verdict in the account's spore-host-lifecycle
+      lease table; once a scope has been idle for AccountIdleGrace it takes
+      the teardown lease, re-checks, and logs the full teardown plan
+      ('account-idle REPORT account=... region=... would_delete=N kept=M'),
+      then releases the lease. It NEVER deletes: 'reap' behaves as 'report'
+      until spawn#1657. 'off' skips it. An account no spawn creator has marked
+      in the lease table (its users cannot write it, or spawn never ran
+      there) is skipped as lease unavailable and never idle-torn-down. The
+      infra account is always refused. The member accounts' role stack
+      (ttl-reaper-cross-account-role.yaml) must be redeployed for the lease
+      and footprint grants; until then each scope is logged as lease
+      unavailable.
+
+  AccountIdleGrace:
+    Type: String
+    Default: '24h'
+    Description: >
+      How long a scope must be idle before the account-idle sweep plans its
+      teardown (REAPER_ACCOUNT_IDLE_GRACE): a duration such as 24h or 2d.
+      Unparseable or not positive means 24h.
+
   LaunchConfigs:
     Type: String
     Default: 'report'
@@ -484,6 +516,8 @@ Resources:
           REAPER_POOL_QUEUES: !Ref PoolQueues
           REAPER_SCHEDULE_PARAMS: !Ref ScheduleParams
           REAPER_LAUNCH_CONFIGS: !Ref LaunchConfigs
+          REAPER_ACCOUNT_IDLE: !Ref AccountIdle
+          REAPER_ACCOUNT_IDLE_GRACE: !Ref AccountIdleGrace
           REAPER_EMPTY_BUCKETS: !Ref EmptyBuckets
           REAPER_DNS_EXPIRE: !Ref DnsExpire
           REAPER_DNS_LEASE_EXPIRE: !Ref DnsLeaseExpire
@@ -553,6 +587,19 @@ Resources:
                 - s3:GetObjectTagging
                 - s3:DeleteObject
               Resource: 'arn:aws:s3:::spawn-schedules-*/schedules/*'
+            # The account-idle sweep (#1654, AccountIdle): a sweep or pipeline
+            # that is not finished is an orchestrator working for a member
+            # account, so the sweep reads both orchestration tables (and the
+            # schedules, above) on the base credentials. Scan only.
+            # pkg/reaperiam.InfraActivityStatements is the source.
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+              Resource: !Sub 'arn:aws:dynamodb:us-east-1:${AWS::AccountId}:table/spawn-sweep-orchestration'
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+              Resource: !Sub 'arn:aws:dynamodb:us-east-1:${AWS::AccountId}:table/spawn-pipeline-orchestration'
         # When scanning the Lambda's own account directly (ScanSelf=true), it
         # needs describe/terminate locally too. Terminate is tag-scoped to
         # spawn:managed=true so the reaper can never touch unmanaged instances.
@@ -738,6 +785,8 @@ Resources:
                     - sqs:GetQueueAttributes
                     - sqs:ListQueueTags
                     - sqs:DeleteQueue
+                    # #1654: the account-idle report's re-check of a pool queue.
+                    - sqs:GetQueueUrl
                   Resource: !Sub 'arn:aws:sqs:*:${AWS::AccountId}:spawn-pool-*'
                 - Effect: Allow
                   Action:
@@ -758,6 +807,71 @@ Resources:
                   Action:
                     - s3:DeleteObject
                   Resource: 'arn:aws:s3:::spawn-staging-*/launch-config/config-*.json'
+                # #1654 account-idle sweep (AccountIdle, report mode): the
+                # lifecycle lease table, and the reads its plan and calque's
+                # footprint need. Nothing here deletes what spawn or a user
+                # made; the writes are on the lease table only.
+                # pkg/reaperiam.AccountIdleStatements is the source.
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:UpdateItem
+                    - dynamodb:PutItem
+                    - dynamodb:DeleteItem
+                    - dynamodb:ConditionCheckItem
+                    - dynamodb:DescribeTable
+                    - dynamodb:CreateTable
+                    - dynamodb:TagResource
+                  Resource: !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/spore-host-lifecycle'
+                - Effect: Allow
+                  Action:
+                    - cloudformation:DescribeStacks
+                    - dynamodb:ListTables
+                    - dynamodb:ListTagsOfResource
+                    - ec2:DescribeImages
+                    - ec2:DescribeNetworkInterfaces
+                    - ec2:DescribeSnapshots
+                    - ec2:DescribeVolumes
+                    - events:ListEventBuses
+                    - events:ListRules
+                    - events:ListTagsForResource
+                    - lambda:ListFunctions
+                    - lambda:ListTags
+                    - logs:DescribeLogGroups
+                    - logs:ListTagsForResource
+                    - scheduler:GetSchedule
+                    - scheduler:ListSchedules
+                    - sns:ListTopics
+                    - sns:ListTagsForResource
+                    - tag:GetResources
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - iam:GetRole
+                    - iam:ListRoleTags
+                    - iam:ListAttachedRolePolicies
+                    - iam:ListInstanceProfilesForRole
+                    - iam:GetInstanceProfile
+                    - iam:ListInstanceProfiles
+                    - iam:ListInstanceProfileTags
+                    - iam:ListPolicies
+                    - iam:GetPolicy
+                    - iam:ListPolicyTags
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - iam:ListRolePolicies
+                    - iam:GetRolePolicy
+                  Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/calque-*'
+                - Effect: Allow
+                  Action:
+                    - sqs:GetQueueAttributes
+                    - sqs:ListQueueTags
+                  Resource: !Sub 'arn:aws:sqs:*:${AWS::AccountId}:calque-*'
+                - Effect: Allow
+                  Action:
+                    - s3:ListAllMyBuckets
+                  Resource: '*'
             - !Ref AWS::NoValue
         # DNS teardown (#247): delete a reaped instance's Route53 records, since
         # spored's graceful DeleteDNS never ran. Scoped to the single configured

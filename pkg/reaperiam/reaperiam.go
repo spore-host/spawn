@@ -120,7 +120,7 @@ type Statement struct {
 // TestPolicyCoversEveryReaperAPICall enforces it, so adding an AWS call without a
 // grant fails the build rather than failing silently at 03:00 in someone's account.
 func ScanSelfStatements() []Statement {
-	return []Statement{
+	return append([]Statement{
 		{
 			// Finding expired instances. Read-only, so unconditioned: the reaper has
 			// to see every instance to decide which are spawn's.
@@ -408,8 +408,11 @@ func ScanSelfStatements() []Statement {
 			// deletes only a queue tagged spawn:managed=true whose
 			// spawn:pool-run-id tag matches its name, empty, a day old, with
 			// no instance holding the pool's workers' profile or tag.
+			//
+			// sqs:GetQueueUrl is the account-idle sweep's re-check of a pool
+			// queue in its plan (#1654, pkg/teardown's Describe).
 			Effect:   "Allow",
-			Action:   []string{"sqs:GetQueueAttributes", "sqs:ListQueueTags", "sqs:DeleteQueue"},
+			Action:   []string{"sqs:GetQueueAttributes", "sqs:ListQueueTags", "sqs:DeleteQueue", "sqs:GetQueueUrl"},
 			Resource: PoolQueueARN,
 		},
 		{
@@ -439,6 +442,123 @@ func ScanSelfStatements() []Statement {
 			Effect:   "Allow",
 			Action:   []string{"s3:DeleteObject"},
 			Resource: LaunchConfigObjectARN,
+		},
+	}, AccountIdleStatements()...)
+}
+
+// LifecycleTableARN is the shared-account lifecycle lease table
+// (libs/lifecycle.TableName) in any region of the account the policy is in.
+// The only DynamoDB table the reaper may touch in a member account.
+const LifecycleTableARN = "arn:aws:dynamodb:*:*:table/spore-host-lifecycle"
+
+// CalqueRoleARN and CalqueQueueARN are calque's roles and queues, which the
+// account-idle sweep reads (never changes) to judge calque active
+// (pkg/calquefootprint, #1654).
+const (
+	CalqueRoleARN  = "arn:aws:iam::*:role/calque-*"
+	CalqueQueueARN = "arn:aws:sqs:*:*:calque-*"
+)
+
+// AccountIdleStatements are what the account-idle sweep (#1654, report mode)
+// needs in a member account, beyond the sweeps above: the lifecycle lease,
+// and the reads of `spawn footprint`'s scan and of calque's footprint, with
+// which it plans and re-checks a teardown it only reports.
+//
+// None of them deletes anything spawn or a user made. The writes are all on
+// the lease table: GetItem, UpdateItem and the item actions of the
+// TransactWriteItems that Observe sends (DynamoDB authorizes a transaction
+// per item action, so ConditionCheckItem, PutItem, UpdateItem and DeleteItem
+// are all listed), and creating that table, tagged, if it went missing
+// between the sweep's read of it and its write. The sweep never creates the
+// table for an account no spawn creator has marked; and it never calls
+// Lease.Finish, the one call that deletes the lease item.
+//
+// The reads are Resource '*' where the footprint scan spans every spore.host
+// name prefix (IAM metadata and tags, CloudFormation, Lambda, Logs,
+// EventBridge, Scheduler, SNS, DynamoDB table listing and tags, the tagging
+// API, the EC2 images, snapshots, volumes and network interfaces) or the API
+// has no resource ARN (ListBuckets, which returns names only). Two reads are
+// narrower: inline policy documents are read only on calque's roles, and
+// calque's queues only for their attributes and tags. S3 bucket tags and
+// emptiness stay on spawn's two bucket families (the sweep statements
+// above): another bucket the footprint names is reported without its tags,
+// and a staging bucket's emptiness is never listed (#1274), so the footprint
+// classes it as holding user data and the plan keeps it.
+func AccountIdleStatements() []Statement {
+	return []Statement{
+		{
+			Effect: "Allow",
+			Action: []string{
+				"dynamodb:GetItem",
+				"dynamodb:UpdateItem",
+				"dynamodb:PutItem",
+				"dynamodb:DeleteItem",
+				"dynamodb:ConditionCheckItem",
+				"dynamodb:DescribeTable",
+				"dynamodb:CreateTable",
+				"dynamodb:TagResource",
+			},
+			Resource: LifecycleTableARN,
+		},
+		{
+			Effect: "Allow",
+			Action: []string{
+				"cloudformation:DescribeStacks",
+				"dynamodb:ListTables",
+				"dynamodb:ListTagsOfResource",
+				"ec2:DescribeImages",
+				"ec2:DescribeNetworkInterfaces",
+				"ec2:DescribeSnapshots",
+				"ec2:DescribeVolumes",
+				"events:ListEventBuses",
+				"events:ListRules",
+				"events:ListTagsForResource",
+				"lambda:ListFunctions",
+				"lambda:ListTags",
+				"logs:DescribeLogGroups",
+				"logs:ListTagsForResource",
+				"scheduler:GetSchedule",
+				"scheduler:ListSchedules",
+				"sns:ListTopics",
+				"sns:ListTagsForResource",
+				"tag:GetResources",
+			},
+			Resource: "*",
+		},
+		{
+			// IAM metadata: names, tags, attachments and the profile-role
+			// links, never a policy document.
+			Effect: "Allow",
+			Action: []string{
+				"iam:GetRole",
+				"iam:ListRoleTags",
+				"iam:ListAttachedRolePolicies",
+				"iam:ListInstanceProfilesForRole",
+				"iam:GetInstanceProfile",
+				"iam:ListInstanceProfiles",
+				"iam:ListInstanceProfileTags",
+				"iam:ListPolicies",
+				"iam:GetPolicy",
+				"iam:ListPolicyTags",
+			},
+			Resource: "*",
+		},
+		{
+			// calque's per-queue inline grants (q-<hash>) on its worker roles.
+			Effect:   "Allow",
+			Action:   []string{"iam:ListRolePolicies", "iam:GetRolePolicy"},
+			Resource: CalqueRoleARN,
+		},
+		{
+			Effect:   "Allow",
+			Action:   []string{"sqs:GetQueueAttributes", "sqs:ListQueueTags"},
+			Resource: CalqueQueueARN,
+		},
+		{
+			// The footprint's bucket listing. No resource ARN; names only.
+			Effect:   "Allow",
+			Action:   []string{"s3:ListAllMyBuckets"},
+			Resource: "*",
 		},
 	}
 }
@@ -527,12 +647,39 @@ func ScheduleParamsSweepStatements() []Statement {
 	}
 }
 
-// OwnAccountStatements are every grant the reaper needs on its own
-// credentials for the schedules: ScheduleReferenceStatements and
-// ScheduleParamsSweepStatements. The SAM template grants exactly these to the
-// function, outside the ScanSelf branch.
-func OwnAccountStatements() []Statement {
+// SweepsTableARN and PipelinesTableARN are the orchestration tables the
+// account-idle sweep reads (#1654), beside the schedules table: a sweep or a
+// pipeline that is not finished there is an orchestrator working for a member
+// account. In pkg/scheduler.TableRegion, like the schedules.
+const (
+	SweepsTableARN    = "arn:aws:dynamodb:us-east-1:*:table/spawn-sweep-orchestration"
+	PipelinesTableARN = "arn:aws:dynamodb:us-east-1:*:table/spawn-pipeline-orchestration"
+)
+
+// InfraActivityStatements are the account-idle sweep's reads of the
+// orchestration tables, on the reaper's OWN credentials (#1654): a Scan of
+// each, read-only. The schedules table's Scan is ScheduleReferenceStatements'.
+// For a self-hosted reaper the tables are normally absent from its account;
+// the sweep reads a missing table as no records.
+func InfraActivityStatements() []Statement {
+	return []Statement{
+		{Effect: "Allow", Action: []string{"dynamodb:Scan"}, Resource: SweepsTableARN},
+		{Effect: "Allow", Action: []string{"dynamodb:Scan"}, Resource: PipelinesTableARN},
+	}
+}
+
+// ScheduleStatements are every grant the reaper needs on its own credentials
+// for the schedules: ScheduleReferenceStatements and
+// ScheduleParamsSweepStatements.
+func ScheduleStatements() []Statement {
 	return append(ScheduleReferenceStatements(), ScheduleParamsSweepStatements()...)
+}
+
+// OwnAccountStatements are every grant the reaper needs on its own
+// credentials: ScheduleStatements and InfraActivityStatements. The SAM
+// template grants exactly these to the function, outside the ScanSelf branch.
+func OwnAccountStatements() []Statement {
+	return append(ScheduleStatements(), InfraActivityStatements()...)
 }
 
 // StagingBucketSweepActions are what the empty-bucket sweep (#1301) needs on

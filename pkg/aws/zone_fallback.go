@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	smithy "github.com/aws/smithy-go"
+
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 )
 
 // capacityErrorCodes are the RunInstances error codes that mean "no capacity
@@ -293,6 +295,8 @@ type zoneLaunchAPI interface {
 // other zones offering the type. The result's ZoneAttempts are the attempts
 // that failed before the one that launched.
 func (c *Client) LaunchWithZoneFallback(ctx context.Context, launchConfig LaunchConfig, out io.Writer) (*LaunchResult, error) {
+	// As Launch: mark the lifecycle lease before anything is created (spawn#1654).
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(launchConfig.Region).Region)
 	p, err := c.prepareLaunch(ctx, launchConfig)
 	if err != nil {
 		return nil, err

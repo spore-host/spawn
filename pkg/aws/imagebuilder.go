@@ -19,6 +19,7 @@ import (
 	"github.com/aws/smithy-go"
 	libtags "github.com/spore-host/libs/tags"
 	"github.com/spore-host/libs/tags/iamtags"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/s3transfer"
 	"github.com/spore-host/spawn/pkg/sporetags"
 )
@@ -120,6 +121,7 @@ func (c *Client) EnsureImageBuilderSLR(ctx context.Context) (string, error) {
 // existing resources are reused, not recreated. This is what lets
 // `spawn image import` run without a separate CloudFormation deploy step.
 func (c *Client) EnsureImportInfrastructure(ctx context.Context, in EnsureImportInfrastructureInput) (string, error) {
+	lifecyclemark.Mark(ctx, c.cfg, lifecyclemark.ScopeGlobal) // before the import role and profile (spawn#1654)
 	cfg := c.regionalConfig(in.Region)
 	iamClient := iam.NewFromConfig(cfg)
 	ibClient := imagebuilder.NewFromConfig(cfg)

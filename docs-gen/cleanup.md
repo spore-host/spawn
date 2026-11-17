@@ -56,8 +56,11 @@ global, so this always checks every enabled region whatever --region says, and
 covers every principal's roles. The TTL reaper applies the same rule
 (REAPER_INSTANCE_ROLES). It also deletes spawn's spored managed policies
 (/spore-host/spored-*-v&lt;N&gt;) that no role has attached and that are at least 24
-hours old; the reaper detaches them from the roles it deletes but does not
-delete them.
+hours old, and not tagged spore-host:permanent=true; the reaper detaches them
+from the roles it deletes but does not delete them. The permissions boundary
+at the same path (spore-host/spawn-instance-boundary) is never deleted: it is
+permanent, and only an administrator's explicit removal will remove it
+(spawn#1656, not yet implemented).
 
 --pool-queues deletes only the SQS queues of pools nobody drained
 (spawn-pool-&lt;run id&gt;) and the task specs their submitters staged in the

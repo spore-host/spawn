@@ -8,6 +8,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/taskproto"
 )
 
@@ -50,6 +51,7 @@ func CreateForRun(ctx context.Context, sqsAPI SQSAPI, specs *SpecStore, runID st
 // directly — the AWS-SDK dependency stays inside pkg/ (the #326/#327 cmd-layer
 // boundary). specBucket/specPrefix locate staged specs.
 func CreateForRunWithConfig(ctx context.Context, cfg awssdk.Config, runID, specBucket, specPrefix string, visibilityTimeout int) (*Pool, error) {
+	lifecyclemark.Mark(ctx, cfg, cfg.Region) // before the queue (spawn#1654)
 	sqsClient := sqs.NewFromConfig(cfg)
 	specs := &SpecStore{Client: s3.NewFromConfig(cfg), Bucket: specBucket, Prefix: specPrefix}
 	return CreateForRun(ctx, sqsClient, specs, runID, visibilityTimeout)

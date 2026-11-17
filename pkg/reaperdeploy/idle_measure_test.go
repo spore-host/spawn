@@ -97,8 +97,9 @@ var (
 )
 
 // nonActionSentinels are the leading words of reaper log lines that record
-// something it did NOT do: a dry run, a report, an unparseable input.
-var nonActionSentinels = map[string]bool{"WOULD": true, "UNMANAGED": true, "UNPARSEABLE": true}
+// something it did NOT do: a dry run, a report, an unparseable input. REPORT
+// leads the account-idle sweep's plan rows (#1654), which delete nothing.
+var nonActionSentinels = map[string]bool{"WOULD": true, "UNMANAGED": true, "UNPARSEABLE": true, "REPORT": true}
 
 type reaperLogLine struct {
 	file, format, sentinel string

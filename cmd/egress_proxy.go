@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	sdkaws "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/egressproxy"
 	"github.com/spore-host/spawn/pkg/egressproxy/deploy"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 )
 
 // `spawn egress-proxy status | delete | upgrade` (#1515 phase 5): the
@@ -156,6 +158,9 @@ type egressProxyEnv struct {
 	// audit records each termination and group deletion.
 	audit *audit.AuditLogger
 	now   func() time.Time
+	// awsCfg is the account's config, for the lifecycle lease mark before
+	// upgrade creates a proxy (spawn#1654). Zero in tests.
+	awsCfg sdkaws.Config
 }
 
 // newEgressProxyEnv builds the real environment.
@@ -176,8 +181,9 @@ var newEgressProxyEnv = func(ctx context.Context) (*egressProxyEnv, error) {
 		network: func(ctx context.Context, region, subnetID string) (aws.PrivateNetwork, error) {
 			return client.DescribePrivateNetwork(ctx, region, subnetID)
 		},
-		audit: newAuditLogger(userID, uuid.New().String()),
-		now:   time.Now,
+		audit:  newAuditLogger(userID, uuid.New().String()),
+		now:    time.Now,
+		awsCfg: client.Config(),
 	}, nil
 }
 
@@ -743,6 +749,7 @@ func runEgressProxyUpgrade(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	lifecyclemark.Mark(ctx, env.awsCfg, region) // before the new proxy (spawn#1654)
 	res, err := egressProxyUpgrade(ctx, client.Deps, deploy.Request{
 		Region: region, VPCID: vpc, AvailabilityZone: plan.Replace[0].Proxy.AvailabilityZone,
 		PublicSubnets: network.PublicSubnets, Version: version(), Idle: idle, InstanceProfile: profile,

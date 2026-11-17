@@ -19,6 +19,7 @@ import (
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/launchconfig"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
@@ -500,6 +501,8 @@ func (c *Client) CreateOrGetInstanceProfile(ctx context.Context, config IAMRoleC
 // baseline is attached as (#1573): one per document, since a managed policy
 // name is per account.
 func (c *Client) createOrGetInstanceProfile(ctx context.Context, config IAMRoleConfig, baselineDoc, managedBase string) (string, error) {
+	// IAM is account-wide: the global scope of the lifecycle lease (spawn#1654).
+	lifecyclemark.Mark(ctx, c.cfg, lifecyclemark.ScopeGlobal)
 	iamClient := iam.NewFromConfig(c.cfg)
 
 	// Generate role name if not provided
@@ -1611,6 +1614,7 @@ func (c *Client) putSporedGrants(ctx context.Context, api sporedPolicyAPI, role,
 // invocations landing on different SIDES of that split is exactly #550's
 // symptom.
 func (c *Client) SetupSporedIAMRole(ctx context.Context) (string, error) {
+	lifecyclemark.Mark(ctx, c.cfg, lifecyclemark.ScopeGlobal) // before the shared spored role (spawn#1654)
 	iamClient := iam.NewFromConfig(c.cfg)
 
 	roleName := SporedRoleName

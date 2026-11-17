@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 	libtags "github.com/spore-host/libs/tags"
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
@@ -70,6 +71,9 @@ func runSetupAccount(cmd *cobra.Command, _ []string) error {
 
 	out := cmd.OutOrStdout()
 	warn := func(s string) { fmt.Fprintf(cmd.ErrOrStderr(), "  ! %s\n", s) }
+	// The boundary is permanent and never torn down, but this is a create in
+	// the account like any other (spawn#1654).
+	lifecyclemark.Mark(ctx, cfg, lifecyclemark.ScopeGlobal)
 	res, err := spawnaws.EnsureSpawnInstanceBoundary(ctx, setupAccountIAMClient(cfg), account, warn)
 	if err != nil {
 		return err

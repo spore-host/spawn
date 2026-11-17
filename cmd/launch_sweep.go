@@ -12,6 +12,7 @@ import (
 	"github.com/spore-host/spawn/pkg/audit"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/progress"
 	"github.com/spore-host/spawn/pkg/regions"
@@ -1399,6 +1400,12 @@ func launchSweepDetached(ctx context.Context, paramFormat *ParamFileFormat, base
 		return fmt.Errorf("failed to get AWS account ID: %w", err)
 	}
 
+	// Leave no trace (spawn#1654): mark spawn active in the compute account,
+	// in every region a member launches in and globally, before anything is
+	// created for the sweep. The orchestrator Lambda launches the members
+	// later; the reaper counts the running sweep record as activity.
+	lifecyclemark.Mark(ctx, devCfg, append(sweepRegions(paramFormat, sweepRegion), lifecyclemark.ScopeGlobal)...)
+
 	// Use spore-host-infra config for Lambda/S3/DynamoDB operations
 	infraCfg, err := spawnconfig.LoadInfraAWSConfig(ctx, "us-east-1")
 	if err != nil {
@@ -1694,4 +1701,27 @@ func waitForSweepCompletion(ctx context.Context, sweepID string, timeout time.Du
 			}
 		}
 	}
+}
+
+// sweepRegions is every region a sweep's members launch in: each row's
+// region, and def for a row with none. Sorted, without duplicates.
+func sweepRegions(pf *ParamFileFormat, def string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(r string) {
+		if r != "" && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	add(def)
+	if pf != nil {
+		for _, row := range pf.Params {
+			if r, ok := row["region"].(string); ok {
+				add(r)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

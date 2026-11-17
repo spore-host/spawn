@@ -115,6 +115,41 @@ func (c *Client) FootprintReport(ctx context.Context, in FootprintInput) *footpr
 	return rep
 }
 
+// GatherFootprint runs the scans FootprintReport builds on, for regions: the
+// spawn:managed tag scan and the control plane in each region, and the
+// account-wide IAM and S3 rows. A scan that fails becomes a note, as in
+// `spawn footprint`, which calls this.
+func (c *Client) GatherFootprint(ctx context.Context, regions []string) FootprintInput {
+	in := FootprintInput{Regions: regions}
+	for _, r := range regions {
+		tagged, _, err := c.DiscoverManagedResources(ctx, DiscoverOptions{Region: r})
+		if err != nil {
+			in.Notes = append(in.Notes, fmt.Sprintf("%s: tagged scan: %v", r, err))
+		} else {
+			in.Tagged = append(in.Tagged, tagged...)
+		}
+		cp, notes := c.ScanControlPlane(ctx, r)
+		in.ControlPlane = append(in.ControlPlane, cp...)
+		for _, n := range notes {
+			in.Notes = append(in.Notes, fmt.Sprintf("%s: %s", r, n))
+		}
+	}
+	g, gnotes := c.ScanGlobalFootprint(ctx)
+	in.Global = g
+	in.Notes = append(in.Notes, gnotes...)
+	return in
+}
+
+// AccountFootprint is `spawn footprint -o json` for regions of account: the
+// same scans and the same rules, as the libs/footprint report. The reaper's
+// account-idle sweep (spawn#1654) plans with it, so the plan it reports is the
+// one a human would hand `spawn teardown --plan`.
+func (c *Client) AccountFootprint(ctx context.Context, account string, regions []string, now time.Time) *footprint.Report {
+	in := c.GatherFootprint(ctx, regions)
+	in.Account, in.Now = account, now
+	return c.FootprintReport(ctx, in)
+}
+
 type fpBuilder struct {
 	c        *Client
 	account  string

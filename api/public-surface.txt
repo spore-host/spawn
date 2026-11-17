@@ -516,6 +516,7 @@ func (*AccessDeniedError) Error() string
 func (*AccessDeniedError) Unwrap() error
 func (*BoundaryMissingError) Error() string
 func (*BoundaryMissingError) Unwrap() error
+func (*Client) AccountFootprint(ctx context.Context, account string, regions []string, now time.Time) *footprint.Report
 func (*Client) AttachSnapshotToSelf(ctx context.Context, snapshotID string) (*MountSnapshotResult, error)
 func (*Client) BuildSnapshotFromReader(ctx context.Context, in BuildSnapshotInput, image io.Reader) (*BuildSnapshotResult, error)
 func (*Client) CheckAMIHealth(ctx context.Context, ami AMIInfo, region string) (*AMIHealthCheck, error)
@@ -564,6 +565,7 @@ func (*Client) FindCapacityBlockOffering(ctx context.Context, region, offeringID
 func (*Client) FindKeyPairByFingerprint(ctx context.Context, region, fingerprint string) (string, error)
 func (*Client) FindOrphanedSpawnAddresses(ctx context.Context, region string) ([]ManagedResource, error)
 func (*Client) FootprintReport(ctx context.Context, in FootprintInput) *footprint.Report
+func (*Client) GatherFootprint(ctx context.Context, regions []string) FootprintInput
 func (*Client) GetAL2023AMI(ctx context.Context, region string, arch string, gpu bool) (string, error)
 func (*Client) GetAMISnapshots(ctx context.Context, region, amiID string) ([]SnapshotDetail, error)
 func (*Client) GetAccountID(ctx context.Context) (string, error)

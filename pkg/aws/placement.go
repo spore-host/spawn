@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	smithy "github.com/aws/smithy-go"
+
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 )
 
 // placementGroupAvailableWait is how long CreatePlacementGroup waits for a new
@@ -29,6 +31,7 @@ func PlacementGroupAvailableWait() time.Duration { return placementGroupAvailabl
 // region must match the launch region; passing an empty string falls back to
 // the client's default region.
 func (c *Client) CreatePlacementGroup(ctx context.Context, name, region string) error {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the group (spawn#1654)
 	ec2Client := c.regionalEC2(region)
 
 	_, err := ec2Client.CreatePlacementGroup(ctx, &ec2.CreatePlacementGroupInput{

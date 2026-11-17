@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/platform"
 	"github.com/spore-host/spawn/pkg/scheduler"
 	"github.com/spore-host/spawn/pkg/staging"
@@ -237,6 +238,12 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get compute account ID: %w", err)
 	}
+	// The schedule will launch into the compute account: mark spawn active
+	// there (the launch region, and global for the roles it may make) before
+	// anything is created for it, so an idle teardown cannot claim the
+	// account between now and the first firing (spawn#1654). The reaper also
+	// counts a pending schedule as activity.
+	lifecyclemark.Mark(ctx, computeCfg, scheduleRegion, lifecyclemark.ScopeGlobal)
 
 	// Seed the launch keys the orchestrator cannot derive — above all a per-row
 	// AMI (#749) — exactly as the detached launch path does before its upload.

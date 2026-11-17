@@ -85,7 +85,7 @@ const spawnInstanceBoundarySchema = 1
 // schema so an admin (and spawn) can see which version is deployed.
 func spawnInstanceBoundaryDescription() string {
 	return fmt.Sprintf("spawn: the permissions boundary (schema v%d) capping every role spawn creates. "+
-		"Created and updated by `spawn setup-account`; `spawn cleanup --instance-roles` deletes it once no role uses it.",
+		"Created and updated by `spawn setup-account`. Permanent: no cleanup or teardown deletes it (spawn#1664).",
 		spawnInstanceBoundarySchema)
 }
 

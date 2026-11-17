@@ -33,6 +33,7 @@ import (
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/keypairsweep"
 	"github.com/spore-host/spawn/pkg/launchconfig"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/observability/tracing"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 )
@@ -653,6 +654,9 @@ func retryStopped(ctxErr error, attempts int, rejected error) error {
 // If LaunchConfig.PricePerHour is 0, Launch resolves the on-demand rate through
 // truffle, the suite's pricing authority (#533). See [resolvePricePerHour].
 func (c *Client) Launch(ctx context.Context, launchConfig LaunchConfig) (*LaunchResult, error) {
+	// Leave no trace (spawn#1654): mark spawn active in the launch region's
+	// lifecycle lease before anything is created. It never fails the launch.
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(launchConfig.Region).Region)
 	p, err := c.prepareLaunch(ctx, launchConfig)
 	if err != nil {
 		return nil, err
@@ -1083,6 +1087,7 @@ func (c *Client) CheckKeyPairExists(ctx context.Context, region, keyName string)
 // key, reused by every launch from that machine: keypairsweep.PurposeWorkstation,
 // which neither ever touches.
 func (c *Client) ImportKeyPair(ctx context.Context, region, keyName string, publicKey []byte) error {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the key pair (spawn#1654)
 	ec2Client := c.regionalEC2(region)
 
 	purpose := keypairsweep.PurposeWorkstation

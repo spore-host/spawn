@@ -42,6 +42,11 @@ func TestS3GrantsAreScopedToSpawnsTwoBucketFamilies(t *testing.T) {
 		if !s3 {
 			continue
 		}
+		// ListBuckets has no resource-level ARN and returns names only: the
+		// account-idle footprint lists the account's buckets with it (#1654).
+		if len(st.Action) == 1 && st.Action[0] == "s3:ListAllMyBuckets" && st.Resource == "*" {
+			continue
+		}
 		if !want[st.Resource] {
 			t.Errorf("s3 actions %v are granted on %q; only %v are allowed", st.Action, st.Resource, want)
 			continue
