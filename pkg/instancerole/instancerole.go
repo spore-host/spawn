@@ -490,6 +490,28 @@ func SweepWith(ctx context.Context, api API, inUse map[string]bool, refs Referen
 	return res, nil
 }
 
+// Inspect decides the one role name as SweepWith decides each role: it reads
+// the role's Facts and applies DecideWith. It also reports whether the
+// same-name instance profile exists, for Delete. References that
+// CollectReferences did not produce are refused (ErrReferencesNotCollected)
+// before anything is read. For a caller that deletes one role at a time
+// (pkg/teardown, spawn#1653) and must re-decide it at the moment of the
+// delete.
+func Inspect(ctx context.Context, api API, name string, inUse map[string]bool, refs References, now time.Time, opts Options) (Decision, bool, error) {
+	d := Decision{Name: name}
+	if !refs.collected {
+		return d, false, ErrReferencesNotCollected
+	}
+	f, err := gather(ctx, api, name, inUse, refs)
+	if err != nil {
+		d.Err, d.Reason = err, "could not read the role"
+		return d, false, err
+	}
+	d.Created, d.LastUsed = f.Created, f.LastUsed
+	d.Delete, d.Reason = DecideWith(f, now, opts)
+	return d, f.ProfileExists, nil
+}
+
 // gather reads the Facts for one role.
 func gather(ctx context.Context, api API, name string, inUse map[string]bool, refs References) (Facts, error) {
 	f := Facts{Name: name, InUse: inUse[name], ReferencedBy: refs.For(name)}

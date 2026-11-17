@@ -29,6 +29,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.6 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/account v1.32.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.82.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.73.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.16 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ebs v1.34.7 // indirect
@@ -105,7 +106,7 @@ require (
 	github.com/sigstore/sigstore-go v1.2.2 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.2 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/spore-host/libs v0.52.0 // indirect
+	github.com/spore-host/libs v0.53.0 // indirect
 	github.com/spore-host/truffle v0.63.0 // indirect
 	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect

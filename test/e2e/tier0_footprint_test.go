@@ -5,6 +5,9 @@ package e2e
 import (
 	"strings"
 	"testing"
+
+	"github.com/spore-host/libs/footprint"
+	libtags "github.com/spore-host/libs/tags"
 )
 
 // flatten collapses runs of whitespace so an assertion on wording survives the
@@ -99,19 +102,25 @@ func TestTier0_Footprint_FindsATaggedInstance(t *testing.T) {
 	}
 }
 
-// TestTier0_Footprint_JSONIsParseable pins the machine-readable shape, which
-// exists so an operator can diff two footprints over time rather than eyeballing
-// a table.
+// TestTier0_Footprint_JSONIsParseable pins the machine-readable shape: the
+// shared libs/footprint report (spawn#1653), which `spawn teardown --plan`
+// reads back, and which an operator can diff over time.
 func TestTier0_Footprint_JSONIsParseable(t *testing.T) {
 	env := startSpawnSubstrate(t)
 
 	out := env.runOK("footprint", "--region", "us-east-1", "-o", "json")
-	// Named top-level keys rather than a bare array, so an empty account is
+	// Named keys, resources and warnings always arrays, so an empty account is
 	// distinguishable from a failed scan.
-	for _, want := range []string{`"tagged"`, `"control_plane"`, `"global"`} {
+	for _, want := range []string{`"schema"`, `"tool"`, `"resources"`, `"warnings"`} {
 		if !strings.Contains(out, want) {
-			t.Errorf("footprint --json is missing the %s key; a consumer cannot tell an empty\n"+
-				"account from a failed scan without it:\n%s", want, out)
+			t.Errorf("footprint -o json is missing the %s key:\n%s", want, out)
 		}
+	}
+	rep, err := footprint.Decode(strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("footprint -o json does not decode as a libs/footprint report: %v\n%s", err, out)
+	}
+	if rep.Tool != libtags.ToolSpawn {
+		t.Errorf("report tool %q, want spawn", rep.Tool)
 	}
 }

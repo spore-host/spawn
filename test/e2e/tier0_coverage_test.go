@@ -38,6 +38,7 @@ func TestTier0_CommandCoverageGate(t *testing.T) {
 		"footprint":    "tier0_footprint_test.go (runs against a fresh account: must print the explicit \"does NOT mean the account is empty\" wording rather than a bare zero, which is the #708 lesson it exists to honour). The name-matching half — which resources are claimed as spore.host's and, more importantly, which are NOT — is unit-tested in pkg/aws/footprint_test.go, including that an over-broad matcher fails.",
 		"results":      "tier0_results_test.go (retention: empty-bucket wording, untracked vs run-tagged, not-opted-in reported unprovable, and read-only: objects and tags unchanged). Annotation reads and input re-checks are unit-tested against a fake in pkg/provenance and were verified against real S3 (#1076)",
 		"egress-proxy": "tier0_egress_proxy_test.go (status, text and -o json, and delete --all --dry-run against a fresh account; creating, upgrading and deleting a real proxy needs a booted instance answering an SSM readiness probe, live-tested on #1525)",
+		"teardown":     "unit-tested in pkg/teardown and cmd (report mode deletes nothing; reap deletes in dependency order against fakes; the guard refuses user data, the boundary, service, foreign and legacy-name resources). A real-account reap needs the lifecycle lease (#1654) and is a LIVE check, not Tier 0.",
 		"cleanup":      "tier0_cleanup_test.go (--dry-run previews, deletes nothing; default execute needs real resources → Tier 2/3)",
 	}
 

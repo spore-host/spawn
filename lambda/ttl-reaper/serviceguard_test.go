@@ -8,6 +8,8 @@ import (
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	"github.com/spore-host/spawn/pkg/footprintspawn"
 )
 
 // The guard is tested where it lives (CLAUDE.md, "Writing a gate", rule 2), with
@@ -122,5 +124,14 @@ func TestNetSweepKeepsServiceResources(t *testing.T) {
 	}
 	if len(f.tagged) != 0 {
 		t.Errorf("stamped %v: a service resource is not aged at all", f.tagged)
+	}
+}
+
+// The CLI's teardown (pkg/footprintspawn, spawn#1653) classes everything in
+// the infra account permanent and refuses to reap there; it must mean the same
+// account as this guard.
+func TestInfraAccountIDAgreesWithTheFootprint(t *testing.T) {
+	if InfraAccountID != footprintspawn.InfraAccountID {
+		t.Errorf("reaper InfraAccountID %s, pkg/footprintspawn %s", InfraAccountID, footprintspawn.InfraAccountID)
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
+	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -24,7 +25,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/imagebuilder"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	rgt "github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -88,18 +91,21 @@ func (refuse) Do(*http.Request) (*http.Response, error) {
 // clientTypes maps a service ID to its client, whose methods give each
 // operation's output type.
 var clientTypes = map[string]reflect.Type{
-	"CloudWatch Logs": reflect.TypeOf(&cloudwatchlogs.Client{}),
-	"DynamoDB":        reflect.TypeOf(&dynamodb.Client{}),
-	"EC2":             reflect.TypeOf(&ec2.Client{}),
-	"EventBridge":     reflect.TypeOf(&eventbridge.Client{}),
-	"FSx":             reflect.TypeOf(&fsx.Client{}),
-	"IAM":             reflect.TypeOf(&iam.Client{}),
-	"imagebuilder":    reflect.TypeOf(&imagebuilder.Client{}),
-	"Lambda":          reflect.TypeOf(&lambda.Client{}),
-	"S3":              reflect.TypeOf(&s3.Client{}),
-	"SNS":             reflect.TypeOf(&sns.Client{}),
-	"SQS":             reflect.TypeOf(&sqs.Client{}),
-	"STS":             reflect.TypeOf(&sts.Client{}),
+	"CloudFormation":              reflect.TypeOf(&cloudformation.Client{}),
+	"CloudWatch Logs":             reflect.TypeOf(&cloudwatchlogs.Client{}),
+	"DynamoDB":                    reflect.TypeOf(&dynamodb.Client{}),
+	"EC2":                         reflect.TypeOf(&ec2.Client{}),
+	"EventBridge":                 reflect.TypeOf(&eventbridge.Client{}),
+	"FSx":                         reflect.TypeOf(&fsx.Client{}),
+	"IAM":                         reflect.TypeOf(&iam.Client{}),
+	"imagebuilder":                reflect.TypeOf(&imagebuilder.Client{}),
+	"Lambda":                      reflect.TypeOf(&lambda.Client{}),
+	"Resource Groups Tagging API": reflect.TypeOf(&rgt.Client{}),
+	"S3":                          reflect.TypeOf(&s3.Client{}),
+	"Scheduler":                   reflect.TypeOf(&scheduler.Client{}),
+	"SNS":                         reflect.TypeOf(&sns.Client{}),
+	"SQS":                         reflect.TypeOf(&sqs.Client{}),
+	"STS":                         reflect.TypeOf(&sts.Client{}),
 }
 
 func zeroOutput(service, op string) (any, error) {
