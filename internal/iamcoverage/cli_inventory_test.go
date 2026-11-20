@@ -39,7 +39,8 @@ type cliCommand struct {
 // cliCommands walks the live command tree. Hidden commands are internal
 // plumbing (doc generation, the bootstrap body) and are left out, except the
 // experimental chat group, which is hidden only from help. rootPre are
-// the root's persistent pre-runs, which every command inherits.
+// the root's persistent pre- and post-runs (the post-run is the last mile,
+// libs#78), which every command inherits.
 func cliCommands() (rootPre []any, runnable []cliCommand) {
 	// The experimental chat commands are hidden from help, not internal: the
 	// reference keeps them, for whoever opts in.
@@ -52,6 +53,14 @@ func cliCommands() (rootPre []any, runnable []cliCommand) {
 		}
 		if c.PersistentPreRun != nil {
 			out = append(out, c.PersistentPreRun)
+		}
+		// The post-runs too: the root's is the last mile (libs#78), which
+		// runs after every command.
+		if c.PersistentPostRunE != nil {
+			out = append(out, c.PersistentPostRunE)
+		}
+		if c.PersistentPostRun != nil {
+			out = append(out, c.PersistentPostRun)
 		}
 		return out
 	}
@@ -219,8 +228,16 @@ How to read it:
 ## Outside any command
 
 What runs outside every command's own code: startup, the root command's
-persistent pre-run, and shell completion (completing an instance ID lists your
-instances):
+persistent pre-run, shell completion (completing an instance ID lists your
+instances), and the root command's post-run, the last mile (libs#78), which
+after a command succeeds reports what spawn left behind. The last mile only
+reads, at most once every 6 hours per account, and a read your identity is not
+allowed is skipped silently (one debug line under ` + "`--verbose`" + `), so none of its
+actions is needed for any command to work. The delete and write actions it
+can reach are the static over-approximation of the shared teardown executor
+(` + "`footprint.Execute`" + `), which the last mile runs in report mode only, with no
+lease, and a deleter and lifecycle client that refuse every write; it never
+makes one of them:
 
 `)
 	if len(every) == 0 {

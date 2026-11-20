@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The lazy CLI last mile, in report mode** (libs#78, part of the
+  leave-no-trace epic spore-host/spore-host#752). After a command succeeds,
+  spawn spends at most 30 s, at most once every 6 h per account, checking
+  with your own credentials for what no backstop will remove: a teardown
+  whose holder died (a stale `spore-host-lifecycle` lease, with what it would
+  still delete), the self-hosted reaper's teardown leftovers once no spawn
+  lifecycle item is left in any region (the role `spawn-reaper-teardown-invoke`,
+  once the reaper's own role is gone, and each region's
+  `spawn-reaper-teardown` schedule group that holds no job), and an empty
+  `spore-host-lifecycle` table. **It only reports, and stays out of the
+  way**: it writes nothing to stdout and nothing at all unless `--verbose`
+  (then `debug: lastmile ...` lines on stderr), never changes the exit
+  status, never runs after a failed command, creates and deletes nothing
+  (`SPORE_LASTMILE=reap` reports too, until libs#79), makes no STS call of
+  its own (it uses the account the command's own `GetCallerIdentity`
+  reported, and skips a command that made none), and between checks makes
+  no AWS call at all. A read your identity is not allowed is skipped
+  silently, and the first refusal stops the asking. It is skipped after
+  `completion`, `help`, `version`, `footprint`, `teardown`, `doctor`,
+  `cleanup`, every `reaper` subcommand and the hidden plumbing commands, and
+  never runs in spore.host's infra account. `SPORE_LASTMILE=off` turns it
+  off. It never judges spawn idle itself (that is the reaper's account-idle
+  sweep's job). `docs/reference/cli-iam-actions.md` lists its reads under
+  "Outside any command"; none is needed for any command to work.
 - **`spawn setup-account --remove`** (#1656, part of the leave-no-trace epic
   spore-host/spore-host#752) removes what `spawn setup-account` provisioned:
   the permissions boundary `spore-host/spawn-instance-boundary` and the new
@@ -50,6 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bumped `github.com/spore-host/libs` to v0.55.0 (the root module, the
+  `ttl-reaper` and `sweep-orchestrator` Lambdas) for `lastmile` (libs#78).
+  v0.54.0 is identical to v0.53.0.
 - `spawn doctor`'s "idle teardown" warning, and the diagnostic line a refused
   lease mark writes, now name the policy `spore-host/spawn-user-lifecycle` and
   its ARN, which an administrator attaches, instead of saying spore.host does

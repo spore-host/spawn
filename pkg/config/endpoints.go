@@ -315,6 +315,9 @@ func LoadInfraAWSConfig(ctx context.Context, region string) (aws.Config, error) 
 	// --account. When infra resolves through the same profile as everything
 	// else (SPAWN_INFRA_PROFILE="" or equal to it), it IS the user's account.
 	if profile == SharedProfile() {
+		// The caller's own account, so the CLI's account note applies too
+		// (SetCLIAPIOptions); a dedicated infra profile is not the caller's.
+		cfg.APIOptions = append(cfg.APIOptions, CLIAPIOptions()...)
 		if err := CheckAccount(ctx, cfg); err != nil {
 			return aws.Config{}, err
 		}
@@ -340,6 +343,8 @@ func LoadComputeAWSConfig(ctx context.Context, region string) (aws.Config, error
 	if err != nil {
 		return aws.Config{}, fmt.Errorf("load compute AWS config (%s): %w", cp.Describe(), err)
 	}
+	// The spawn CLI's account note (SetCLIAPIOptions); none elsewhere.
+	cfg.APIOptions = append(cfg.APIOptions, CLIAPIOptions()...)
 	// Compute is where instances launch: always subject to the account guard.
 	if err := CheckAccount(ctx, cfg); err != nil {
 		return aws.Config{}, err
