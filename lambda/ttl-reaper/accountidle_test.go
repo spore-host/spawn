@@ -147,6 +147,9 @@ type infraTables struct {
 	items map[string][]map[string]ddbtypes.AttributeValue
 	err   map[string]error
 	scans []string
+	// itemsAt, when set, answers the n-th Scan (from 1) instead of items:
+	// activity that starts or stops between one read and the next.
+	itemsAt func(n int, table string) []map[string]ddbtypes.AttributeValue
 }
 
 func (f *infraTables) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
@@ -154,6 +157,9 @@ func (f *infraTables) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(
 	f.scans = append(f.scans, name)
 	if err := f.err[name]; err != nil {
 		return nil, err
+	}
+	if f.itemsAt != nil {
+		return &dynamodb.ScanOutput{Items: f.itemsAt(len(f.scans), name)}, nil
 	}
 	return &dynamodb.ScanOutput{Items: f.items[name]}, nil
 }

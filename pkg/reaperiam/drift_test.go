@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/spore-host/spawn/internal/iamcoverage"
+	"golang.org/x/tools/go/ssa"
 )
 
 // reaperSource is the reaper's module, whose code this test analyses so the gate
@@ -23,6 +24,14 @@ var (
 	reaperCallsVal  map[string]bool
 	reaperCallsErr  error
 )
+
+// selfRemovalEntry is the self-hosted reaper's removal of itself (#1655). Its
+// calls run only in the reaper `spawn reaper deploy` made, on a role that
+// carries pkg/reaperdeploy's SelfRemovalStatements on top of these: never in
+// the operated reaper, nor through the member accounts' role. So it is cut
+// from the inventory these policies are held to, and pkg/reaperdeploy's
+// TestSelfRemovalCallsAreGranted holds its subtree to the self-hosted role.
+const selfRemovalEntry = "(*github.com/spore-host/spawn/lambda/ttl-reaper.reaper).removeSelf"
 
 // reaperAWSCalls returns every IAM action the reaper's code can call.
 //
@@ -50,7 +59,12 @@ func reaperAWSCalls(t *testing.T) map[string]bool {
 			reaperCallsErr = err
 			return
 		}
-		inv := prog.Calls(prog.Mains(), nil)
+		cut, err := prog.Func(selfRemovalEntry)
+		if err != nil {
+			reaperCallsErr = err
+			return
+		}
+		inv := prog.Calls(prog.Mains(), []*ssa.Function{cut})
 		if len(inv.Unmapped) > 0 {
 			reaperCallsErr = fmt.Errorf("the reaper makes AWS calls with no IAM action mapped, which no "+
 				"coverage check can see: %s", strings.Join(inv.Unmapped, "; "))

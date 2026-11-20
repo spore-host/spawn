@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The self-hosted reaper plans its own removal once the account is idle,
+  in report mode** (#1655, part of the leave-no-trace epic
+  spore-host/spore-host#752). When the account-idle sweep of the reaper
+  `spawn reaper deploy` made has, in one run, reported every scope it judges
+  (each scanned region and `global`) and its artifact bucket holds only
+  `ttl-reaper/` objects, it logs the plan: one-shot EventBridge Scheduler jobs
+  in the group `spawn-reaper-teardown`, run as a new role
+  `spawn-reaper-teardown-invoke`, that delete its function at +2m, its role's
+  policies at +4m and the role at +5m (kept while another region's reaper
+  shares it), and its log group at +15m; then its artifact bucket, emptied and
+  deleted directly only when tagged `spawn:managed=true`; then, last, its two
+  EventBridge rules, their targets and its invoke permissions. Every step is
+  logged as `reaper-selfremoval REPORT step=... offset=... target=...
+  resource=...`, with a summary line. **It creates and deletes nothing**:
+  `REAPER_SELF_REMOVAL` (`spawn reaper deploy --self-removal`) is
+  `off|report|reap`, default `report`, and `reap` reports too until #1657. The
+  reaper never deletes its own function, log group or role from inside
+  itself, and the operated reaper never removes itself. So that every scope
+  can come due in the same run, the self-hosted reaper holds a scope that is
+  idle past the grace while another is still inside it and nothing is active
+  (`account_idle_held`).
+- `spawn reaper deploy` creates the role `spawn-reaper-teardown-invoke`
+  (#1655), tagged `spore-host:managed-by=spawn` and never
+  `spore-host:role=service`. It trusts only EventBridge Scheduler for this
+  account (`aws:SourceAccount`) and may only delete the reaper's function and
+  log group (any region), empty its role of its inline policy and the
+  `AWSLambdaBasicExecutionRole` attachment, and delete that role; it carries
+  explicit Denies on anything tagged `spore-host:role=service` and on the
+  `spore-host/spawn-instance-boundary` policy. The reaper's own role gains
+  `lambda:GetFunction` on its function, read-only access to its artifact
+  bucket, `scheduler:CreateSchedule` in `spawn-reaper-teardown` only,
+  `scheduler:CreateScheduleGroup` and `scheduler:TagResource` on that group,
+  and `iam:PassRole` on the invoke role to Scheduler only. **Redeploy with
+  `spawn reaper deploy`** for the code, the role and the grants.
+  `spawn reaper teardown` also removes the invoke role and
+  the schedule group, which needs `scheduler:DeleteScheduleGroup` and
+  `scheduler:DeleteSchedule`.
 - **The TTL reaper's account-idle sweep, in report mode** (#1654, part of the
   leave-no-trace epic spore-host/spore-host#752). Once per member account per
   run it judges each scanned region and the `global` (IAM) scope active or

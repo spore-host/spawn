@@ -16,6 +16,7 @@ import (
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/pipeline"
+	"github.com/spore-host/spawn/pkg/reaperdeploy"
 	"github.com/spore-host/spawn/pkg/reaperiam"
 	"github.com/spore-host/spawn/pkg/taskiam"
 	"golang.org/x/tools/go/ssa"
@@ -208,6 +209,19 @@ func sweepCrossAccountPolicy(t *testing.T) *Policy {
 
 const sweepCrossAccountPolicySource = "pkg/aws SweepCrossAccountPolicyDocument (SpawnSweepCrossAccountRole)"
 
+// reaperSelfRemovalEntry is the self-hosted reaper's self-removal
+// (lambda/ttl-reaper selfremoval.go).
+const reaperSelfRemovalEntry = "(*github.com/spore-host/spawn/lambda/ttl-reaper.reaper).removeSelf"
+
+func selfHostedReaperPolicy(t *testing.T) *Policy {
+	t.Helper()
+	doc, err := reaperdeploy.PolicyDocument(exAccount, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustPolicy(t)(ParsePolicyJSON("pkg/reaperdeploy PolicyDocument", doc))
+}
+
 func scanSelfPolicy(t *testing.T) *Policy {
 	t.Helper()
 	doc, err := reaperiam.ScanSelfPolicyDocument()
@@ -302,6 +316,9 @@ var principals = []principal{
 		// role carrying the scan-self policy.
 		name:  "ttl-reaper",
 		build: build{dir: "lambda/ttl-reaper", pkg: ".", goos: []string{"linux"}},
+		// The self-hosted reaper's removal of itself runs only in `spawn
+		// reaper deploy`'s reaper, on its role: the principal below.
+		cuts: []string{reaperSelfRemovalEntry},
 		contexts: []credContext{
 			// s3:GetObject is the schedules' params (#1378, pkg/instancerole
 			// ScheduleSource), read in the reaper's own account; nothing the
@@ -324,6 +341,20 @@ var principals = []principal{
 				{"scan-self (SAM TTLReaperFunction, ScanSelf=true)", cfnPolicy("lambda/ttl-reaper/template.yaml", "TTLReaperFunction")},
 			}},
 		},
+	},
+	{
+		// The self-hosted reaper's removal of itself (#1655): only in the
+		// reaper `spawn reaper deploy` made, scanning its own account, so on
+		// the one role that deploy writes (pkg/reaperdeploy.PolicyDocument).
+		// It passes the teardown invoke role to Scheduler for the one-shot
+		// jobs.
+		name:   "ttl-reaper self-removal",
+		build:  build{dir: "lambda/ttl-reaper", pkg: ".", goos: []string{"linux"}},
+		roots:  []string{reaperSelfRemovalEntry},
+		passes: []passedRole{{role: reaperdeploy.TeardownInvokeRoleName, service: "scheduler.amazonaws.com"}},
+		contexts: []credContext{{name: "function role", variants: []variant{
+			{"self-hosted (pkg/reaperdeploy PolicyDocument, written by `spawn reaper deploy`)", selfHostedReaperPolicy},
+		}}},
 	},
 	{
 		name:   "sweep-orchestrator",

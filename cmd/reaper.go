@@ -37,6 +37,7 @@ var (
 	reaperLaunchCfgs   string
 	reaperAccountIdle  string
 	reaperIdleGrace    string
+	reaperSelfRemoval  string
 	reaperTTLGrace     string
 	reaperEmptyBuckets string
 	reaperMaxAge       string
@@ -201,6 +202,8 @@ func registerReaperDeployFlags(fs *pflag.FlagSet) {
 		"Account-idle sweep (judges this account idle from every activity signal and, after the grace, logs the teardown it would do; never deletes yet), REAPER_ACCOUNT_IDLE: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report, and reap reports until spawn#1657)")
 	fs.StringVar(&reaperIdleGrace, "account-idle-grace", "",
 		"How long nothing spawn manages may be active before the account-idle sweep reports the teardown, REAPER_ACCOUNT_IDLE_GRACE, e.g. 24h or 30d; also the longest 'teardown --if-idle-for' can wait for (default: keep; the reaper's default is "+shortDuration(reaperconfig.DefaultAccountIdleGrace)+")")
+	fs.StringVar(&reaperSelfRemoval, "self-removal", "",
+		"The reaper's removal of itself once every scope it scans has been idle past the account-idle grace (logs the plan: one-shot jobs delete its function, role and log group, and it deletes its rules and artifact bucket; never deletes yet), REAPER_SELF_REMOVAL: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report, and reap reports until spawn#1657)")
 	fs.StringVar(&reaperEmptyBuckets, "empty-buckets", "",
 		"Empty spawn-staging/spawn-results bucket sweep, REAPER_EMPTY_BUCKETS: "+strings.Join(reaperconfig.Modes(), "|")+" (default: keep; the reaper's default is report)")
 	fs.StringVar(&reaperTTLGrace, "ttl-grace", "",
@@ -291,6 +294,7 @@ var reaperDeployFlags = map[string]struct {
 	reaperconfig.EnvLaunchConfigs:    {"launch-configs", &reaperLaunchCfgs},
 	reaperconfig.EnvAccountIdle:      {"account-idle", &reaperAccountIdle},
 	reaperconfig.EnvAccountIdleGrace: {"account-idle-grace", &reaperIdleGrace},
+	reaperconfig.EnvSelfRemoval:      {"self-removal", &reaperSelfRemoval},
 	reaperconfig.EnvNotifyURL:        {"notify-url", &reaperNotifyURL},
 }
 

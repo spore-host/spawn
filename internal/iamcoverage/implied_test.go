@@ -130,6 +130,8 @@ var impliedInputTypes = map[string]any{
 	"lambda:CreateFunction":                             lambda.CreateFunctionInput{},
 	"lambda:UpdateFunctionConfiguration":                lambda.UpdateFunctionConfigurationInput{},
 	"scheduler:CreateSchedule":                          scheduler.CreateScheduleInput{},
+	"scheduler:CreateScheduleGroup":                     scheduler.CreateScheduleGroupInput{},
+	"scheduler:DeleteScheduleGroup":                     scheduler.DeleteScheduleGroupInput{},
 	"scheduler:UpdateSchedule":                          scheduler.UpdateScheduleInput{},
 	"events:PutTargets":                                 eventbridge.PutTargetsInput{},
 	"ssm:SendCommand":                                   ssm.SendCommandInput{},

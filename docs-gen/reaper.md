@@ -102,6 +102,7 @@ spawn reaper deploy [flags]
 | `--regions` |  | string |  | Comma-separated regions for the reaper to scan (default: keep the existing reaper's; the deploy region for a new one) |
 | `--schedule-params` |  | string |  | Orphaned schedule params sweep (spawn-schedules-*/schedules/&lt;id&gt;/params.yaml with no schedule record, 30 days old), REAPER_SCHEDULE_PARAMS: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--schedule` |  | string |  | EventBridge schedule expression (default: keep the existing reaper's; rate(10 minutes) for a new one) |
+| `--self-removal` |  | string |  | The reaper's removal of itself once every scope it scans has been idle past the account-idle grace (logs the plan: one-shot jobs delete its function, role and log group, and it deletes its rules and artifact bucket; never deletes yet), REAPER_SELF_REMOVAL: off\|report\|reap (default: keep; the reaper's default is report, and reap reports until spawn#1657) |
 | `--spot-requests` |  | string |  | Orphaned Spot-request sweep, REAPER_SPOT_REQUESTS: off\|report\|reap (default: keep; the reaper's default is report) |
 | `--ttl-grace` |  | string |  | How long past its TTL deadline a running instance whose spored still checks in is left for spored to end itself, REAPER_TTL_GRACE, 0 to 1h (default: keep; the reaper's default is 10m) |
 | `--version` |  | string |  | spawn release to take the reaper artifact from (default: this binary's version) |

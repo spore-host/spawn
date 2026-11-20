@@ -22,6 +22,8 @@ import (
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	schedulertypes "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 	"github.com/aws/smithy-go"
 	libtags "github.com/spore-host/libs/tags"
 	"github.com/spore-host/libs/tags/iamtags"
@@ -29,7 +31,6 @@ import (
 
 	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
-	"github.com/spore-host/spawn/pkg/reaperiam"
 	"github.com/spore-host/spawn/pkg/sporetags"
 )
 
@@ -91,6 +92,10 @@ type Deployer struct {
 	Lambda LambdaAPI
 	Events EventsAPI
 	S3     S3API
+
+	// Scheduler deletes the self-removal's schedule group on teardown
+	// (spawn#1655). Nil makes Teardown say it left the group.
+	Scheduler SchedulerAPI
 
 	// Config is the account's config, for the lifecycle lease mark Deploy
 	// makes before it creates anything (spawn#1654). New sets it; a zero
@@ -406,6 +411,15 @@ func (d *Deployer) Deploy(ctx context.Context, opts Options) (*Result, error) {
 	res.RoleARN = roleARN
 	res.Actions = append(res.Actions, actionWord(created, "role", RoleName))
 
+	// The role the self-removal's one-shot jobs run as (spawn#1655), made
+	// now so the reaper never creates a role when the account goes idle.
+	invokeCreated, err := d.ensureTeardownInvokeRole(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	res.Actions = append(res.Actions, actionWord(invokeCreated, "role", TeardownInvokeRoleName)+
+		" (runs the reaper's self-removal jobs; may delete only the reaper's function, log group and role)")
+
 	// IAM is eventually consistent: a role created a moment ago is not yet usable by
 	// Lambda, which fails CreateFunction with "The role defined for the function
 	// cannot be assumed by Lambda". Only wait when we just created it.
@@ -505,7 +519,7 @@ func (d *Deployer) ensureRole(ctx context.Context, opts Options) (string, bool, 
 	// Always re-apply: this is how a re-deploy picks up a widened permission set,
 	// and it is the mechanism that heals a role created before the fsx:/ssm: grants
 	// were added (#625).
-	policy, err := reaperiam.ScanSelfPolicyDocument()
+	policy, err := PolicyDocument(opts.AccountID, opts.Bucket)
 	if err != nil {
 		return "", false, err
 	}
@@ -1049,12 +1063,30 @@ func (d *Deployer) Teardown(ctx context.Context, opts TeardownOptions) ([]string
 
 	_, err = d.IAM.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{
 		RoleName:  awssdk.String(RoleName),
-		PolicyArn: awssdk.String("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"),
+		PolicyArn: awssdk.String(BasicExecutionPolicyARN),
 	})
 	note("basic execution policy", err)
 
 	_, err = d.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: awssdk.String(RoleName)})
 	note("role "+RoleName, err)
+
+	// The self-removal's group and invoke role (spawn#1655): the human path
+	// removes them too, rather than leaving them for the lazy last mile.
+	// The group first, which deletes any one-shot job still in it, then the
+	// role those jobs would have run as.
+	switch {
+	case d.Scheduler == nil:
+		removed = append(removed, fmt.Sprintf("left schedule group %s, if any (no Scheduler client)", TeardownScheduleGroup))
+	default:
+		_, err = d.Scheduler.DeleteScheduleGroup(ctx, &scheduler.DeleteScheduleGroupInput{Name: awssdk.String(TeardownScheduleGroup)})
+		note("schedule group "+TeardownScheduleGroup, err)
+	}
+	_, err = d.IAM.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
+		RoleName: awssdk.String(TeardownInvokeRoleName), PolicyName: awssdk.String(TeardownInvokePolicyName),
+	})
+	note("role policy "+TeardownInvokePolicyName, err)
+	_, err = d.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: awssdk.String(TeardownInvokeRoleName)})
+	note("role "+TeardownInvokeRoleName, err)
 
 	// The log group after the function, so nothing can invoke it and have
 	// Lambda recreate the group (unretained) behind us.
@@ -1093,7 +1125,9 @@ func isNotFound(err error) bool {
 	var lamNF *lambdatypes.ResourceNotFoundException
 	var ebNF *ebtypes.ResourceNotFoundException
 	var logsNF *cwtypes.ResourceNotFoundException
-	return errors.As(err, &iamNF) || errors.As(err, &lamNF) || errors.As(err, &ebNF) || errors.As(err, &logsNF)
+	var schedNF *schedulertypes.ResourceNotFoundException
+	return errors.As(err, &iamNF) || errors.As(err, &lamNF) || errors.As(err, &ebNF) || errors.As(err, &logsNF) ||
+		errors.As(err, &schedNF)
 }
 
 // putRule is PutRule, retried once without the tags when it is refused as
@@ -1187,6 +1221,8 @@ func New(cfg awssdk.Config) *Deployer {
 		S3:     s3.NewFromConfig(cfg),
 		Logs:   cwlogs.NewFromConfig(cfg),
 		Config: cfg,
+
+		Scheduler: scheduler.NewFromConfig(cfg),
 	}
 }
 
