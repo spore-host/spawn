@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.168.0] - 2026-11-20
-
 ### Added
 
 - **`spawn setup-account --remove`** (#1656, part of the leave-no-trace epic
@@ -49,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when spawn's document changes and is otherwise a no-op.
 - `pkg/testutil.IAMAccount`, an in-memory IAM account for hermetic tests of
   policy and role provisioning and removal.
+
+### Changed
+
+- `spawn doctor`'s "idle teardown" warning, and the diagnostic line a refused
+  lease mark writes, now name the policy `spore-host/spawn-user-lifecycle` and
+  its ARN, which an administrator attaches, instead of saying spore.host does
+  not provision the permissions (#1666).
+  baseline cannot re-create it. The boundary is permanent account setup; it
+  is listed as kept, and only `spawn setup-account --remove` (#1656) removes
+  it. A spored managed
+
+## [0.168.0] - 2026-11-20
+
+### Added
+
 - **The self-hosted reaper plans its own removal once the account is idle,
   in report mode** (#1655, part of the leave-no-trace epic
   spore-host/spore-host#752). When the account-idle sweep of the reaper
@@ -185,8 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image (untagged before); the `spore-portal-onboard` role; the hybrid
   registry table; and pipeline notification topics. None gets
   `spore-host:role`: what spawn makes for users stays deletable.
-- The permissions boundary `spore-host/spawn-instance-boundary`, permanent
-  account setup (with the user lifecycle policy, #1666), is tagged `spore-host:managed-by=spawn` and
+- The permissions boundary `spore-host/spawn-instance-boundary`, the one spawn
+  resource kept on purpose, is tagged `spore-host:managed-by=spawn` and
   `spore-host:permanent=true`, the marker leave-no-trace teardown keeps it by.
   `spawn setup-account` adds the tags to a boundary an older spawn created.
 - `spawn teardown --plan <file|-> [--mode report|reap]` carries out a
@@ -232,10 +245,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `spawn doctor`'s "idle teardown" warning, and the diagnostic line a refused
-  lease mark writes, now name the policy `spore-host/spawn-user-lifecycle` and
-  its ARN, which an administrator attaches, instead of saying spore.host does
-  not provision the permissions (#1666).
 - **`spawn reaper teardown --if-idle-for` judges idleness by the reaper's
   lifecycle verdict** (#1654): spawn is idle in the account when the reaper's
   account-idle sweep has recorded every scanned region and the global scope
@@ -299,9 +308,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`spawn cleanup --instance-roles` no longer deletes the
   `spore-host/spawn-instance-boundary` permissions boundary** once no role uses
   it (#1664). That broke every non-admin's next launch, because the documented
-  baseline cannot re-create it. The boundary is permanent account setup; it
-  is listed as kept, and only `spawn setup-account --remove` (#1656) removes
-  it. A spored managed
+  baseline cannot re-create it. The boundary is spore.host's one permanent
+  piece in an account; it is listed as kept, and only an administrator's
+  explicit removal (#1656, not yet implemented) removes it. A spored managed
   policy tagged `spore-host:permanent=true` is kept too, and so is one whose
   tags cannot be read: the sweep now needs `iam:ListPolicyTags`, and no longer
   calls `ListPolicyVersions` or `DeletePolicyVersion`. The reaper's roles grant
