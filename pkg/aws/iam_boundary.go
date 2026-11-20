@@ -440,9 +440,21 @@ const boundaryVersionCap = 5
 // leaves room for one new version (deletes down to boundaryVersionCap-1), and
 // never deletes the default version.
 func pruneBoundaryVersions(ctx context.Context, api BoundaryAdminAPI, arn string, warn func(string)) (int, error) {
+	return prunePolicyVersions(ctx, api, arn, "the spawn permissions boundary", warn)
+}
+
+// policyVersionAPI is the IAM slice prunePolicyVersions uses.
+type policyVersionAPI interface {
+	ListPolicyVersions(ctx context.Context, in *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
+	DeletePolicyVersion(ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
+}
+
+// prunePolicyVersions is pruneBoundaryVersions for any managed policy at arn;
+// what names it in errors and warnings.
+func prunePolicyVersions(ctx context.Context, api policyVersionAPI, arn, what string, warn func(string)) (int, error) {
 	lv, err := api.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{PolicyArn: aws.String(arn)})
 	if err != nil {
-		return 0, fmt.Errorf("list the versions of the spawn permissions boundary %s: %w", arn, err)
+		return 0, fmt.Errorf("list the versions of %s %s: %w", what, arn, err)
 	}
 	var nonDefault []types.PolicyVersion
 	for _, v := range lv.Versions {
@@ -463,9 +475,9 @@ func pruneBoundaryVersions(ctx context.Context, api BoundaryAdminAPI, arn string
 			return e
 		})
 		if derr != nil {
-			return pruned, fmt.Errorf("delete the superseded version %s of the spawn permissions boundary %s: %w", id, arn, derr)
+			return pruned, fmt.Errorf("delete the superseded version %s of %s %s: %w", id, what, arn, derr)
 		}
-		warn(fmt.Sprintf("deleted the superseded version %s of the spawn permissions boundary to stay under IAM's %d-version limit", id, boundaryVersionCap))
+		warn(fmt.Sprintf("deleted the superseded version %s of %s to stay under IAM's %d-version limit", id, what, boundaryVersionCap))
 		pruned++
 	}
 	return pruned, nil

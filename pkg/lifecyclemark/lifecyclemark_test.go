@@ -148,7 +148,7 @@ func TestMarkDeniedIsSilentLogsOnceAndContinues(t *testing.T) {
 	if n := strings.Count(log, "could not mark spawn active"); n != 1 {
 		t.Fatalf("%d diagnostic lines, want exactly 1:\n%s", n, log)
 	}
-	for _, want := range append([]string{lifecycle.TableName, "never tears it down", "spawn doctor", TableARNPattern}, RequiredActions...) {
+	for _, want := range append([]string{lifecycle.TableName, "never tears it down", "spawn doctor", TableARNPattern, UserPolicy, "spawn setup-account"}, RequiredActions...) {
 		if !strings.Contains(log, want) {
 			t.Errorf("the diagnostic line does not say %q:\n%s", want, log)
 		}
@@ -274,5 +274,27 @@ func TestProbe(t *testing.T) {
 	}
 	if err := Probe(ctx, f); err == nil || errors.Is(err, ErrNoTable) || !strings.Contains(err.Error(), "UpdateItem") {
 		t.Errorf("a refused write: %v, want the UpdateItem refusal", err)
+	}
+}
+
+// UserPolicy grants what the mark needs and what the verdict read needs, and
+// nothing else (spawn#1666).
+func TestUserActionsAreTheMarkAndTheVerdictRead(t *testing.T) {
+	got := UserActions()
+	want := append(append([]string{}, RequiredActions...), VerdictReadActions...)
+	if len(got) != len(want) {
+		t.Fatalf("UserActions %v, want %v", got, want)
+	}
+	have := map[string]bool{}
+	for i, a := range got {
+		have[a] = true
+		if i > 0 && got[i-1] >= a {
+			t.Errorf("UserActions is not sorted and unique: %v", got)
+		}
+	}
+	for _, a := range want {
+		if !have[a] {
+			t.Errorf("UserActions lacks %s", a)
+		}
 	}
 }

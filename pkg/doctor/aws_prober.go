@@ -287,11 +287,19 @@ func (p *awsProber) IdleTeardownLease(ctx context.Context) (string, error) {
 	case errors.Is(err, lifecyclemark.ErrNoTable):
 		return fmt.Sprintf("no %s table in %s yet; the first launch creates it", lifecycle.TableName, region), nil
 	default:
-		return "", fmt.Errorf("idle teardown unavailable: the %s lease table isn't writable by %s (%v). Launches are unaffected, "+
-			"but spawn's idle teardown never tears this account down. spore.host does not provision this yet (spawn#1666); "+
-			"an administrator can grant %s on %s", lifecycle.TableName, principal, err,
-			strings.Join(lifecyclemark.RequiredActions, ", "), lifecyclemark.TableARNPattern)
+		return "", leaseUnavailable(acct, principal, err)
 	}
+}
+
+// leaseUnavailable is the idle-teardown check's Warn: the lease table is not
+// writable by principal. It points at the policy `spawn setup-account`
+// provisions for exactly this (spawn#1666).
+func leaseUnavailable(acct, principal string, err error) error {
+	return fmt.Errorf("idle teardown unavailable: the %s lease table isn't writable by %s (%v). Launches are unaffected, "+
+		"but spawn's idle teardown never tears this account down. An administrator attaches the policy %s "+
+		"(arn:aws:iam::%s:policy/%s, created by `spawn setup-account`) to this identity's group or role; "+
+		"it grants %s on %s", lifecycle.TableName, principal, err, lifecyclemark.UserPolicy, acct, lifecyclemark.UserPolicy,
+		strings.Join(lifecyclemark.UserActions(), ", "), lifecyclemark.TableARNPattern)
 }
 
 func (p *awsProber) ReaperConfigured(ctx context.Context) (string, error) {

@@ -266,3 +266,49 @@ func TestLeaseRequiredActionsAreWhatMarkCalls(t *testing.T) {
 		t.Errorf("Mark calls %v; lifecyclemark.RequiredActions says %v", got, want)
 	}
 }
+
+// TestUserLifecyclePolicyGrantsWhatTheLeaseCallersCall: the policy
+// `spawn setup-account` provisions for CLI users, spore-host/spawn-user-lifecycle
+// (spawn#1666), grants lifecyclemark.UserActions. Those must be exactly the
+// DynamoDB actions the user-side lease callers reach: the mark every creator
+// makes, `spawn doctor`'s probe, and the verdict read of
+// `spawn reaper teardown --if-idle-for` ((*lifecycle.Client).Get, through
+// pkg/reaperdeploy.LeaseReader). A caller that gains an action the policy
+// lacks fails here, and so does a policy action no caller still needs.
+func TestUserLifecyclePolicyGrantsWhatTheLeaseCallersCall(t *testing.T) {
+	prog, err := Load(LoadConfig{Dir: repoRoot, GOOS: "linux", GOARCH: "amd64", Patterns: []string{"."}, Root: repoRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roots []*ssa.Function
+	for _, name := range []string{
+		markFunc,
+		"github.com/spore-host/spawn/pkg/lifecyclemark.Probe",
+		"(*github.com/spore-host/libs/lifecycle.Client).Get",
+	} {
+		f, err := prog.Func(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(dynamoActions(prog.Calls([]*ssa.Function{f}, nil))); n == 0 {
+			t.Fatalf("%s reaches no DynamoDB action: the walk has broken", name)
+		}
+		roots = append(roots, f)
+	}
+	got := dynamoActions(prog.Calls(roots, nil))
+	want := lifecyclemark.UserActions()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("the lease callers reach %v; spore-host/spawn-user-lifecycle grants %v", got, want)
+	}
+}
+
+func dynamoActions(inv Inventory) []string {
+	var out []string
+	for a := range inv.Actions {
+		if strings.HasPrefix(a, "dynamodb:") {
+			out = append(out, a)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
