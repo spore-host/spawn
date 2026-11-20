@@ -1188,7 +1188,9 @@ func TestLastMileSkipsWhenAStepFails(t *testing.T) {
 				return nil, &smithy.GenericAPIError{Code: "UnauthorizedOperation", Message: "not authorized to perform: ec2:DescribeRegions"}
 			}
 		}, "debug: lastmile: skipped: list the account's regions: api error UnauthorizedOperation"},
-		"no budget left": {func(*lmWorld) { lastMileBudget = time.Nanosecond }, "debug: lastmile: skipped: no budget left"},
+		// Already past its deadline: a positive budget this small is not
+		// deterministic where the clock is coarse (Windows).
+		"no budget left": {func(*lmWorld) { lastMileBudget = -time.Nanosecond }, "debug: lastmile: skipped: no budget left"},
 	}
 	for name, tc := range cases {
 		for _, v := range []bool{false, true} {
