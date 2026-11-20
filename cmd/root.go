@@ -72,6 +72,11 @@ func Execute() {
 	// And so a release build's user data fetches the bootstrap body published
 	// for exactly this release (#1274); pkg/launcher cannot import cmd either.
 	launcher.CallerVersion = version()
+	// The last mile (lastmile.go, libs#78) reads the account the command's
+	// own GetCallerIdentity reported, so it makes no STS call of its own:
+	// every config built for the caller's account notes it. Here, not in
+	// pkg/, so no other program that imports spawn's packages records it.
+	spawnconfig.SetCLIAPIOptions(callerAccounts.Middleware)
 
 	// Chat-platform entry points are hidden from help unless opted in
 	// (chat_gate.go, spore-host/spore-host#611).
@@ -162,6 +167,10 @@ func init() {
 		spawnconfig.SetSharedFlags(spawnProfile, spawnRegion, spawnAccount)
 		return nil
 	}
+	// The lazy CLI last mile (libs#78): after a command succeeds, report what
+	// spawn left behind, to --verbose stderr only. It never fails the
+	// command, writes nothing to stdout and is bounded (lastmile.go).
+	rootCmd.PersistentPostRunE = lastMileHook
 
 	// Add global i18n and accessibility flags
 	rootCmd.PersistentFlags().StringVar(&flagLang, "lang", "", "Language for output (en, es, fr, de, ja, pt)")

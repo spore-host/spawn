@@ -117,6 +117,10 @@ func NewClientWithRegion(ctx context.Context, region string) (*Client, error) {
 	// --account / SPORE_ACCOUNT (#1118): refuse before handing out a client
 	// whose credentials belong to another account, so no call can be made with
 	// it. No account pinned = no STS call.
+	// The spawn CLI's own middleware (none in any other program): it notes
+	// the account a GetCallerIdentity made with this config reports, the
+	// account guard's below included.
+	cfg.APIOptions = append(cfg.APIOptions, spawnconfig.CLIAPIOptions()...)
 	if err := spawnconfig.CheckAccount(ctx, cfg); err != nil {
 		return nil, err
 	}

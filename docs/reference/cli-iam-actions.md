@@ -34,10 +34,102 @@ How to read it:
 ## Outside any command
 
 What runs outside every command's own code: startup, the root command's
-persistent pre-run, and shell completion (completing an instance ID lists your
-instances):
+persistent pre-run, shell completion (completing an instance ID lists your
+instances), and the root command's post-run, the last mile (libs#78), which
+after a command succeeds reports what spawn left behind. The last mile only
+reads, at most once every 6 hours per account, and a read your identity is not
+allowed is skipped silently (one debug line under `--verbose`), so none of its
+actions is needed for any command to work. The delete and write actions it
+can reach are the static over-approximation of the shared teardown executor
+(`footprint.Execute`), which the last mile runs in report mode only, with no
+lease, and a deleter and lifecycle client that refuse every write; it never
+makes one of them:
 
+- `cloudformation:DescribeStacks`
+- `dynamodb:DeleteItem`
+- `dynamodb:DeleteTable`
+- `dynamodb:GetItem`
+- `dynamodb:ListTables`
+- `dynamodb:ListTagsOfResource`
+- `dynamodb:Scan`
+- `dynamodb:UpdateItem`
+- `ec2:CancelSpotInstanceRequests`
+- `ec2:DeleteKeyPair`
+- `ec2:DeletePlacementGroup`
+- `ec2:DeleteSecurityGroup`
+- `ec2:DeleteVolume`
+- `ec2:DescribeAddresses`
+- `ec2:DescribeImages`
 - `ec2:DescribeInstances`
+- `ec2:DescribeKeyPairs`
+- `ec2:DescribeNetworkInterfaces`
+- `ec2:DescribePlacementGroups`
+- `ec2:DescribeRegions`
+- `ec2:DescribeSecurityGroups`
+- `ec2:DescribeVolumes`
+- `ec2:DisassociateAddress`
+- `ec2:ReleaseAddress`
+- `ec2:RevokeSecurityGroupEgress`
+- `ec2:RevokeSecurityGroupIngress`
+- `ec2:TerminateInstances`
+- `events:ListEventBuses`
+- `events:ListRules`
+- `events:ListTagsForResource`
+- `iam:AttachRolePolicy`
+- `iam:CreatePolicy`
+- `iam:CreatePolicyVersion`
+- `iam:CreateRole`
+- `iam:DeleteInstanceProfile`
+- `iam:DeletePolicy`
+- `iam:DeletePolicyVersion`
+- `iam:DeleteRole`
+- `iam:DeleteRolePolicy`
+- `iam:DetachRolePolicy`
+- `iam:GetInstanceProfile`
+- `iam:GetPolicy`
+- `iam:GetPolicyVersion`
+- `iam:GetRole`
+- `iam:GetRolePolicy`
+- `iam:ListAttachedRolePolicies`
+- `iam:ListInstanceProfileTags`
+- `iam:ListInstanceProfiles`
+- `iam:ListInstanceProfilesForRole`
+- `iam:ListPolicies`
+- `iam:ListPolicyTags`
+- `iam:ListRolePolicies`
+- `iam:ListRoleTags`
+- `iam:ListRoles`
+- `iam:PutRolePermissionsBoundary`
+- `iam:PutRolePolicy`
+- `iam:RemoveRoleFromInstanceProfile`
+- `iam:TagPolicy`
+- `iam:TagRole`
+- `iam:UpdateAssumeRolePolicy`
+- `lambda:ListFunctions`
+- `lambda:ListTags`
+- `logs:DeleteLogGroup`
+- `logs:DescribeLogGroups`
+- `logs:ListTagsForResource`
+- `s3:DeleteBucket`
+- `s3:GetBucketTagging`
+- `s3:GetLifecycleConfiguration`
+- `s3:ListAllMyBuckets`
+- `s3:ListBucket`
+- `s3:ListBucketMultipartUploads`
+- `s3:ListBucketVersions`
+- `s3:PutBucketTagging`
+- `scheduler:GetSchedule`
+- `scheduler:GetScheduleGroup`
+- `scheduler:ListSchedules`
+- `scheduler:ListTagsForResource`
+- `sns:ListTagsForResource`
+- `sns:ListTopics`
+- `sqs:DeleteQueue`
+- `sqs:GetQueueAttributes`
+- `sqs:GetQueueUrl`
+- `sqs:ListQueueTags`
+- `sqs:ListQueues`
+- `tag:GetResources`
 
 ## By command
 
@@ -170,7 +262,7 @@ instances):
 | `spawn team list` | `dynamodb:GetItem`, `dynamodb:Query` |
 | `spawn team remove` | `dynamodb:DeleteItem`, `dynamodb:GetItem`, `dynamodb:UpdateItem` |
 | `spawn team show` | `dynamodb:GetItem`, `dynamodb:Query` |
-| `spawn teardown` | `dynamodb:ConditionCheckItem`, `dynamodb:CreateTable`, `dynamodb:DeleteItem`, `dynamodb:DeleteTable`, `dynamodb:DescribeTable`, `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:Scan`, `dynamodb:TagResource`, `dynamodb:UpdateItem`, `ec2:CancelSpotInstanceRequests`, `ec2:DeleteKeyPair`, `ec2:DeletePlacementGroup`, `ec2:DeleteSecurityGroup`, `ec2:DeleteVolume`, `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribeKeyPairs`, `ec2:DescribeNetworkInterfaces`, `ec2:DescribePlacementGroups`, `ec2:DescribeRegions`, `ec2:DescribeSecurityGroups`, `ec2:DescribeVolumes`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:RevokeSecurityGroupEgress`, `ec2:RevokeSecurityGroupIngress`, `ec2:TerminateInstances`, `iam:AttachRolePolicy`, `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:CreateRole`, `iam:DeleteInstanceProfile`, `iam:DeletePolicy`, `iam:DeletePolicyVersion`, `iam:DeleteRole`, `iam:DeleteRolePolicy`, `iam:DetachRolePolicy`, `iam:GetInstanceProfile`, `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:ListInstanceProfilesForRole`, `iam:ListRolePolicies`, `iam:PutRolePermissionsBoundary`, `iam:PutRolePolicy`, `iam:RemoveRoleFromInstanceProfile`, `iam:TagPolicy`, `iam:TagRole`, `iam:UpdateAssumeRolePolicy`, `logs:DeleteLogGroup`, `s3:DeleteBucket`, `s3:GetBucketTagging`, `s3:GetLifecycleConfiguration`, `s3:GetObject`, `s3:ListBucket`, `s3:ListBucketMultipartUploads`, `s3:ListBucketVersions`, `s3:PutBucketTagging`, `sqs:DeleteQueue`, `sqs:GetQueueAttributes`, `sqs:GetQueueUrl`, `sqs:ListQueueTags` |
+| `spawn teardown` | `dynamodb:ConditionCheckItem`, `dynamodb:CreateTable`, `dynamodb:DeleteItem`, `dynamodb:DeleteTable`, `dynamodb:DescribeTable`, `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:Scan`, `dynamodb:TagResource`, `dynamodb:UpdateItem`, `ec2:CancelSpotInstanceRequests`, `ec2:DeleteKeyPair`, `ec2:DeletePlacementGroup`, `ec2:DeleteSecurityGroup`, `ec2:DeleteVolume`, `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribeKeyPairs`, `ec2:DescribeNetworkInterfaces`, `ec2:DescribePlacementGroups`, `ec2:DescribeRegions`, `ec2:DescribeSecurityGroups`, `ec2:DescribeVolumes`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:RevokeSecurityGroupEgress`, `ec2:RevokeSecurityGroupIngress`, `ec2:TerminateInstances`, `iam:AttachRolePolicy`, `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:CreateRole`, `iam:DeleteInstanceProfile`, `iam:DeletePolicy`, `iam:DeletePolicyVersion`, `iam:DeleteRole`, `iam:DeleteRolePolicy`, `iam:DetachRolePolicy`, `iam:GetInstanceProfile`, `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:GetRole`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:ListInstanceProfilesForRole`, `iam:ListRolePolicies`, `iam:PutRolePermissionsBoundary`, `iam:PutRolePolicy`, `iam:RemoveRoleFromInstanceProfile`, `iam:TagPolicy`, `iam:TagRole`, `iam:UpdateAssumeRolePolicy`, `logs:DeleteLogGroup`, `s3:DeleteBucket`, `s3:GetBucketTagging`, `s3:GetLifecycleConfiguration`, `s3:GetObject`, `s3:ListBucket`, `s3:ListBucketMultipartUploads`, `s3:ListBucketVersions`, `s3:PutBucketTagging`, `scheduler:GetScheduleGroup`, `scheduler:ListSchedules`, `scheduler:ListTagsForResource`, `sqs:DeleteQueue`, `sqs:GetQueueAttributes`, `sqs:GetQueueUrl`, `sqs:ListQueueTags` |
 | `spawn terminate` | `ec2:CancelSpotInstanceRequests`, `ec2:DeleteSecurityGroup`, `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ec2:DescribeSecurityGroups`, `ec2:DisassociateAddress`, `ec2:ReleaseAddress`, `ec2:TerminateInstances`, `fsx:DescribeFileSystems`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
 | `spawn upgrade-spored` | `ec2:CreateTags`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `ssm:GetCommandInvocation`, `ssm:SendCommand` |
 | `spawn validate` | `dynamodb:DescribeTable`, `ec2:DescribeInstances`, `ec2:DescribeRegions`, `lambda:GetFunction`, `s3:ListBucket` |
@@ -356,7 +448,9 @@ instances):
 | `scheduler:DeleteSchedule` | `spawn reaper teardown`, `spawn schedule cancel`, `spawn schedule create` |
 | `scheduler:DeleteScheduleGroup` | `spawn reaper teardown` |
 | `scheduler:GetSchedule` | `spawn footprint` |
-| `scheduler:ListSchedules` | `spawn footprint` |
+| `scheduler:GetScheduleGroup` | `spawn teardown` |
+| `scheduler:ListSchedules` | `spawn footprint`, `spawn teardown` |
+| `scheduler:ListTagsForResource` | `spawn teardown` |
 | `scheduler:UpdateSchedule` | `spawn schedule pause`, `spawn schedule resume` |
 | `servicequotas:GetAWSDefaultServiceQuota` | `spawn launch`, `spawn resume`, `spawn sweep resume` |
 | `servicequotas:GetServiceQuota` | `spawn launch`, `spawn resume`, `spawn sweep resume` |

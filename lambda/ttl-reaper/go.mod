@@ -22,7 +22,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4
 	github.com/aws/smithy-go v1.28.5
 	github.com/spore-host/calque v0.6.1-0.20261116234420-fced2c674a74
-	github.com/spore-host/libs v0.53.0
+	github.com/spore-host/libs v0.55.0
 	github.com/spore-host/spawn v0.131.0
 	github.com/spore-host/spore-host/lambda/accountlifecycle v0.0.0-20260801144045-14e273caf1fb
 )
