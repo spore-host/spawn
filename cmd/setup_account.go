@@ -71,12 +71,13 @@ credentials allowed to create IAM policies (an administrator):
     Attach it to the IAM groups or roles your spawn users sign in with, e.g.
     aws iam attach-group-policy --group-name <group> --policy-arn <arn>.
 
-Both are tagged spore-host:managed-by=spawn and spore-host:permanent=true: no
-idle teardown or cleanup deletes them. Re-running upgrades either when spawn's
-document has changed, and is otherwise a no-op.
+These two are the only things spore.host keeps in an account while it is set
+up. Both are permanent account setup, tagged spore-host:managed-by=spawn and
+spore-host:permanent=true: no idle teardown or cleanup deletes them, only
+--remove. Re-running upgrades either when spawn's document has changed, and is
+otherwise a no-op.
 
---remove takes them away again. It is the only command that deletes the
-boundary. Without --yes it prints what it would delete and deletes nothing.
+--remove takes them away again. It is the only command that deletes either. Without --yes it prints what it would delete and deletes nothing.
 It refuses while any role or user still has the boundary as its permissions
 boundary (it lists them), and in spore.host's infra account. It detaches the
 user lifecycle policy from whatever it is attached to, deletes each policy's
@@ -142,7 +143,7 @@ func runSetupAccount(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "The spawn permissions boundary %s is already current in account %s.\n", res.ARN, account)
 	}
 	if res.Tagged {
-		fmt.Fprintf(out, "Tagged the boundary %s=spawn and %s=%s, the one spawn resource kept on purpose.\n",
+		fmt.Fprintf(out, "Tagged the boundary %s=spawn and %s=%s: it is permanent account setup, kept until 'spawn setup-account --remove'.\n",
 			libtags.ManagedBy, sporetags.PermanentKey, sporetags.PermanentValue)
 	}
 	fmt.Fprintln(out, "spawn now caps every role it creates in this account with this boundary.")

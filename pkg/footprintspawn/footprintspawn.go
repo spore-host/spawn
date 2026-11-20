@@ -22,7 +22,11 @@
 //
 // In this order, the first that applies:
 //
-//   - permanent: the spore-host/spawn-instance-boundary policy, anything tagged
+//   - permanent: what `spawn setup-account` provisions, the two pieces of
+//     account setup spore.host keeps while an account is set up (the
+//     spore-host/spawn-instance-boundary policy and the
+//     spore-host/spawn-user-lifecycle policy, both removed only by
+//     `spawn setup-account --remove`), anything tagged
 //     spore-host:permanent=true or spore-host:role=service, and everything in
 //     spore.host's infra account (InfraAccountID), whose service shares
 //     spawn's tags with workload litter (spore-host/spore-host#750);
@@ -92,6 +96,21 @@ const (
 
 // RegionGlobal is the Region of an account-wide resource (IAM).
 const RegionGlobal = "global"
+
+// UserLifecyclePolicyName is the name, at /spore-host/, of the policy
+// `spawn setup-account` creates to grant spawn users the lifecycle-lease
+// actions (spawn#1666). With the boundary it is permanent account setup,
+// removed only by `spawn setup-account --remove`.
+const UserLifecyclePolicyName = "spawn-user-lifecycle"
+
+// IsUserLifecyclePolicy reports whether r is the account's user lifecycle
+// policy, by ARN or by type and name, like footprint.IsBoundary. It is
+// classed permanent by name as well as by its spore-host:permanent tag:
+// `spawn setup-account` creates it untagged when tagging is refused.
+func IsUserLifecyclePolicy(r footprint.Resource) bool {
+	return strings.HasSuffix(r.ARN, ":policy/spore-host/"+UserLifecyclePolicyName) ||
+		(r.Type == TypeManagedPolicy && r.Name == UserLifecyclePolicyName)
+}
 
 // Patterns are the names spawn's teardown may delete, per type. Each is a
 // whole-name match. Only the types pkg/teardown can delete appear; a pattern
@@ -186,6 +205,8 @@ func Classify(r footprint.Resource, f Facts) (footprint.Class, string) {
 	switch {
 	case footprint.IsBoundary(r):
 		return footprint.ClassPermanent, "the account's spawn-instance permissions boundary, which every teardown keeps"
+	case IsUserLifecyclePolicy(r):
+		return footprint.ClassPermanent, "the account's user lifecycle policy, which every teardown keeps; only `spawn setup-account --remove` removes it"
 	case tags.IsService(r.Tags):
 		return footprint.ClassPermanent, "spore.host's own service (" + tags.Role + "=" + tags.RoleService + ")"
 	case tags.IsPermanent(r.Tags):

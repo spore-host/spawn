@@ -305,8 +305,9 @@ type BoundaryOutcome struct {
 }
 
 // boundaryTags are the spawn-instance boundary's tags: the spore.host set with
-// spore-host:permanent=true (#1652). The boundary is the one spawn resource
-// kept on purpose, by owner decision (spore-host/spore-host#752); teardown
+// spore-host:permanent=true (#1652). The boundary is permanent account setup,
+// one of the two spawn resources kept on purpose with the user lifecycle
+// policy, by owner decision (spore-host/spore-host#752); teardown
 // keys on that marker and leaves it. It is not spore-host:role=service, which
 // marks spore.host's own live service (pkg/servicetags).
 func boundaryTags() map[string]string {
@@ -347,7 +348,7 @@ func convergeBoundaryTags(ctx context.Context, api any, arn string, existing []t
 	}
 	if _, err := t.TagPolicy(ctx, &iam.TagPolicyInput{PolicyArn: aws.String(arn), Tags: iamtags.FromMap(add)}); err != nil {
 		warn(fmt.Sprintf("could not tag the spawn permissions boundary %s with the spore-host:* tags (iam:TagPolicy: %v); "+
-			"it caps roles as before, but leave-no-trace cleanup cannot tell it is the one resource to keep (#1652)", arn, err))
+			"it caps roles as before, but leave-no-trace cleanup cannot tell it is permanent account setup to keep (#1652)", arn, err))
 		return false
 	}
 	return true

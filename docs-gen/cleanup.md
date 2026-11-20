@@ -58,9 +58,9 @@ covers every principal's roles. The TTL reaper applies the same rule
 (/spore-host/spored-*-v&lt;N&gt;) that no role has attached and that are at least 24
 hours old, and not tagged spore-host:permanent=true; the reaper detaches them
 from the roles it deletes but does not delete them. The permissions boundary
-at the same path (spore-host/spawn-instance-boundary) is never deleted: it is
-permanent, and only an administrator's explicit removal will remove it
-(spawn#1656, not yet implemented).
+at the same path (spore-host/spawn-instance-boundary), like the user lifecycle
+policy (spore-host/spawn-user-lifecycle), is never deleted: both are permanent
+account setup, and only 'spawn setup-account --remove' removes them.
 
 --pool-queues deletes only the SQS queues of pools nobody drained
 (spawn-pool-&lt;run id&gt;) and the task specs their submitters staged in the

@@ -16,9 +16,11 @@ package aws
 //     The administrator attaches it to the groups or roles spawn users sign in
 //     with.
 //
-// Both are tagged spore-host:managed-by=spawn and spore-host:permanent=true:
-// no idle teardown, cleanup or reaper deletes them (footprintspawn classes
-// both permanent, and neither name is a teardown pattern). They are removed
+// These two are the only things spore.host keeps in an account while it is
+// set up (owner decision, spore-host/spore-host#752). Both are tagged
+// spore-host:managed-by=spawn and spore-host:permanent=true: no idle
+// teardown, cleanup or reaper deletes them (footprintspawn classes both
+// permanent, by name as well as tag, and neither name is a teardown pattern). They are removed
 // only by an administrator running `spawn setup-account --remove`, which
 // spawn#1656 adds. Neither is ever tagged spore-host:role=service, which
 // marks spore.host's own live service.
@@ -51,7 +53,7 @@ import (
 // spawnUserLifecyclePolicyName is the user lifecycle policy's name at
 // sporedPolicyPath. sporedPolicyPath + this is lifecyclemark.UserPolicy (a
 // test holds the two equal).
-const spawnUserLifecyclePolicyName = "spawn-user-lifecycle"
+const spawnUserLifecyclePolicyName = footprintspawn.UserLifecyclePolicyName
 
 // SpawnUserLifecyclePolicyARN is the ARN of the policy `spawn setup-account`
 // creates in account to grant CLI users the lifecycle lease actions.
@@ -102,8 +104,8 @@ func spawnUserLifecycleDescription() string {
 }
 
 // userLifecycleTags are the user lifecycle policy's tags: the spore.host set,
-// spore-host:permanent=true (it outlives every idle teardown, like the
-// boundary it is provisioned beside) and a component naming it.
+// spore-host:permanent=true (permanent account setup, like the boundary it is
+// provisioned beside) and a component naming it.
 func userLifecycleTags() map[string]string {
 	t := sporetags.Permanent("")
 	t[libtags.Component] = "user-lifecycle"
