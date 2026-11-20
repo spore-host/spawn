@@ -53,6 +53,11 @@ const (
 	// EnvAccountIdleGrace is how long a scope must be idle before the
 	// account-idle sweep plans its teardown (DefaultAccountIdleGrace).
 	EnvAccountIdleGrace = "REAPER_ACCOUNT_IDLE_GRACE"
+	// EnvSelfRemoval is the self-hosted reaper's removal of itself once
+	// every scope it scans is idle past the grace (#1655): off|report|reap,
+	// default report. Only the reaper `spawn reaper deploy` made reads it.
+	// It never deletes yet; reap reports until #1657.
+	EnvSelfRemoval = "REAPER_SELF_REMOVAL"
 )
 
 // DefaultAccountIdleGrace is the account-idle sweep's grace: the
@@ -171,7 +176,7 @@ func Validate(name, value string) error {
 		}
 	}
 	switch name {
-	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles, EnvPoolQueues, EnvScheduleParams, EnvLaunchConfigs, EnvAccountIdle:
+	case EnvSpotRequests, EnvNetResources, EnvElasticIPs, EnvEmptyBuckets, EnvInstanceRoles, EnvPoolQueues, EnvScheduleParams, EnvLaunchConfigs, EnvAccountIdle, EnvSelfRemoval:
 		if _, ok := ParseMode(value); !ok {
 			return fmt.Errorf("%s: %q is not one of %s", name, value, strings.Join(Modes(), ", "))
 		}
@@ -204,6 +209,7 @@ var settable = map[string]struct{}{
 	EnvSpotRequests: {}, EnvNetResources: {}, EnvElasticIPs: {}, EnvMaxAge: {}, EnvNotifyURL: {},
 	EnvTTLGrace: {}, EnvEmptyBuckets: {}, EnvInstanceRoles: {}, EnvPoolQueues: {},
 	EnvScheduleParams: {}, EnvLaunchConfigs: {}, EnvAccountIdle: {}, EnvAccountIdleGrace: {},
+	EnvSelfRemoval: {},
 }
 
 // Settable lists the variables Validate accepts, sorted. Derived from the same

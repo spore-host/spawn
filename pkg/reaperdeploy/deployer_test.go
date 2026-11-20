@@ -23,8 +23,16 @@ import (
 type fakeIAM struct {
 	roleExists bool
 	calls      []string
-	policyDoc  string
+	policyDoc  string    // the reaper role's inline policy, as last written
 	created    time.Time // the role's CreateDate; zero leaves it unset
+	// policies are every inline policy written, by role then policy name;
+	// created / deleted the roles CreateRole and DeleteRole named, and
+	// trust each created role's trust policy (#1655).
+	policies     map[string]map[string]string
+	createdRoles []string
+	deletedRoles []string
+	trust        map[string]string
+	roleTags     map[string][]iamtypes.Tag
 }
 
 func (f *fakeIAM) GetRole(context.Context, *iam.GetRoleInput, ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
@@ -38,13 +46,30 @@ func (f *fakeIAM) GetRole(context.Context, *iam.GetRoleInput, ...func(*iam.Optio
 	}
 	return &iam.GetRoleOutput{Role: role}, nil
 }
-func (f *fakeIAM) CreateRole(context.Context, *iam.CreateRoleInput, ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
+func (f *fakeIAM) CreateRole(_ context.Context, in *iam.CreateRoleInput, _ ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
 	f.calls = append(f.calls, "CreateRole")
+	name := awssdk.ToString(in.RoleName)
+	f.createdRoles = append(f.createdRoles, name)
+	if f.trust == nil {
+		f.trust, f.roleTags = map[string]string{}, map[string][]iamtypes.Tag{}
+	}
+	f.trust[name] = awssdk.ToString(in.AssumeRolePolicyDocument)
+	f.roleTags[name] = in.Tags
 	return &iam.CreateRoleOutput{}, nil
 }
 func (f *fakeIAM) PutRolePolicy(_ context.Context, in *iam.PutRolePolicyInput, _ ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error) {
 	f.calls = append(f.calls, "PutRolePolicy")
-	f.policyDoc = awssdk.ToString(in.PolicyDocument)
+	role := awssdk.ToString(in.RoleName)
+	if role == RoleName {
+		f.policyDoc = awssdk.ToString(in.PolicyDocument)
+	}
+	if f.policies == nil {
+		f.policies = map[string]map[string]string{}
+	}
+	if f.policies[role] == nil {
+		f.policies[role] = map[string]string{}
+	}
+	f.policies[role][awssdk.ToString(in.PolicyName)] = awssdk.ToString(in.PolicyDocument)
 	return &iam.PutRolePolicyOutput{}, nil
 }
 func (f *fakeIAM) AttachRolePolicy(context.Context, *iam.AttachRolePolicyInput, ...func(*iam.Options)) (*iam.AttachRolePolicyOutput, error) {
@@ -59,8 +84,9 @@ func (f *fakeIAM) DetachRolePolicy(context.Context, *iam.DetachRolePolicyInput, 
 	f.calls = append(f.calls, "DetachRolePolicy")
 	return &iam.DetachRolePolicyOutput{}, nil
 }
-func (f *fakeIAM) DeleteRole(context.Context, *iam.DeleteRoleInput, ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
+func (f *fakeIAM) DeleteRole(_ context.Context, in *iam.DeleteRoleInput, _ ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
 	f.calls = append(f.calls, "DeleteRole")
+	f.deletedRoles = append(f.deletedRoles, awssdk.ToString(in.RoleName))
 	return &iam.DeleteRoleOutput{}, nil
 }
 
@@ -217,10 +243,15 @@ type fakeS3 struct {
 	// untagged-bucket path (created before tagging existed) is representable.
 	tagged     bool
 	taggingErr error
+	// headErr, when set, is HeadBucket's answer; listErr ListObjectsV2's.
+	headErr, listErr error
 }
 
 func (f *fakeS3) HeadBucket(context.Context, *s3.HeadBucketInput, ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
 	f.calls = append(f.calls, "HeadBucket")
+	if f.headErr != nil {
+		return nil, f.headErr
+	}
 	if !f.bucketExists {
 		return nil, errors.New("not found")
 	}
@@ -258,6 +289,9 @@ func (f *fakeS3) GetBucketTagging(context.Context, *s3.GetBucketTaggingInput, ..
 
 func (f *fakeS3) ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
 	f.calls = append(f.calls, "ListObjectsV2")
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	out := &s3.ListObjectsV2Output{}
 	for _, k := range f.objects {
 		out.Contents = append(out.Contents, s3types.Object{Key: awssdk.String(k)})

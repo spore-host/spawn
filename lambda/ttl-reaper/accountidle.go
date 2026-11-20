@@ -593,38 +593,69 @@ func (r *reaper) sweepAccountIdle(ctx context.Context, acct account, infra *infr
 	}
 	v := r.accountVerdict(ctx, acct, infra.get(ctx), now)
 	scopes := append(append([]string{}, r.regions...), lifecycle.ScopeGlobal)
-	var report *footprint.Report
-	var deleter footprint.Deleter
+
+	// First every scope's observation, then the claims: the self-hosted
+	// reaper's own removal (selfremoval.go) needs every scope judged before
+	// any is claimed.
+	judged := make([]scopeJudgment, 0, len(scopes))
 	for _, scope := range scopes {
-		reasons := v.reasons(scope)
-		active := len(reasons) > 0
+		j := scopeJudgment{scope: scope, reasons: v.reasons(scope)}
+		active := len(j.reasons) > 0
 		it, exists, err := acct.lease.Get(ctx, fs.Tool, scope)
 		switch {
 		case err != nil:
 			log.Printf("account-idle: account=%s region=%s: lease unavailable (%s): %v; skipped", acct.accountID, scope, classifyScanError(err), err)
 			sum.AccountIdleLeaseUnavailable++
+			j.state = scopeUnavailable
+			judged = append(judged, j)
 			continue
 		case !exists || it.Epoch == 0:
 			log.Printf("account-idle: account=%s region=%s: lease unavailable: no spawn creator has marked this scope active "+
 				"(spawn has not run here, or its users cannot write %s); never idle-torn-down; skipped", acct.accountID, scope, lifecycle.TableName)
 			sum.AccountIdleLeaseUnavailable++
+			j.state = scopeUnmarked
+			judged = append(judged, j)
 			continue
 		}
 		sum.AccountIdleScopes++
 		_, idleFor, err := acct.lease.Observe(ctx, fs.Tool, scope, active)
-		if err != nil {
+		j.idleFor = idleFor
+		switch {
+		case err != nil:
 			log.Printf("account-idle: account=%s region=%s: lease unavailable, observe failed (%s): %v; skipped", acct.accountID, scope, classifyScanError(err), err)
 			sum.AccountIdleLeaseUnavailable++
-			continue
-		}
-		if active {
+			j.state = scopeUnavailable
+		case active:
 			sum.AccountIdleActive++
-			log.Printf("account-idle: account=%s region=%s: active: %s", acct.accountID, scope, strings.Join(reasons, "; "))
-			continue
-		}
-		if idleFor < grace {
+			log.Printf("account-idle: account=%s region=%s: active: %s", acct.accountID, scope, strings.Join(j.reasons, "; "))
+			j.state = scopeActive
+		case idleFor < grace:
 			sum.AccountIdleWaiting++
 			log.Printf("account-idle: account=%s region=%s: idle for %s of the %s grace", acct.accountID, scope, idleFor.Round(time.Minute), grace)
+			j.state = scopeWaiting
+		default:
+			j.state = scopeDue
+		}
+		judged = append(judged, j)
+	}
+
+	selfRemoval := r.selfRemovalApplies(acct)
+	held, waiting := false, []string(nil)
+	if selfRemoval {
+		held, waiting = holdForSelfRemoval(judged)
+	}
+	var report *footprint.Report
+	var deleter footprint.Deleter
+	reported := map[string]bool{}
+	for _, j := range judged {
+		if j.state != scopeDue {
+			continue
+		}
+		scope := j.scope
+		if held {
+			sum.AccountIdleHeld++
+			log.Printf("account-idle: account=%s region=%s: idle for %s, past the grace; held until %s are too, so the reaper's "+
+				"own removal is planned in the same run (spawn#1655)", acct.accountID, scope, j.idleFor.Round(time.Minute), strings.Join(waiting, ", "))
 			continue
 		}
 		lease, err := acct.lease.Claim(ctx, fs.Tool, scope, grace)
@@ -646,8 +677,19 @@ func (r *reaper) sweepAccountIdle(ctx context.Context, acct account, infra *infr
 			report, deleter = acct.footprintFor(ctx, r.regions, r.roleReferences(ctx), now)
 		}
 		r.reportScope(ctx, acct, scope, report, deleter, lease, sum)
+		reported[scope] = true
 		if scope == lifecycle.ScopeGlobal {
 			r.reportCalque(ctx, acct, now)
+			// Global is the last scope: every other one has been judged
+			// and, if it was due, reported.
+			if selfRemoval {
+				if why := selfRemovalBlocker(judged, reported); why != "" {
+					sum.SelfRemovalBlocked++
+					log.Printf("reaper-selfremoval: account=%s: not planned: %s", acct.accountID, why)
+				} else {
+					r.removeSelf(ctx, acct, lease, now, sum)
+				}
+			}
 		}
 		releaseLease(ctx, lease, acct.accountID, scope)
 	}

@@ -41,6 +41,9 @@ func TestReaperParsersAgreeWithReaperconfig(t *testing.T) {
 		if got := parseAccountIdle(v); got != want {
 			t.Errorf("parseAccountIdle(%q) = %q, reaperconfig says %q", v, got, want)
 		}
+		if got := parseSelfRemoval(v); got != want {
+			t.Errorf("parseSelfRemoval(%q) = %q, reaperconfig says %q", v, got, want)
+		}
 		// REAPER_ELASTIC_IPS differs only for an unset value, which means reap
 		// (TestEIPDefaultIsReap); everything else is the same contract.
 		eipWant := want

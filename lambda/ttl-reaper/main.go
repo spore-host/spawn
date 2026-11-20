@@ -261,6 +261,14 @@ type reaper struct {
 	accountIdleGrace time.Duration
 	infraTables      infraTablesAPI
 
+	// The self-hosted reaper's removal of itself (spawn#1655,
+	// selfremoval.go): one of selfRemovalOff / selfRemovalReport /
+	// selfRemovalReap, from REAPER_SELF_REMOVAL, default report; reap
+	// reports too until spawn#1657. self is set only for the reaper `spawn
+	// reaper deploy` made; nil means this reaper never removes itself.
+	selfRemoval string
+	self        *selfHosted
+
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
 	// cross-account role — so route53Client uses the base credentials. dnsDomain
@@ -518,7 +526,10 @@ func configure() {
 		accountIdle:      accountIdleModeFromEnv(),
 		accountIdleGrace: parseAccountIdleGrace(os.Getenv("REAPER_ACCOUNT_IDLE_GRACE")),
 		infraTables:      dynamodb.NewFromConfig(regionalCopy(cfg, scheduler.TableRegion)),
+		// #1655: the self-hosted reaper's removal of itself.
+		selfRemoval: selfRemovalModeFromEnv(),
 	}
+	r.self = selfHostedFrom(cfg, r.accounts)
 	r.netResources, r.elasticIPs = netSweepModesFromEnv()
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
 	// client when a zone is configured, so a deployment without DNS teardown
@@ -553,8 +564,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s, schedule-params=%s, launch-configs=%s, account-idle=%s, account-idle-grace=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues, r.scheduleParams, r.launchConfigs, r.accountIdle, r.accountIdleGrace)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s, schedule-params=%s, launch-configs=%s, account-idle=%s, account-idle-grace=%s, self-removal=%s, self-hosted=%t)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues, r.scheduleParams, r.launchConfigs, r.accountIdle, r.accountIdleGrace, r.selfRemoval, r.self != nil)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -897,6 +908,17 @@ type Summary struct {
 	AccountIdleKept             int `json:"account_idle_kept"`
 	AccountIdleLeaseUnavailable int `json:"account_idle_lease_unavailable"`
 	AccountIdleRefused          int `json:"account_idle_refused"`
+	// AccountIdleHeld counts due scopes the self-hosted reaper held back
+	// until every scope is due (#1655).
+	AccountIdleHeld int `json:"account_idle_held"`
+
+	// The self-hosted reaper's removal of itself (#1655), report mode:
+	// Planned counts plans logged, OneShots their jobs, Blocked the runs
+	// whose global scope was reported but whose plan was not made (another
+	// scope not reported, or the artifact bucket unreadable or repurposed).
+	SelfRemovalPlanned  int `json:"self_removal_planned"`
+	SelfRemovalOneShots int `json:"self_removal_one_shots"`
+	SelfRemovalBlocked  int `json:"self_removal_blocked"`
 
 	// DNS sweep (#438): orphaned Route53 A-records reconciled against live IPs.
 	DNSScanned int `json:"dns_scanned"` // A-records examined under the account subdomains

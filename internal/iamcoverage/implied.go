@@ -201,6 +201,9 @@ var impliedRules = concatRules(
 		"CreateFileSystem", "CreateAccessPoint"),
 	tagOnCreate(sarImageBuilder, "imagebuilder", "Tags", "imagebuilder:TagResource", "",
 		"CreateInfrastructureConfiguration", "ImportDiskImage"),
+	// The SAR's CreateScheduleGroup entry authorizes scheduler:TagResource
+	// (a group takes tags; a schedule does not, see above). spawn#1655.
+	tagOnCreate(sarScheduler, "scheduler", "Tags", "scheduler:TagResource", "", "CreateScheduleGroup"),
 	// "Permissions required to add session tags: In addition to the action
 	// that matches the API operation, you must have ... sts:TagSession".
 	tagOnCreate(sarSTS, "sts", "Tags", "sts:TagSession",
@@ -218,6 +221,12 @@ var impliedRules = concatRules(
 			Docs: []string{"https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html"}},
 		// The transfer manager passes Tagging to the PutObject or
 		// CreateMultipartUpload it makes (see the s3 rules above).
+		// The SAR's DeleteScheduleGroup entry authorizes scheduler:DeleteSchedule
+		// as well: deleting a group deletes the schedules in it. Keyed on the
+		// required Name, so it is unconditional in practice (spawn#1655).
+		{Op: "scheduler:DeleteScheduleGroup", Field: "Name", Actions: []string{"scheduler:DeleteSchedule"},
+			Docs: []string{sarScheduler + "DeleteScheduleGroup",
+				"https://docs.aws.amazon.com/scheduler/latest/APIReference/API_DeleteScheduleGroup.html"}},
 		{Op: sdkRoot + "feature/s3/transfermanager.UploadObject", Field: "Tagging", Actions: []string{"s3:PutObjectTagging"},
 			Docs: []string{sarS3 + "PutObject", "https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html"}},
 	},

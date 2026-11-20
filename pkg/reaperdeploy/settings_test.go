@@ -248,6 +248,7 @@ func TestEveryReaperSettingSurvivesARedeploy(t *testing.T) {
 		reaperconfig.EnvScheduleParams:   "reap",
 		reaperconfig.EnvAccountIdle:      "off",
 		reaperconfig.EnvAccountIdleGrace: "30d",
+		reaperconfig.EnvSelfRemoval:      "off",
 		reaperconfig.EnvNotifyURL:        secretURL,
 	}
 	for k := range settable {

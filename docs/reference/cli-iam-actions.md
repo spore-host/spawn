@@ -132,7 +132,7 @@ instances):
 | `spawn reaper arm` | `lambda:GetFunction`, `lambda:UpdateFunctionConfiguration` |
 | `spawn reaper deploy` | `dynamodb:ConditionCheckItem`, `dynamodb:CreateTable`, `dynamodb:DeleteItem`, `dynamodb:DescribeTable`, `dynamodb:PutItem`, `dynamodb:TagResource`, `dynamodb:UpdateItem`, `events:DescribeRule`, `events:PutRule`, `events:PutTargets`, `events:TagResource`, `iam:AttachRolePolicy`, `iam:CreateRole`, `iam:GetRole`, `iam:PassRole`, `iam:PutRolePolicy`, `iam:TagRole`, `lambda:AddPermission`, `lambda:CreateFunction`, `lambda:GetFunction`, `lambda:TagResource`, `lambda:UpdateFunctionCode`, `lambda:UpdateFunctionConfiguration`, `logs:CreateLogGroup`, `logs:DescribeLogGroups`, `logs:PutRetentionPolicy`, `s3:CreateBucket`, `s3:ListBucket`, `s3:PutBucketTagging`, `s3:PutObject` |
 | `spawn reaper status` | `events:DescribeRule`, `iam:GetRole`, `lambda:GetFunction`, `lambda:ListFunctions`, `logs:FilterLogEvents` |
-| `spawn reaper teardown` | `dynamodb:GetItem`, `events:DeleteRule`, `events:DescribeRule`, `events:RemoveTargets`, `iam:DeleteRole`, `iam:DeleteRolePolicy`, `iam:DetachRolePolicy`, `iam:GetRole`, `lambda:DeleteFunction`, `lambda:GetFunction`, `lambda:RemovePermission`, `logs:DeleteLogGroup`, `logs:FilterLogEvents`, `s3:DeleteBucket`, `s3:DeleteObject`, `s3:GetBucketTagging`, `s3:ListBucket` |
+| `spawn reaper teardown` | `dynamodb:GetItem`, `events:DeleteRule`, `events:DescribeRule`, `events:RemoveTargets`, `iam:DeleteRole`, `iam:DeleteRolePolicy`, `iam:DetachRolePolicy`, `iam:GetRole`, `lambda:DeleteFunction`, `lambda:GetFunction`, `lambda:RemovePermission`, `logs:DeleteLogGroup`, `logs:FilterLogEvents`, `s3:DeleteBucket`, `s3:DeleteObject`, `s3:GetBucketTagging`, `s3:ListBucket`, `scheduler:DeleteSchedule`, `scheduler:DeleteScheduleGroup` |
 | `spawn resources` | `ec2:DescribeAddresses`, `ec2:DescribeInstances`, `ec2:DescribePlacementGroups`, `ec2:DescribeRegions`, `ec2:DescribeVolumes`, `tag:GetResources` |
 | `spawn results lifecycle` | `s3:GetLifecycleConfiguration`, `s3:ListBucket`, `s3:PutLifecycleConfiguration` |
 | `spawn results retain` | `s3:GetObjectTagging`, `s3:ListBucket`, `s3:PutObjectTagging` |
@@ -350,7 +350,8 @@ instances):
 | `s3:PutObject` | `spawn app launch`, `spawn array retry`, `spawn burst`, `spawn image import`, `spawn launch`, `spawn pipeline launch`, `spawn pool create`, `spawn pool submit`, `spawn reaper deploy`, `spawn resume`, `spawn schedule create`, `spawn service`, `spawn sweep resume`, `spawn task run` |
 | `s3:PutObjectTagging` | `spawn launch`, `spawn results retain`, `spawn schedule create` |
 | `scheduler:CreateSchedule` | `spawn schedule create` |
-| `scheduler:DeleteSchedule` | `spawn schedule cancel`, `spawn schedule create` |
+| `scheduler:DeleteSchedule` | `spawn reaper teardown`, `spawn schedule cancel`, `spawn schedule create` |
+| `scheduler:DeleteScheduleGroup` | `spawn reaper teardown` |
 | `scheduler:GetSchedule` | `spawn footprint` |
 | `scheduler:ListSchedules` | `spawn footprint` |
 | `scheduler:UpdateSchedule` | `spawn schedule pause`, `spawn schedule resume` |
