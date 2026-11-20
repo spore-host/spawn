@@ -305,8 +305,9 @@ type BoundaryOutcome struct {
 }
 
 // boundaryTags are the spawn-instance boundary's tags: the spore.host set with
-// spore-host:permanent=true (#1652). The boundary is the one spawn resource
-// kept on purpose, by owner decision (spore-host/spore-host#752); teardown
+// spore-host:permanent=true (#1652). The boundary is permanent account setup,
+// one of the two spawn resources kept on purpose with the user lifecycle
+// policy, by owner decision (spore-host/spore-host#752); teardown
 // keys on that marker and leaves it. It is not spore-host:role=service, which
 // marks spore.host's own live service (pkg/servicetags).
 func boundaryTags() map[string]string {
@@ -347,7 +348,7 @@ func convergeBoundaryTags(ctx context.Context, api any, arn string, existing []t
 	}
 	if _, err := t.TagPolicy(ctx, &iam.TagPolicyInput{PolicyArn: aws.String(arn), Tags: iamtags.FromMap(add)}); err != nil {
 		warn(fmt.Sprintf("could not tag the spawn permissions boundary %s with the spore-host:* tags (iam:TagPolicy: %v); "+
-			"it caps roles as before, but leave-no-trace cleanup cannot tell it is the one resource to keep (#1652)", arn, err))
+			"it caps roles as before, but leave-no-trace cleanup cannot tell it is permanent account setup to keep (#1652)", arn, err))
 		return false
 	}
 	return true
@@ -440,9 +441,21 @@ const boundaryVersionCap = 5
 // leaves room for one new version (deletes down to boundaryVersionCap-1), and
 // never deletes the default version.
 func pruneBoundaryVersions(ctx context.Context, api BoundaryAdminAPI, arn string, warn func(string)) (int, error) {
+	return prunePolicyVersions(ctx, api, arn, "the spawn permissions boundary", warn)
+}
+
+// policyVersionAPI is the IAM slice prunePolicyVersions uses.
+type policyVersionAPI interface {
+	ListPolicyVersions(ctx context.Context, in *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
+	DeletePolicyVersion(ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
+}
+
+// prunePolicyVersions is pruneBoundaryVersions for any managed policy at arn;
+// what names it in errors and warnings.
+func prunePolicyVersions(ctx context.Context, api policyVersionAPI, arn, what string, warn func(string)) (int, error) {
 	lv, err := api.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{PolicyArn: aws.String(arn)})
 	if err != nil {
-		return 0, fmt.Errorf("list the versions of the spawn permissions boundary %s: %w", arn, err)
+		return 0, fmt.Errorf("list the versions of %s %s: %w", what, arn, err)
 	}
 	var nonDefault []types.PolicyVersion
 	for _, v := range lv.Versions {
@@ -463,9 +476,9 @@ func pruneBoundaryVersions(ctx context.Context, api BoundaryAdminAPI, arn string
 			return e
 		})
 		if derr != nil {
-			return pruned, fmt.Errorf("delete the superseded version %s of the spawn permissions boundary %s: %w", id, arn, derr)
+			return pruned, fmt.Errorf("delete the superseded version %s of %s %s: %w", id, what, arn, derr)
 		}
-		warn(fmt.Sprintf("deleted the superseded version %s of the spawn permissions boundary to stay under IAM's %d-version limit", id, boundaryVersionCap))
+		warn(fmt.Sprintf("deleted the superseded version %s of %s to stay under IAM's %d-version limit", id, what, boundaryVersionCap))
 		pruned++
 	}
 	return pruned, nil

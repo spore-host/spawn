@@ -579,8 +579,9 @@ func serviceGuardStatement() policyStatement {
 		Condition: map[string]map[string]string{"StringEquals": {"aws:ResourceTag/spore-host:role": "service"}}}
 }
 
-// boundaryPolicyARN is spawn's permissions boundary, the one permanent piece
-// of a spore.host deployment (pkg/instancerole.BoundaryPolicyName at
+// boundaryPolicyARN is spawn's permissions boundary, permanent account setup
+// (with the user lifecycle policy, the two pieces `spawn setup-account
+// --remove` alone removes) (pkg/instancerole.BoundaryPolicyName at
 // SporedPolicyPath; a test holds them equal).
 func boundaryPolicyARN(accountID string) string {
 	return fmt.Sprintf("arn:aws:iam::%s:policy/spore-host/spawn-instance-boundary", accountID)

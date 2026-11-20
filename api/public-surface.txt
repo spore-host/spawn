@@ -39,6 +39,7 @@ const MaxUserDataBytes
 const NestedParentTagKey
 const NestedSpawnRolePrefix
 const PipelineTopicPrefix
+const PortalOnboardRoleName
 const PriceSourceTag
 const ReaperCoverageRoleName
 const SourceDir
@@ -83,6 +84,12 @@ field AMIWaitOptions.MaxPolls int
 field AMIWaitOptions.Progress func(state string, poll, maxPolls int)
 field AccessDeniedError.Action string
 field AccessDeniedError.Err error
+field AccountRemovalPlan.Account string
+field AccountRemovalPlan.Boundary PolicyRemoval
+field AccountRemovalPlan.Offboard bool
+field AccountRemovalPlan.OnboardRole *RoleRemoval
+field AccountRemovalPlan.Refusals []string
+field AccountRemovalPlan.UserPolicy PolicyRemoval
 field AttachVolumeSpec.MountPoint string
 field AttachVolumeSpec.ReadOnly bool
 field AttachVolumeSpec.SizeGiB int32
@@ -403,6 +410,14 @@ field ManagedResource.Tags map[string]string
 field MountSnapshotResult.DeviceName string
 field MountSnapshotResult.InstanceID string
 field MountSnapshotResult.VolumeID string
+field PolicyEntity.Kind string
+field PolicyEntity.Name string
+field PolicyRemoval.ARN string
+field PolicyRemoval.AttachedTo []PolicyEntity
+field PolicyRemoval.BoundaryOf []PolicyEntity
+field PolicyRemoval.DefaultVersion string
+field PolicyRemoval.Exists bool
+field PolicyRemoval.OlderVersions []string
 field PortIngress.Groups []string
 field PortIngress.Open bool
 field PortIngress.Port int32
@@ -443,6 +458,12 @@ field ReaperCoverage.Covered bool
 field ReaperCoverage.Determined bool
 field ReaperCoverage.How string
 field ReaperCoverage.Why string
+field RoleRemoval.ARN string
+field RoleRemoval.Attached []string
+field RoleRemoval.Exists bool
+field RoleRemoval.InlinePolicies []string
+field RoleRemoval.Name string
+field RoleRemoval.Stack string
 field S3BucketConfig.BucketName string
 field S3BucketConfig.ExportPath string
 field S3BucketConfig.ImportPath string
@@ -501,6 +522,12 @@ field TagLimitError.Spored []string
 field TagLimitError.SporedSettings []string
 field UserDataTooLargeError.DecodedBytes int
 field UserDataTooLargeError.EncodedBytes int
+field UserPolicyOutcome.ARN string
+field UserPolicyOutcome.Created bool
+field UserPolicyOutcome.Pruned int
+field UserPolicyOutcome.Tagged bool
+field UserPolicyOutcome.Unchanged bool
+field UserPolicyOutcome.Updated bool
 field ZoneAttempt.Code string
 field ZoneAttempt.Message string
 field ZoneAttempt.Zone string
@@ -514,6 +541,7 @@ field ZoneOfferings.Launchable []string
 field ZoneOfferings.Offered []string
 func (*AccessDeniedError) Error() string
 func (*AccessDeniedError) Unwrap() error
+func (*AccountRemovalPlan) Empty() bool
 func (*BoundaryMissingError) Error() string
 func (*BoundaryMissingError) Unwrap() error
 func (*Client) AccountFootprint(ctx context.Context, account string, regions []string, now time.Time) *footprint.Report
@@ -674,6 +702,7 @@ func (LaunchConfig) ZoneFallbackBlocker() string
 func (LaunchSettings) Apply(input *ec2.RunInstancesInput) error
 func (ManagedResource) IsRunningInstance() bool
 func (ManagedResource) OwnedBy(callerARN string) bool
+func (PolicyEntity) String() string
 func (PrivateCheck) OK() bool
 func (PrivateService) AppliesTo(cfg LaunchConfig) bool
 func (ReaperCoverage) Summary() string
@@ -706,13 +735,16 @@ func EgressProxyEnv(addr, region string) (string, error)
 func EgressProxyNoProxy(region string) []string
 func EgressProxyURL(addr string) (string, error)
 func EnsureSpawnInstanceBoundary(ctx context.Context, api BoundaryAdminAPI, account string, warn func(string)) (BoundaryOutcome, error)
+func EnsureSpawnUserLifecyclePolicy(ctx context.Context, api AccountSetupAPI, account string, warn func(string)) (UserPolicyOutcome, error)
 func EnsureSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM, computeAccount, orchestratorAccount string, warn func(string)) (SweepRoleOutcome, error)
 func EvaluatePortIngress(groups []types.SecurityGroup, port int32) PortIngress
+func ExecuteAccountRemoval(ctx context.Context, api AccountSetupAPI, plan *AccountRemovalPlan, progress func(string)) error
 func GenerateScopedCloudWatchLogsPolicy(region, accountID string) string
 func GenerateScopedDynamoDBPolicy(region, accountID string) string
 func GenerateScopedS3Policy(region, accountID string) string
 func GenerateWindowsPassword(n int) (string, error)
 func GetEFSDNSName(filesystemID, region string) string
+func GuardAccountRemoval(account string) error
 func IMDSMetadataOptions(hopLimit int) *types.InstanceMetadataOptionsRequest
 func ImageCreateTags(userTags, sourceTags map[string]string) map[string]string
 func ImageProvenanceFromTags(tags map[string]string) ImageProvenance
@@ -739,6 +771,7 @@ func NestedSpawnRoleFromCallerARN(arn string) (string, bool)
 func NestedSpawnRoleName() string
 func NestedSpawnRoleReservedError(source, role, why string) error
 func NestedSpawnTTLError() error
+func NewAccountSetupIAM(cfg aws.Config) AccountSetupAPI
 func NewBoundaryAdminIAM(cfg aws.Config) BoundaryAdminAPI
 func NewClient(ctx context.Context) (*Client, error)
 func NewClientFromConfig(cfg aws.Config) *Client
@@ -747,6 +780,7 @@ func NewDisplayPrice(price float64, origin truffleaws.PriceOrigin) DisplayPrice
 func NewLaunchSettings(lc LaunchConfig, rootDeviceName string, amiMinGiB int32) LaunchSettings
 func NewSweepRoleIAM(cfg aws.Config) SweepRoleIAM
 func PlacementGroupAvailableWait() time.Duration
+func PlanAccountRemoval(ctx context.Context, api AccountSetupAPI, account string, offboard bool) (*AccountRemovalPlan, error)
 func PostLaunchTagKeys() []string
 func PredictedInstanceRoleName(config IAMRoleConfig) string
 func PrivateServices() []PrivateService
@@ -754,6 +788,8 @@ func ReaperCoverageAdvice(c ReaperCoverage, onComplete, fsxLifecycle string) str
 func ResolveDisplayPrice(ctx context.Context, cfg aws.Config, instanceType, region string) (DisplayPrice, error)
 func RetryPlacementGroupDelete(ctx context.Context, name string, del func() error) error
 func SetPGDeleteWaitForTest(budget, interval time.Duration) func()
+func SpawnInstanceBoundaryARN(account string) string
+func SpawnUserLifecyclePolicyARN(account string) string
 func SporedBaselinePolicyDocument() string
 func SporedInstanceRolePolicyDocument() string
 func SpotPriceForInstance(ctx context.Context, api SpotPriceAPI, instanceID string) (SpotPrice, error)
@@ -766,6 +802,18 @@ func SweepTrustMatches(trust, principal string) bool
 func TeardownSweepCrossAccountRole(ctx context.Context, api SweepRoleIAM) (bool, error)
 func UserDataSize(encoded string) (decoded, encodedLen int)
 func ValidatePolicyNames(policies []string, allowFullAccess bool) error
+method AccountSetupAPI.DeletePolicy (ctx context.Context, in *iam.DeletePolicyInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyOutput, error)
+method AccountSetupAPI.DeleteRole (ctx context.Context, in *iam.DeleteRoleInput, optFns ...func(*iam.Options)) (*iam.DeleteRoleOutput, error)
+method AccountSetupAPI.DeleteRolePolicy (ctx context.Context, in *iam.DeleteRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DeleteRolePolicyOutput, error)
+method AccountSetupAPI.DetachGroupPolicy (ctx context.Context, in *iam.DetachGroupPolicyInput, optFns ...func(*iam.Options)) (*iam.DetachGroupPolicyOutput, error)
+method AccountSetupAPI.DetachRolePolicy (ctx context.Context, in *iam.DetachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DetachRolePolicyOutput, error)
+method AccountSetupAPI.DetachUserPolicy (ctx context.Context, in *iam.DetachUserPolicyInput, optFns ...func(*iam.Options)) (*iam.DetachUserPolicyOutput, error)
+method AccountSetupAPI.GetRole (ctx context.Context, in *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error)
+method AccountSetupAPI.ListAttachedRolePolicies (ctx context.Context, in *iam.ListAttachedRolePoliciesInput, optFns ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error)
+method AccountSetupAPI.ListEntitiesForPolicy (ctx context.Context, in *iam.ListEntitiesForPolicyInput, optFns ...func(*iam.Options)) (*iam.ListEntitiesForPolicyOutput, error)
+method AccountSetupAPI.ListRolePolicies (ctx context.Context, in *iam.ListRolePoliciesInput, optFns ...func(*iam.Options)) (*iam.ListRolePoliciesOutput, error)
+method AccountSetupAPI.TagPolicy (ctx context.Context, in *iam.TagPolicyInput, optFns ...func(*iam.Options)) (*iam.TagPolicyOutput, error)
+method AccountSetupAPI.embeds BoundaryAdminAPI
 method BoundaryAdminAPI.CreatePolicy (ctx context.Context, in *iam.CreatePolicyInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyOutput, error)
 method BoundaryAdminAPI.CreatePolicyVersion (ctx context.Context, in *iam.CreatePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyVersionOutput, error)
 method BoundaryAdminAPI.DeletePolicyVersion (ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
@@ -787,6 +835,8 @@ type AMIHealthCheck struct
 type AMIInfo struct
 type AMIWaitOptions struct
 type AccessDeniedError struct
+type AccountRemovalPlan struct
+type AccountSetupAPI interface
 type AttachVolumeSpec struct
 type BoundaryAdminAPI interface
 type BoundaryMissingError struct
@@ -826,6 +876,8 @@ type LaunchTagger struct
 type ManagedResource struct
 type ManagementAccountLookup func(ctx context.Context) (string, error)
 type MountSnapshotResult struct
+type PolicyEntity struct
+type PolicyRemoval struct
 type PortIngress struct
 type PreparedImage struct
 type PrivateCheck struct
@@ -834,6 +886,7 @@ type PrivateNetwork struct
 type PrivateService struct
 type PublicSubnet struct
 type ReaperCoverage struct
+type RoleRemoval struct
 type S3BucketConfig struct
 type SSMRunResult struct
 type SnapshotDetail struct
@@ -850,6 +903,7 @@ type SweepRoleRefusedError struct
 type SweepRoleState struct
 type TagLimitError struct
 type UserDataTooLargeError struct
+type UserPolicyOutcome struct
 type ZoneAttempt struct
 type ZoneFallbackError struct
 type ZoneOfferings struct

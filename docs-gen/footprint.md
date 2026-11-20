@@ -45,7 +45,8 @@ AMIs (calque's, so never spawn's to delete).
 
   ownership  tagged (spore-host:managed-by=spawn), legacy-name (only the name or
              spawn:managed matched; never deleted), foreign (another tool's)
-  class      permanent (the boundary, spore-host:permanent, role=service, the
+  class      permanent (the two pieces of account setup: the boundary and the
+             user lifecycle policy; spore-host:permanent, role=service, the
              infra account), user-data (results, AMIs, snapshots, a user's key
              or Elastic IP), active (in use now), residue (spawn's machinery),
              litter (the rest)

@@ -40,9 +40,9 @@
 // whose creators can never mark it is never torn down for idleness. In a
 // shared account where some users can mark and some cannot, a launch by one
 // who cannot is still seen by the teardown's own activity re-check, but not
-// fenced by the lease. spore.host does not yet provision these actions for
-// users (spawn#1666); until it does, an account is lease-enabled only where an
-// administrator has granted RequiredActions.
+// fenced by the lease. `spawn setup-account` provisions these actions as the
+// customer-managed policy UserPolicy (spawn#1666); an account is lease-enabled
+// for the users an administrator attaches it to.
 package lifecyclemark
 
 import (
@@ -52,6 +52,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,26 @@ var RequiredActions = []string{
 
 // TableARNPattern is the resource RequiredActions are needed on.
 const TableARNPattern = "arn:aws:dynamodb:*:*:table/" + lifecycle.TableName
+
+// VerdictReadActions are what `spawn reaper teardown --if-idle-for` needs on
+// the lifecycle table beyond RequiredActions: it reads the idle verdict
+// (pkg/reaperdeploy.LeaseReader).
+var VerdictReadActions = []string{"dynamodb:GetItem"}
+
+// UserPolicy is the customer-managed policy, at its IAM path, that
+// `spawn setup-account` creates to grant a CLI user UserActions on the
+// lifecycle table (spawn#1666). An administrator attaches it to the groups or
+// roles spawn users sign in with; `spawn setup-account --remove` deletes it.
+const UserPolicy = "spore-host/spawn-user-lifecycle"
+
+// UserActions are what UserPolicy grants: RequiredActions (the mark, and
+// `spawn doctor`'s read-only probe, which uses two of them) and
+// VerdictReadActions, sorted.
+func UserActions() []string {
+	out := append(append([]string{}, RequiredActions...), VerdictReadActions...)
+	sort.Strings(out)
+	return out
+}
 
 // cacheFor is how long a successful mark stands in for the next one in the
 // same process and scope. Well inside the 24 h grace, so a long-running
@@ -350,8 +371,9 @@ func (m *marker) fail(err error) {
 	m.logged = true
 	m.debugf("lifecyclemark: could not mark spawn active in the shared-account lifecycle lease (DynamoDB table %s): %v. "+
 		"The create goes on; the idle teardown treats this account's lease as unavailable and never tears it down for idleness. "+
-		"It needs %s on %s; `spawn doctor` checks it.",
-		lifecycle.TableName, err, strings.Join(RequiredActions, ", "), TableARNPattern)
+		"It needs %s on %s, which the policy %s grants: `spawn setup-account` creates it, and an administrator attaches it "+
+		"to this identity's group or role. `spawn doctor` checks it.",
+		lifecycle.TableName, err, strings.Join(RequiredActions, ", "), TableARNPattern, UserPolicy)
 }
 
 // isRefusal reports whether err means this identity may not use the table at

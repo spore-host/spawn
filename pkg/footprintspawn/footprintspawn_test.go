@@ -194,3 +194,40 @@ func TestPatterns(t *testing.T) {
 		}
 	}
 }
+
+// The user lifecycle policy is permanent account setup, like the boundary
+// (owner decision, spore-host/spore-host#752; spawn#1666): classed permanent
+// and never deletable, whether tagged permanent or created untagged (tagging
+// refused), attached or not, and whether matched by ARN or by name. Only
+// `spawn setup-account --remove` removes it.
+func TestUserLifecyclePolicyIsPermanent(t *testing.T) {
+	const arn = "arn:aws:iam::" + account + ":policy/spore-host/" + UserLifecyclePolicyName
+	permanent := spawnTags()
+	permanent[tags.Permanent] = tags.PermanentTrue
+	for _, tc := range []struct {
+		name string
+		r    footprint.Resource
+		f    Facts
+	}{
+		{"tagged permanent", footprint.Resource{ARN: arn, Type: TypeManagedPolicy, Name: UserLifecyclePolicyName, Tags: permanent}, Facts{}},
+		{"tagged permanent, attached", footprint.Resource{ARN: arn, Type: TypeManagedPolicy, Name: UserLifecyclePolicyName, Tags: permanent},
+			Facts{InUse: "attached to, or the boundary of, 2 role(s)"}},
+		{"spawn-tagged without the permanent tag", footprint.Resource{ARN: arn, Type: TypeManagedPolicy, Name: UserLifecyclePolicyName, Tags: spawnTags()}, Facts{}},
+		{"untagged", footprint.Resource{ARN: arn, Type: TypeManagedPolicy, Name: UserLifecyclePolicyName}, Facts{}},
+		{"by name only", footprint.Resource{ARN: "x", Type: TypeManagedPolicy, Name: UserLifecyclePolicyName, Tags: spawnTags()}, Facts{}},
+	} {
+		r := tc.r
+		tc.f.Account = account
+		Finish(&r, tc.f)
+		if r.Class != footprint.ClassPermanent || r.Deletable {
+			t.Errorf("%s: class %s deletable %v (%s), want permanent and kept", tc.name, r.Class, r.Deletable, r.Reason)
+		}
+		if !IsUserLifecyclePolicy(tc.r) {
+			t.Errorf("%s: not recognised as the user lifecycle policy", tc.name)
+		}
+	}
+	// A spored policy at the same path is not it.
+	if IsUserLifecyclePolicy(footprint.Resource{ARN: "arn:aws:iam::" + account + ":policy/spore-host/spored-policy-v3", Type: TypeManagedPolicy, Name: "spored-policy-v3"}) {
+		t.Error("a spored policy matched as the user lifecycle policy")
+	}
+}

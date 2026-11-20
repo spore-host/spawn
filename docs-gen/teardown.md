@@ -6,8 +6,10 @@ Every resource is re-read from the account before anything happens to it,
 and the delete guard is applied again to what the account says NOW. A resource
 is deleted only if it is tagged spore-host:managed-by=spawn, its name is one
 spawn's teardown registers, it is not spore.host's own service
-(spore-host:role=service), not tagged spore-host:permanent=true, not the
-spawn-instance-boundary policy, and not user data. A resource that only spawn's
+(spore-host:role=service), not tagged spore-host:permanent=true, not one of
+the two permanent account-setup policies (spawn-instance-boundary and
+spawn-user-lifecycle, which only 'spawn setup-account --remove' removes), and
+not user data. A resource that only spawn's
 name or the old spawn:managed tag matched (ownership legacy-name), and anything
 another tool owns (calque, lagotto), is never deleted. Anything in use (a live
 instance, an instance profile on one, a security group on a network interface,

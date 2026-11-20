@@ -38,12 +38,13 @@ import (
 // a policy attached between the listing and the delete is kept.
 //
 // The spawn-instance permissions boundary, at the same path, is never deleted
-// here (#1664). It is the one permanent piece of spore.host in an account
-// (spore-host/spore-host#752): an administrator creates it with `spawn
+// here (#1664). It is permanent account setup, one of the two pieces of
+// spore.host kept in an account while it is set up, with the user lifecycle
+// policy (spore-host/spore-host#752): an administrator creates it with `spawn
 // setup-account`, the documented user baseline cannot re-create it, so a sweep
 // that removed it once no role used it broke every non-admin's next launch.
-// It is listed, as kept, and only `spawn setup-account --remove` (#1656, not
-// yet implemented) removes it.
+// It is listed, as kept, and only `spawn setup-account --remove` (#1656)
+// removes it.
 
 // SporedPolicyPath is pkg/aws.SporedPolicyPath, repeated so the reaper need
 // not import pkg/aws (a test holds the two equal).
@@ -82,7 +83,7 @@ func IsSporedPolicyName(name string) bool {
 const BoundaryPolicyName = "spawn-instance-boundary"
 
 // KeepBoundaryPermanent is the reason the boundary policy is kept, always.
-const KeepBoundaryPermanent = "the spawn-instance permissions boundary is permanent; only an administrator's explicit removal (spawn#1656, not yet implemented) removes it"
+const KeepBoundaryPermanent = "the spawn-instance permissions boundary is permanent account setup; only 'spawn setup-account --remove' removes it"
 
 // PolicyAPI is the IAM slice SweepSporedPolicies uses. *iam.Client satisfies
 // it. It has no policy-version calls: nothing it deletes has non-default

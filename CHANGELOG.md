@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn setup-account --remove`** (#1656, part of the leave-no-trace epic
+  spore-host/spore-host#752) removes what `spawn setup-account` provisioned:
+  the permissions boundary `spore-host/spawn-instance-boundary` and the new
+  user lifecycle policy. Those two are the only things spore.host keeps in an
+  account while it is set up (permanent account setup): no idle teardown or
+  cleanup deletes either. Without `--yes` it only prints the plan. It refuses, deleting
+  nothing, while any role or user still has the boundary as its permissions
+  boundary (it names them; deleting the boundary would leave them uncapped),
+  and in spore.host's infra account. It detaches the user policy from the
+  groups, users and roles it is attached to, deletes each policy's older
+  versions and then the policy, and deletes the boundary last, after reading
+  again what uses it. **`--offboard`** also deletes the `spore-portal-onboard`
+  role (`spawn onboard`'s), the portal's access to the account, which goes
+  only when asked; a role a CloudFormation quick-create stack made is refused,
+  naming the stack to delete. Offboarding does not change the portal's record
+  of the account (spore-host/spore-host#602). The command now needs
+  `iam:ListEntitiesForPolicy`, `iam:DeletePolicy`, `iam:DetachGroupPolicy`,
+  `iam:DetachUserPolicy`, `iam:DetachRolePolicy` and, for `--offboard`,
+  `iam:ListRolePolicies`, `iam:ListAttachedRolePolicies`,
+  `iam:DeleteRolePolicy` and `iam:DeleteRole`.
+- **spore.host now provisions the lifecycle-lease permissions for users**
+  (#1666). `spawn setup-account` also creates the customer-managed policy
+  `spore-host/spawn-user-lifecycle`: `dynamodb:ConditionCheckItem`,
+  `CreateTable`, `DeleteItem`, `DescribeTable`, `GetItem`, `PutItem`,
+  `TagResource` and `UpdateItem` on
+  `arn:aws:dynamodb:*:<account>:table/spore-host-lifecycle`, which is what
+  spawn's creators, `spawn doctor` and `spawn reaper teardown --if-idle-for`
+  call (a test holds the policy to the call graph). Attach it to the IAM
+  groups or roles spawn users sign in with; until then spawn works as before,
+  but the account is never idle-torn-down. It is tagged
+  `spore-host:managed-by=spawn` and `spore-host:permanent=true`, never
+  `spore-host:role=service`: permanent account setup, like the boundary. No
+  teardown deletes it, and `spawn footprint` classes it `permanent` by name as
+  well as by tag; only `spawn setup-account --remove` removes it. It is not created in spore.host's infra
+  account, which has no lease. Re-running `spawn setup-account` upgrades it
+  when spawn's document changes and is otherwise a no-op.
+- `pkg/testutil.IAMAccount`, an in-memory IAM account for hermetic tests of
+  policy and role provisioning and removal.
+
+### Changed
+
+- `spawn doctor`'s "idle teardown" warning, and the diagnostic line a refused
+  lease mark writes, now name the policy `spore-host/spawn-user-lifecycle` and
+  its ARN, which an administrator attaches, instead of saying spore.host does
+  not provision the permissions (#1666).
+  baseline cannot re-create it. The boundary is permanent account setup; it
+  is listed as kept, and only `spawn setup-account --remove` (#1656) removes
+  it. A spored managed
+
 ## [0.168.0] - 2026-11-20
 
 ### Added

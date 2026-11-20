@@ -27,8 +27,10 @@
 // spawn never writes spore-host:role here. Its one value, "service", marks
 // spore.host's own live service (pkg/servicetags, spore-host#750), which
 // cleanup refuses to delete; what this package tags is workload and tool
-// infrastructure that must stay deletable. The one resource kept on purpose,
-// the spawn-instance permissions boundary, carries [PermanentKey] instead.
+// infrastructure that must stay deletable. The two resources kept on purpose,
+// the permanent account setup `spawn setup-account` provisions (the
+// spawn-instance permissions boundary and the user lifecycle policy), carry
+// [PermanentKey] instead.
 package sporetags
 
 import (
@@ -41,9 +43,11 @@ import (
 // region.
 const ScopeGlobal = "global"
 
-// PermanentKey marks the one spawn resource kept on purpose by owner decision:
-// the spore-host/spawn-instance-boundary policy (spore-host/spore-host#752).
-// Teardown keys on it and leaves the resource in place. Its value is
+// PermanentKey marks the spawn resources kept on purpose by owner decision
+// (spore-host/spore-host#752): the permanent account setup, exactly two
+// policies, spore-host/spawn-instance-boundary and
+// spore-host/spawn-user-lifecycle, removed only by `spawn setup-account
+// --remove`. Teardown keys on it and leaves the resource in place. Its value is
 // [PermanentValue].
 const (
 	PermanentKey   = "spore-host:permanent"
@@ -66,7 +70,7 @@ func At(scope, owner string, now time.Time) map[string]string {
 }
 
 // Permanent is [For] plus [PermanentKey]: the tags of the spawn-instance
-// boundary.
+// boundary and the user lifecycle policy.
 func Permanent(owner string) map[string]string {
 	m := For(ScopeGlobal, owner)
 	m[PermanentKey] = PermanentValue
