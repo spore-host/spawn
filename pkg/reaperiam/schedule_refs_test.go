@@ -14,7 +14,13 @@ import (
 // the schedules: the #1378 read and the #1398 params sweep.
 func scheduleGrants(t *testing.T) map[grant]bool {
 	t.Helper()
-	return grantsOf(t, OwnAccountStatements())
+	out := map[grant]bool{}
+	for g := range grantsOf(t, ScheduleStatements()) {
+		if isScheduleGrant(g) {
+			out[g] = true
+		}
+	}
+	return out
 }
 
 func grantsOf(t *testing.T, stmts []Statement) map[grant]bool {
@@ -76,8 +82,12 @@ func looseGrants(t *testing.T, stmts []interface{}) map[grant]bool {
 // s3:GetObject, the params sweep's s3:ListAllMyBuckets (#1398), or anything
 // on a spawn-schedules resource. Discovered by what it touches, not by
 // statement position, so a second, broader copy cannot hide.
+// isScheduleGrant: a grant that reaches schedule data. s3:ListAllMyBuckets is
+// not one: it returns bucket names only, and the member role holds it for the
+// account-idle footprint (#1654). The params sweep's own use of it is held to
+// the template by TestGrantedElsewhereIsInTheSAMTemplate.
 func isScheduleGrant(g grant) bool {
-	return g.Action == "s3:GetObject" || g.Action == "s3:ListAllMyBuckets" || strings.Contains(g.Resources, "spawn-schedules")
+	return g.Action == "s3:GetObject" || strings.Contains(g.Resources, "spawn-schedules")
 }
 
 func sortedGrants(m map[grant]bool) []string {

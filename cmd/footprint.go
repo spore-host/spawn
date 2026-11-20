@@ -119,28 +119,16 @@ func runFootprint(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve regions: %w", err)
 	}
 
-	rep := footprintReport{}
-	for _, r := range regions {
-		tagged, _, err := client.DiscoverManagedResources(ctx, aws.DiscoverOptions{Region: r})
-		if err != nil {
-			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: tagged scan: %v", r, err))
-		} else {
-			rep.Tagged = append(rep.Tagged, tagged...)
-		}
-
-		cp, notes := client.ScanControlPlane(ctx, r)
-		rep.ControlPlane = append(rep.ControlPlane, cp...)
-		for _, n := range notes {
-			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: %s", r, n))
-		}
-		if len(cp) > 0 {
-			rep.Regions = append(rep.Regions, firstNonEmpty(cp[0].Region, r))
+	// The same scans the reaper's account-idle sweep plans from (spawn#1654).
+	in := client.GatherFootprint(ctx, regions)
+	rep := footprintReport{Tagged: in.Tagged, ControlPlane: in.ControlPlane, Global: in.Global, Notes: in.Notes}
+	seenRegion := map[string]bool{}
+	for _, cp := range in.ControlPlane {
+		if cp.Region != "" && !seenRegion[cp.Region] {
+			seenRegion[cp.Region] = true
+			rep.Regions = append(rep.Regions, cp.Region)
 		}
 	}
-
-	g, gnotes := client.ScanGlobalFootprint(ctx)
-	rep.Global = g
-	rep.Notes = append(rep.Notes, gnotes...)
 
 	for _, r := range append(append([]aws.ControlPlaneResource{}, rep.ControlPlane...), rep.Global...) {
 		if r.Warn != "" {

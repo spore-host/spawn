@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/spore-host/libs/tags"
 )
 
 // The spored managed policies (#1573). pkg/aws attaches spored's grants to the
@@ -30,10 +31,19 @@ import (
 //   - IAM reports it attached to nothing (AttachmentCount 0);
 //   - it was created more than Grace ago, so a launch between creating it and
 //     attaching it is not raced. A launch that loses that race anyway finds
-//     the policy gone at AttachRolePolicy and creates it again.
+//     the policy gone at AttachRolePolicy and creates it again;
+//   - its tags could be read and it is not tagged spore-host:permanent=true.
 //
 // IAM itself refuses to delete a policy that is attached (DeleteConflict), so
 // a policy attached between the listing and the delete is kept.
+//
+// The spawn-instance permissions boundary, at the same path, is never deleted
+// here (#1664). It is the one permanent piece of spore.host in an account
+// (spore-host/spore-host#752): an administrator creates it with `spawn
+// setup-account`, the documented user baseline cannot re-create it, so a sweep
+// that removed it once no role used it broke every non-admin's next launch.
+// It is listed, as kept, and only `spawn setup-account --remove` (#1656, not
+// yet implemented) removes it.
 
 // SporedPolicyPath is pkg/aws.SporedPolicyPath, repeated so the reaper need
 // not import pkg/aws (a test holds the two equal).
@@ -67,20 +77,20 @@ func IsSporedPolicyName(name string) bool {
 
 // BoundaryPolicyName is the spawn-instance permissions boundary's name at
 // SporedPolicyPath (pkg/aws.spawnInstanceBoundaryName; a test holds the two
-// equal). It is swept here too: it is deleted once no role still uses it as a
-// boundary.
+// equal). SweepSporedPolicies names it so that it can keep it: it is never
+// deleted here (#1664).
 const BoundaryPolicyName = "spawn-instance-boundary"
 
-// KeepBoundaryInUse is the reason the boundary policy is kept.
-const KeepBoundaryInUse = "set as the permissions boundary of a role"
+// KeepBoundaryPermanent is the reason the boundary policy is kept, always.
+const KeepBoundaryPermanent = "the spawn-instance permissions boundary is permanent; only an administrator's explicit removal (spawn#1656, not yet implemented) removes it"
 
 // PolicyAPI is the IAM slice SweepSporedPolicies uses. *iam.Client satisfies
-// it.
+// it. It has no policy-version calls: nothing it deletes has non-default
+// versions (only the boundary does, and the boundary is never deleted).
 type PolicyAPI interface {
 	iam.ListPoliciesAPIClient
+	iam.ListPolicyTagsAPIClient
 	DeletePolicy(ctx context.Context, in *iam.DeletePolicyInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyOutput, error)
-	ListPolicyVersions(ctx context.Context, in *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
-	DeletePolicyVersion(ctx context.Context, in *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
 }
 
 // NewPolicyClient is the IAM client for SweepSporedPolicies, from cfg.
@@ -99,8 +109,12 @@ type PolicyDecision struct {
 
 // Reasons a spored managed policy is kept.
 const (
-	KeepPolicyAttached = "attached to a role"
-	KeepPolicyYoung    = "created within the 24h grace"
+	KeepPolicyAttached  = "attached to a role"
+	KeepPolicyYoung     = "created within the 24h grace"
+	KeepPolicyPermanent = "tagged " + tags.Permanent + "=" + tags.PermanentTrue
+	// KeepPolicyTagsUnreadable: its tags could not be read, so it cannot be
+	// shown not to be permanent (needs iam:ListPolicyTags).
+	KeepPolicyTagsUnreadable = "its tags could not be read (iam:ListPolicyTags), so it cannot be shown not to be permanent"
 )
 
 // SweepSporedPolicies lists spawn's spored managed policies and, when reap is
@@ -119,8 +133,7 @@ func SweepSporedPolicies(ctx context.Context, api PolicyAPI, now time.Time, reap
 		}
 		for _, pol := range page.Policies {
 			name := aws.ToString(pol.PolicyName)
-			isBoundary := name == BoundaryPolicyName
-			if aws.ToString(pol.Path) != SporedPolicyPath || (!IsSporedPolicyName(name) && !isBoundary) {
+			if aws.ToString(pol.Path) != SporedPolicyPath {
 				continue
 			}
 			d := PolicyDecision{
@@ -129,51 +142,44 @@ func SweepSporedPolicies(ctx context.Context, api PolicyAPI, now time.Time, reap
 				Created:     aws.ToTime(pol.CreateDate),
 				Attachments: aws.ToInt32(pol.AttachmentCount),
 			}
-			// The boundary's use is as a permissions boundary, counted by
-			// PermissionsBoundaryUsageCount, not by AttachmentCount: a role
-			// holds it as its boundary, not attached. It is kept while any role
-			// still does.
-			inUse := d.Attachments
-			if isBoundary {
-				inUse += aws.ToInt32(pol.PermissionsBoundaryUsageCount)
+			// The boundary first, by name or ARN, before anything that could
+			// make it a candidate: it is permanent (#1664).
+			if isBoundary(name, d.ARN) {
+				d.Attachments += aws.ToInt32(pol.PermissionsBoundaryUsageCount)
+				d.Reason = KeepBoundaryPermanent
+				out = append(out, d)
+				continue
+			}
+			if !IsSporedPolicyName(name) {
+				continue
 			}
 			switch {
-			case inUse > 0:
-				d.Attachments = inUse
-				if isBoundary {
-					d.Reason = KeepBoundaryInUse
-				} else {
-					d.Reason = KeepPolicyAttached
-				}
+			case d.Attachments > 0:
+				d.Reason = KeepPolicyAttached
 			case d.Created.IsZero() || now.Sub(d.Created) < Grace:
 				d.Reason = KeepPolicyYoung
 			default:
-				d.Delete = true
+				// Only a candidate's tags are read (ListPolicies returns
+				// none). Unreadable tags keep it: fail closed.
+				t, err := policyTags(ctx, api, pol.Arn)
+				switch {
+				case err != nil:
+					d.Reason, d.Err = KeepPolicyTagsUnreadable, err
+				case tags.IsPermanent(t):
+					d.Reason = KeepPolicyPermanent
+				default:
+					d.Delete = true
+				}
 			}
 			if d.Delete && reap {
-				if isBoundary {
-					// DeletePolicy refuses a policy with non-default versions,
-					// so remove those first (an admin's `spawn setup-account`
-					// may have bumped the boundary's schema in place).
-					if err := deleteNonDefaultVersions(ctx, api, pol.Arn); err != nil {
-						d.Err = err
-						out = append(out, d)
-						continue
-					}
-				}
 				_, err := api.DeletePolicy(ctx, &iam.DeletePolicyInput{PolicyArn: pol.Arn})
 				switch {
 				case err == nil || isNoSuchEntity(err):
 					d.Deleted = true
 				case isDeleteConflict(err):
-					// Used since it was listed (attached, or set as a boundary):
-					// kept, which is right.
+					// Attached since it was listed: kept, which is right.
 					d.Delete = false
-					if isBoundary {
-						d.Reason = KeepBoundaryInUse
-					} else {
-						d.Reason = KeepPolicyAttached
-					}
+					d.Reason = KeepPolicyAttached
 				default:
 					d.Err = err
 				}
@@ -185,26 +191,26 @@ func SweepSporedPolicies(ctx context.Context, api PolicyAPI, now time.Time, reap
 	return out, nil
 }
 
-// deleteNonDefaultVersions removes every non-default version of a managed
-// policy so that DeletePolicy (which deletes the default version) can delete
-// it. Already gone is success.
-func deleteNonDefaultVersions(ctx context.Context, api PolicyAPI, arn *string) error {
-	lv, err := api.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{PolicyArn: arn})
-	if err != nil {
-		if isNoSuchEntity(err) {
-			return nil
+// isBoundary reports whether a policy at SporedPolicyPath is the
+// spawn-instance boundary, by name or by ARN.
+func isBoundary(name, arn string) bool {
+	return name == BoundaryPolicyName || strings.HasSuffix(arn, ":policy"+SporedPolicyPath+BoundaryPolicyName)
+}
+
+// policyTags reads every tag on a managed policy.
+func policyTags(ctx context.Context, api PolicyAPI, arn *string) (map[string]string, error) {
+	t := map[string]string{}
+	p := iam.NewListPolicyTagsPaginator(api, &iam.ListPolicyTagsInput{PolicyArn: arn})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list tags of %s: %w", aws.ToString(arn), err)
 		}
-		return fmt.Errorf("list versions of %s: %w", aws.ToString(arn), err)
+		for _, tg := range page.Tags {
+			t[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
+		}
 	}
-	for _, v := range lv.Versions {
-		if v.IsDefaultVersion {
-			continue
-		}
-		if _, err := api.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{PolicyArn: arn, VersionId: v.VersionId}); err != nil && !isNoSuchEntity(err) {
-			return fmt.Errorf("delete version %s of %s: %w", aws.ToString(v.VersionId), aws.ToString(arn), err)
-		}
-	}
-	return nil
+	return t, nil
 }
 
 func isDeleteConflict(err error) bool {

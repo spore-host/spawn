@@ -12,6 +12,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 )
 
 // ensureMPIClusterRules makes a security group usable for MPI *and EFA* traffic
@@ -113,6 +115,7 @@ func (c *Client) CreateOrGetEFASecurityGroup(ctx context.Context, region, vpcID,
 // sure it carries the all-traffic self rules either way. created reports a new
 // group.
 func (c *Client) createOrGetClusterGroup(ctx context.Context, region, vpcID, groupName, description, purpose string) (sgID string, created bool, err error) {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the group (spawn#1654)
 	// Refuse a name with no cluster-specific suffix (#685).
 	//
 	// Callers build this as a prefix + a cluster name ("spawn-mpi-" +
@@ -195,6 +198,7 @@ func (c *Client) createOrGetClusterGroup(ctx context.Context, region, vpcID, gro
 // default SG (which typically opens only 22, if anything), so RDP is impossible
 // (#95). allowCIDR defaults to 0.0.0.0/0 when empty (caller should warn).
 func (c *Client) CreateOrGetWindowsSecurityGroup(ctx context.Context, region, vpcID, groupName, allowCIDR string) (string, error) {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the group (spawn#1654)
 	if allowCIDR == "" {
 		allowCIDR = "0.0.0.0/0"
 	}
@@ -384,6 +388,7 @@ func sgHasUDP8443(sg types.SecurityGroup) bool {
 // it carries spawn:managed=true, and loses the world-open SSH rule older spawns
 // wrote. Returns the security group ID.
 func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID string) (string, error) {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the group (spawn#1654)
 	ec2Client := c.regionalEC2(region)
 
 	const sgName = "spawn-dcv"
@@ -485,6 +490,7 @@ func (c *Client) CreateOrGetDCVSecurityGroup(ctx context.Context, region, vpcID 
 // existing group is adopted only when it carries spawn:managed=true, and loses
 // the world-open SSH rule older spawns wrote. Returns the security group ID.
 func (c *Client) CreateOrGetWebSecurityGroup(ctx context.Context, region, vpcID string) (string, error) {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(region).Region) // before the group (spawn#1654)
 	ec2Client := c.regionalEC2(region)
 
 	const sgName = "spawn-web"

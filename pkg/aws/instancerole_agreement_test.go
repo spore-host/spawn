@@ -22,8 +22,10 @@ func TestInstanceRoleDeleterAgreesWithTheCreator(t *testing.T) {
 		t.Errorf("pkg/instancerole's shared names (%s, %s) differ from pkg/aws's (%s, %s)",
 			instancerole.SharedRoleName, instancerole.SharedProfileName, SporedRoleName, SporedInstanceProfileName)
 	}
-	// The boundary deleter (pkg/instancerole.SweepSporedPolicies) must name the
-	// same boundary pkg/aws provisions, or it would never be reclaimed.
+	// The spored policy sweep (pkg/instancerole.SweepSporedPolicies) must name
+	// the same boundary pkg/aws provisions, so that it is EXCLUDED: the boundary
+	// is permanent (#1664), and a sweep that named a different one would treat
+	// the real boundary as an ordinary policy at the same path.
 	if instancerole.BoundaryPolicyName != spawnInstanceBoundaryName {
 		t.Errorf("pkg/instancerole's boundary name %q differs from pkg/aws's %q",
 			instancerole.BoundaryPolicyName, spawnInstanceBoundaryName)

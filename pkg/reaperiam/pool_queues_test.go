@@ -42,6 +42,9 @@ func TestSQSGrantsAreScopedToPoolQueues(t *testing.T) {
 				if st.Resource != "*" || len(st.Action) != 1 {
 					t.Errorf("sqs:ListQueues must be alone on '*' (it has no resource ARN), got %v on %s", st.Action, st.Resource)
 				}
+			case st.Resource == CalqueQueueARN && (a == "sqs:GetQueueAttributes" || a == "sqs:ListQueueTags"):
+				// calque's queues, read (never deleted) by the account-idle
+				// sweep's calque footprint (#1654).
 			case st.Resource != PoolQueueARN:
 				t.Errorf("%s is granted on %s; only %s is allowed", a, st.Resource, PoolQueueARN)
 			}

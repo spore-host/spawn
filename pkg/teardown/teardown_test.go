@@ -438,3 +438,63 @@ func TestEveryPatternTypeHasADeleter(t *testing.T) {
 		t.Errorf("deleters %v, pattern types %v", have, want)
 	}
 }
+
+// reportOnlyDeleter is newDeleter built with NewReportOnly.
+func reportOnlyDeleter(t *testing.T, a *account) footprint.ByType {
+	t.Helper()
+	return NewReportOnly(sdkanswer.Config("us-east-1", a.answer), Options{
+		Account: acct, Now: func() time.Time { return now }, RoleReferences: collected(t),
+		Workers: func(context.Context) (poolqueue.InUse, error) {
+			return poolqueue.InUse{Profiles: map[string]bool{}, RunIDs: map[string]bool{}}, nil
+		},
+	})
+}
+
+// NewReportOnly (spawn#1654, the reaper's report-mode account-idle sweep)
+// re-checks a plan exactly as New does, and cannot delete: even run in reap
+// mode, every step fails with ErrReportOnly and no delete call is made.
+func TestReportOnlyDeleterNeverDeletes(t *testing.T) {
+	a := newAccount()
+	plan, err := footprint.NewPlan(fs.Tool, fs.Patterns, iamPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := footprint.Execute(ctx, plan, footprint.ModeReport, reportOnlyDeleter(t, a), nil)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	for _, act := range rep.Actions {
+		if act.Outcome != footprint.OutcomeWouldDelete {
+			t.Errorf("report: %s: %s (%s %v), want would-delete, as New's Describe gives", act.Name, act.Outcome, act.Reason, act.Err)
+		}
+	}
+	res, _ := footprint.Execute(ctx, plan, footprint.ModeReap, reportOnlyDeleter(t, a), testLease(t))
+	if d := a.deletes(); len(d) != 0 {
+		t.Fatalf("a report-only deleter made delete calls: %v", d)
+	}
+	for _, act := range res.Actions {
+		if act.Outcome == footprint.OutcomeDeleted {
+			t.Errorf("%s was reported deleted by a report-only deleter", act.Name)
+		}
+		if act.Outcome == footprint.OutcomeFailed && !errors.Is(act.Err, ErrReportOnly) {
+			t.Errorf("%s failed with %v, want ErrReportOnly", act.Name, act.Err)
+		}
+	}
+	if res.Count(footprint.OutcomeFailed) == 0 {
+		t.Error("reap mode through a report-only deleter failed no step: its Delete is not refusing")
+	}
+}
+
+// NewReportOnly covers the same types as New, so a report never says
+// "no deleter" for something reap mode would handle.
+func TestReportOnlyCoversEveryType(t *testing.T) {
+	full, ro := New(aws.Config{}, Options{Account: acct}), NewReportOnly(aws.Config{}, Options{Account: acct})
+	if len(full) != len(ro) {
+		t.Fatalf("New has %d types, NewReportOnly %d", len(full), len(ro))
+	}
+	for typ := range full {
+		if _, ok := ro[typ]; !ok {
+			t.Errorf("NewReportOnly has no describer for %s", typ)
+		}
+	}
+}

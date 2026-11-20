@@ -91,6 +91,17 @@ var opActions = map[string][]string{
 	"s3:GetBucketNotificationConfiguration": {"s3:GetBucketNotification"},
 	"s3:PutBucketNotificationConfiguration": {"s3:PutBucketNotification"},
 
+	// DynamoDB has no transaction actions: a transaction is authorized per
+	// item, as the action that item performs ("Using IAM with DynamoDB
+	// transactions", DynamoDB Developer Guide: Put, Update, Delete and Get are
+	// governed by PutItem, UpdateItem, DeleteItem and GetItem, and a
+	// ConditionCheck by dynamodb:ConditionCheckItem). Which items a call
+	// carries is not known here, so a write transaction needs all four; this
+	// generator over-approximates. libs/lifecycle's MarkActive (spawn#1654) is
+	// a ConditionCheck and an Update.
+	"dynamodb:TransactWriteItems": {"dynamodb:ConditionCheckItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"},
+	"dynamodb:TransactGetItems":   {"dynamodb:GetItem"},
+
 	// Lambda's Invoke family is all lambda:InvokeFunction.
 	"lambda:Invoke":                   {"lambda:InvokeFunction"},
 	"lambda:InvokeAsync":              {"lambda:InvokeFunction"},

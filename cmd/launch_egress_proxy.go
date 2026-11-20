@@ -13,6 +13,7 @@ import (
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/egressproxy"
 	"github.com/spore-host/spawn/pkg/egressproxy/deploy"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/progress"
 )
 
@@ -174,6 +175,9 @@ func findOrCreateEgressProxy(ctx context.Context, awsClient *aws.Client, region 
 	profile, err := client.Profile(ctx)
 	if err != nil {
 		return egressProxyFor{client: client}, err
+	}
+	if awsClient != nil { // nil only in tests, through the seams
+		lifecyclemark.Mark(ctx, awsClient.Config(), region) // before the proxy and its groups (spawn#1654)
 	}
 	result, err := egressProxyFindOrCreate(ctx, client.Deps, deploy.Request{
 		Region: region, VPCID: n.VPCID, AvailabilityZone: n.AvailabilityZone, PublicSubnets: n.PublicSubnets,

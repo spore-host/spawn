@@ -53,6 +53,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
@@ -65,15 +66,21 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/spore-host/calque/pkg/calquefootprint"
+	"github.com/spore-host/libs/footprint"
+	"github.com/spore-host/libs/lifecycle"
+	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	"github.com/spore-host/spawn/pkg/dns"
 	"github.com/spore-host/spawn/pkg/elasticip"
 	"github.com/spore-host/spawn/pkg/instancerole"
 	"github.com/spore-host/spawn/pkg/reaperconfig"
+	"github.com/spore-host/spawn/pkg/scheduler"
 	"github.com/spore-host/spawn/pkg/schedulesweep"
 	"github.com/spore-host/spawn/pkg/security"
 	"github.com/spore-host/spawn/pkg/spotrequest"
 	"github.com/spore-host/spawn/pkg/tagprefix"
 	"github.com/spore-host/spawn/pkg/taskproto"
+	"github.com/spore-host/spawn/pkg/teardown"
 	ttlpkg "github.com/spore-host/spawn/pkg/ttl"
 	"github.com/spore-host/spore-host/lambda/accountlifecycle"
 )
@@ -117,6 +124,14 @@ type account struct {
 	// configsFor is the launch config object sweep's S3 slice (#1359). nil
 	// skips the sweep.
 	configsFor func(region string) launchConfigS3API
+	// The account-idle sweep (spawn#1654, accountidle.go): lease is the
+	// account's lifecycle tables, through this account's credentials (nil
+	// skips the sweep: lease unavailable); footprintFor plans spawn's
+	// teardown here with `spawn footprint`'s own scan and a deleter that
+	// cannot delete; calqueFor inventories calque's footprint.
+	lease        *lifecycle.Client
+	footprintFor func(ctx context.Context, regions []string, refs instancerole.References, now time.Time) (*footprint.Report, footprint.Deleter)
+	calqueFor    func(ctx context.Context, now time.Time) (*calquefootprint.Footprint, error)
 }
 
 // ec2API / fsxAPI are the slices of the EC2 and FSx clients the reaper uses.
@@ -236,6 +251,15 @@ type reaper struct {
 	scheduleParams     string
 	schedParams        *schedulesweep.Clients
 	schedParamsAccount func(context.Context) (string, error)
+
+	// The account-idle sweep (spawn#1654): one of accountIdleOff /
+	// accountIdleReport / accountIdleReap, from REAPER_ACCOUNT_IDLE, default
+	// report; reap reports too until spawn#1657. accountIdleGrace is
+	// REAPER_ACCOUNT_IDLE_GRACE (24h). infraTables reads the sweeps,
+	// pipelines and schedules tables on the reaper's own credentials.
+	accountIdle      string
+	accountIdleGrace time.Duration
+	infraTables      infraTablesAPI
 
 	// DNS teardown (#247): the Route53 zone the reaper cleans up after a reap.
 	// The zone lives in the reaper's OWN (infra) account — not the per-instance
@@ -489,6 +513,11 @@ func configure() {
 		scheduleParams:     parseScheduleParams(os.Getenv("REAPER_SCHEDULE_PARAMS")),
 		schedParams:        &schedParamsClients,
 		schedParamsAccount: selfAccount(cfg),
+		// #1654: the account-idle sweep. The infra tables are in this (the
+		// infra) account, in pkg/scheduler.TableRegion; base creds.
+		accountIdle:      accountIdleModeFromEnv(),
+		accountIdleGrace: parseAccountIdleGrace(os.Getenv("REAPER_ACCOUNT_IDLE_GRACE")),
+		infraTables:      dynamodb.NewFromConfig(regionalCopy(cfg, scheduler.TableRegion)),
 	}
 	r.netResources, r.elasticIPs = netSweepModesFromEnv()
 	// Route53 lives in the reaper's own account; use base creds. Only wire the
@@ -524,8 +553,8 @@ func configure() {
 		log.Printf("REAPER_DNS_LEASE_EXPIRE=true but the DNS sweep is off — lease expiry disabled (it runs inside the sweep)")
 		r.expireLeases = false
 	}
-	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s, schedule-params=%s, launch-configs=%s)",
-		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues, r.scheduleParams, r.launchConfigs)
+	log.Printf("ttl-reaper initialized (accounts=%v, regions=%v, max-age=%s, dry-run=%t, graceful=%t, graceful-wait=%s, dns-sweep=%t, dns-expire=%t, dns-lease-expire=%t, net-resources=%s, spot-requests=%s, elastic-ips=%s, empty-buckets=%s, instance-roles=%s, pool-queues=%s, schedule-params=%s, launch-configs=%s, account-idle=%s, account-idle-grace=%s)",
+		labels, r.regions, r.maxAge, r.dryRun, r.graceful, r.gracefulWait, r.sweepDNS, r.expireDNS, r.expireLeases, r.netResources, r.spotRequests, r.elasticIPs, r.emptyBuckets, r.instanceRoles, r.poolQueues, r.scheduleParams, r.launchConfigs, r.accountIdle, r.accountIdleGrace)
 }
 
 // resolveAccounts builds the list of accounts to scan from configuration:
@@ -553,57 +582,7 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 
 	var accounts []account
 	if strings.EqualFold(os.Getenv("REAPER_SCAN_SELF"), "true") {
-		accounts = append(accounts, account{
-			label:     "self",
-			accountID: selfAccountID(),
-			ec2For: func(region string) ec2API {
-				c := base.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			netFor: func(region string) netResourceAPI {
-				c := base.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			spotFor: func(region string) spotRequestAPI {
-				c := base.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			s3For: func(region string) s3API {
-				c := base.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-			ssmFor: func(region string) ssmAPI {
-				c := base.Copy()
-				c.Region = region
-				return ssm.NewFromConfig(c)
-			},
-			fsxFor: func(region string) fsxAPI {
-				c := base.Copy()
-				c.Region = region
-				return fsx.NewFromConfig(c)
-			},
-			iamFor:     func() iamAPI { return iam.NewFromConfig(base) },
-			regionsFor: func() regionsAPI { return ec2.NewFromConfig(base) },
-			sqsFor: func(region string) sqsAPI {
-				c := base.Copy()
-				c.Region = region
-				return sqs.NewFromConfig(c)
-			},
-			specsFor: func(region string) poolSpecsAPI {
-				c := base.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-			configsFor: func(region string) launchConfigS3API {
-				c := base.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-		})
+		accounts = append(accounts, newAccount("self", selfAccountID(), base))
 	}
 
 	roleARNs := parseList(os.Getenv("REAPER_ROLE_ARNS"))
@@ -622,116 +601,65 @@ func resolveAccounts(ctx context.Context, base aws.Config) []account {
 		if err != nil {
 			log.Fatalf("create cross-account config for %s: %v", roleARN, err)
 		}
-		accounts = append(accounts, account{
-			label:     accountIDFromRoleARN(roleARN),
-			accountID: accountIDFromRoleARN(roleARN),
-			ec2For: func(region string) ec2API {
-				c := acctCfg.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			netFor: func(region string) netResourceAPI {
-				c := acctCfg.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			spotFor: func(region string) spotRequestAPI {
-				c := acctCfg.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			s3For: func(region string) s3API {
-				c := acctCfg.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-			ssmFor: func(region string) ssmAPI {
-				c := acctCfg.Copy()
-				c.Region = region
-				return ssm.NewFromConfig(c)
-			},
-			fsxFor: func(region string) fsxAPI {
-				c := acctCfg.Copy()
-				c.Region = region
-				return fsx.NewFromConfig(c)
-			},
-			iamFor:     func() iamAPI { return iam.NewFromConfig(acctCfg) },
-			regionsFor: func() regionsAPI { return ec2.NewFromConfig(acctCfg) },
-			sqsFor: func(region string) sqsAPI {
-				c := acctCfg.Copy()
-				c.Region = region
-				return sqs.NewFromConfig(c)
-			},
-			specsFor: func(region string) poolSpecsAPI {
-				c := acctCfg.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-			configsFor: func(region string) launchConfigS3API {
-				c := acctCfg.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-		})
+		id := accountIDFromRoleARN(roleARN)
+		accounts = append(accounts, newAccount(id, id, acctCfg))
 	}
 
 	if len(accounts) == 0 {
 		// No roles and no scan-self: fall back to scanning the local account so
 		// the reaper is never a no-op by misconfiguration.
 		log.Printf("no REAPER_ROLE_ARNS/EC2_ROLE_ARN and REAPER_SCAN_SELF!=true; defaulting to local account")
-		accounts = append(accounts, account{
-			label:     "self",
-			accountID: selfAccountID(),
-			ec2For: func(region string) ec2API {
-				c := base.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			netFor: func(region string) netResourceAPI {
-				c := base.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			spotFor: func(region string) spotRequestAPI {
-				c := base.Copy()
-				c.Region = region
-				return ec2.NewFromConfig(c)
-			},
-			s3For: func(region string) s3API {
-				c := base.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-			ssmFor: func(region string) ssmAPI {
-				c := base.Copy()
-				c.Region = region
-				return ssm.NewFromConfig(c)
-			},
-			fsxFor: func(region string) fsxAPI {
-				c := base.Copy()
-				c.Region = region
-				return fsx.NewFromConfig(c)
-			},
-			iamFor:     func() iamAPI { return iam.NewFromConfig(base) },
-			regionsFor: func() regionsAPI { return ec2.NewFromConfig(base) },
-			sqsFor: func(region string) sqsAPI {
-				c := base.Copy()
-				c.Region = region
-				return sqs.NewFromConfig(c)
-			},
-			specsFor: func(region string) poolSpecsAPI {
-				c := base.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-			configsFor: func(region string) launchConfigS3API {
-				c := base.Copy()
-				c.Region = region
-				return s3.NewFromConfig(c)
-			},
-		})
+		accounts = append(accounts, newAccount("self", selfAccountID(), base))
 	}
 	return accounts
+}
+
+// regionalCopy is cfg in region.
+func regionalCopy(cfg aws.Config, region string) aws.Config {
+	c := cfg.Copy()
+	c.Region = region
+	return c
+}
+
+// newAccount is one scanned account over cfg: the Lambda's own credentials
+// for the local account, or the assumed member role's.
+func newAccount(label, accountID string, cfg aws.Config) account {
+	a := account{
+		label:      label,
+		accountID:  accountID,
+		ec2For:     func(region string) ec2API { return ec2.NewFromConfig(regionalCopy(cfg, region)) },
+		netFor:     func(region string) netResourceAPI { return ec2.NewFromConfig(regionalCopy(cfg, region)) },
+		spotFor:    func(region string) spotRequestAPI { return ec2.NewFromConfig(regionalCopy(cfg, region)) },
+		s3For:      func(region string) s3API { return s3.NewFromConfig(regionalCopy(cfg, region)) },
+		ssmFor:     func(region string) ssmAPI { return ssm.NewFromConfig(regionalCopy(cfg, region)) },
+		fsxFor:     func(region string) fsxAPI { return fsx.NewFromConfig(regionalCopy(cfg, region)) },
+		iamFor:     func() iamAPI { return iam.NewFromConfig(cfg) },
+		regionsFor: func() regionsAPI { return ec2.NewFromConfig(cfg) },
+		sqsFor:     func(region string) sqsAPI { return sqs.NewFromConfig(regionalCopy(cfg, region)) },
+		specsFor:   func(region string) poolSpecsAPI { return s3.NewFromConfig(regionalCopy(cfg, region)) },
+		configsFor: func(region string) launchConfigS3API { return s3.NewFromConfig(regionalCopy(cfg, region)) },
+		// #1654: the account-idle sweep's plan, re-checked by a deleter that
+		// cannot delete.
+		footprintFor: func(ctx context.Context, regions []string, refs instancerole.References, now time.Time) (*footprint.Report, footprint.Deleter) {
+			rep := spawnaws.NewClientFromConfig(cfg).AccountFootprint(ctx, accountID, regions, now)
+			return rep, teardown.NewReportOnly(cfg, teardown.Options{Account: accountID, Now: func() time.Time { return now }, RoleReferences: refs})
+		},
+		calqueFor: calqueFootprintFor(calquefootprint.Clients{
+			IAM: iam.NewFromConfig(cfg),
+			SQS: func(region string) (calquefootprint.SQSAPI, error) {
+				return sqs.NewFromConfig(regionalCopy(cfg, region)), nil
+			},
+			EC2: func(region string) (calquefootprint.EC2API, error) {
+				return ec2.NewFromConfig(regionalCopy(cfg, region)), nil
+			},
+		}, ec2.NewFromConfig(cfg), accountID),
+	}
+	if lc, err := newLeaseClient(cfg); err != nil {
+		log.Printf("account %s: lifecycle client: %v (the account-idle sweep skips it)", label, err)
+	} else {
+		a.lease = lc
+	}
+	return a
 }
 
 func parseList(env string) []string {
@@ -954,6 +882,22 @@ type Summary struct {
 	// redeployed with the #950 grant.
 	SpotAccountsDenied int `json:"spot_accounts_denied"`
 
+	// The account-idle sweep (#1654), per scope (a scanned region or
+	// "global") of each account, under REAPER_ACCOUNT_IDLE. Report mode: it
+	// never deletes. Scopes counts those judged; LeaseUnavailable those
+	// skipped because no creator has marked them or the lease could not be
+	// read; Refused the accounts GuardTeardown refused (the infra account).
+	AccountIdleScopes           int `json:"account_idle_scopes"`
+	AccountIdleActive           int `json:"account_idle_active"`
+	AccountIdleWaiting          int `json:"account_idle_waiting"` // idle, within the grace
+	AccountIdleClaimed          int `json:"account_idle_claimed"`
+	AccountIdleReleased         int `json:"account_idle_released"` // active again at the post-claim re-check
+	AccountIdleReported         int `json:"account_idle_reported"`
+	AccountIdleWouldDelete      int `json:"account_idle_would_delete"`
+	AccountIdleKept             int `json:"account_idle_kept"`
+	AccountIdleLeaseUnavailable int `json:"account_idle_lease_unavailable"`
+	AccountIdleRefused          int `json:"account_idle_refused"`
+
 	// DNS sweep (#438): orphaned Route53 A-records reconciled against live IPs.
 	DNSScanned int `json:"dns_scanned"` // A-records examined under the account subdomains
 	DNSReaped  int `json:"dns_reaped"`  // orphaned records deleted (or would-delete in dry-run)
@@ -1049,6 +993,9 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 	// emits the alarmable sentinels. See failures.go.
 	outcomes := make([]accountOutcome, 0, len(r.accounts))
 
+	// The infra tables the account-idle sweep reads, once per run (#1654).
+	infra := &infraReader{api: r.infraTables}
+
 	// Scan every spore-launching account × region. A spore lands in whatever
 	// account the caller's credentials pointed at, so coverage must be per-account.
 	for _, acct := range r.accounts {
@@ -1142,6 +1089,11 @@ func (r *reaper) run(ctx context.Context) (Summary, error) {
 		// after the regional scans, like the role sweep: its worker check
 		// covers every enabled region.
 		r.reapPoolQueuesAccount(ctx, acct, start, &sum)
+
+		// The account-idle sweep (#1654), report mode: last for the account,
+		// so the instance reaps above are already shutting-down (and still
+		// count as active this run).
+		r.sweepAccountIdle(ctx, acct, infra, start, &sum)
 
 		// DNS reconciliation sweep (#438): after scanning all regions for this
 		// account, reconcile the account's {base36}.{domain} A-records against the

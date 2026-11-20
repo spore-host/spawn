@@ -86,6 +86,8 @@ spawn reaper deploy [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--account-idle-grace` |  | string |  | How long nothing spawn manages may be active before the account-idle sweep reports the teardown, REAPER_ACCOUNT_IDLE_GRACE, e.g. 24h or 30d; also the longest 'teardown --if-idle-for' can wait for (default: keep; the reaper's default is 24h) |
+| `--account-idle` |  | string |  | Account-idle sweep (judges this account idle from every activity signal and, after the grace, logs the teardown it would do; never deletes yet), REAPER_ACCOUNT_IDLE: off\|report\|reap (default: keep; the reaper's default is report, and reap reports until spawn#1657) |
 | `--artifact` |  | string |  | Use this Lambda zip instead of downloading a release asset (local path or URL) |
 | `--bucket` |  | string |  | S3 bucket in THIS account to hold the artifact (default: spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
 | `--elastic-ips` |  | string |  | Orphaned launch Elastic IP sweep, REAPER_ELASTIC_IPS: off\|report\|reap (default: keep; the reaper's default is reap, or off when REAPER_NET_RESOURCES=off) |
@@ -143,7 +145,7 @@ spawn reaper teardown [flags]
 |------|-------|------|---------|-------------|
 | `--bucket` |  | string |  | Artifact bucket to remove (default: the one recorded on the function at deploy time, else spawn-reaper-artifacts-&lt;account&gt;-&lt;region&gt;) |
 | `--force-artifacts` |  | bool |  | Remove the artifact bucket even if it is not tagged spawn:managed=true (for buckets created before the tag existed) |
-| `--if-idle-for` |  | duration | `0s` | Only tear down if the reaper has reclaimed nothing for at least this long, at most 720h (the logs it reads); otherwise report and exit 0 |
+| `--if-idle-for` |  | duration | `0s` | Only tear down if nothing spawn manages has been active in this account for at least this long, by the reaper's lifecycle verdict, and at most the reaper's account-idle grace (24h unless deployed with --account-idle-grace) and 720h; otherwise report and exit 0 |
 | `--keep-artifacts` |  | bool |  | Leave the artifact bucket in place (it is removed by default) |
 | `--keep-logs` |  | bool |  | Leave the reaper's CloudWatch log group in place (it is removed by default) |
 

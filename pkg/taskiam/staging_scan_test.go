@@ -131,6 +131,12 @@ func TestReaperPolicyCannotListOrReadTheStagingBucket(t *testing.T) {
 			if a == "s3:ListBucket" && listsOnlyLaunchConfigs(st.Condition) {
 				continue
 			}
+			// ListBuckets: an account-level action with no resource ARN that
+			// returns bucket names, never a key. The account-idle footprint
+			// lists the account's buckets with it (#1654).
+			if a == "s3:ListAllMyBuckets" && st.Resource == "*" && len(st.Action) == 1 {
+				continue
+			}
 			if strings.Contains(a, "*") || strings.HasPrefix(a, "s3:List") || strings.HasPrefix(a, "s3:GetObject") {
 				t.Errorf("the reaper is granted %s on %s, which reaches the staging bucket: no spawn role may list it or read an object in it", a, st.Resource)
 			}

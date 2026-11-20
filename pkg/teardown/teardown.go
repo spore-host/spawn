@@ -89,13 +89,7 @@ type Options struct {
 // New returns spawn's Deleter over cfg's credentials: one per type in
 // footprintspawn.DeletableTypes.
 func New(cfg aws.Config, opts Options) footprint.ByType {
-	if opts.Now == nil {
-		opts.Now = time.Now
-	}
-	d := &deleter{cfg: cfg, opts: opts, client: spawnaws.NewClientFromConfig(cfg), seen: map[string]seen{}}
-	if d.opts.Workers == nil {
-		d.opts.Workers = d.defaultWorkers
-	}
+	d := buildDeleter(cfg, opts)
 	return footprint.ByType{
 		fs.TypeInstance:        typed{d, d.describeInstance, d.deleteInstance},
 		fs.TypeVolume:          typed{d, d.describeVolume, d.deleteVolume},
@@ -109,6 +103,53 @@ func New(cfg aws.Config, opts Options) footprint.ByType {
 		fs.TypeBucket:          typed{d, d.describeBucket, d.deleteBucket},
 		fs.TypeQueue:           typed{d, d.describeQueue, d.deleteQueue},
 	}
+}
+
+// ErrReportOnly is what a report-only Deleter's Delete returns: it was built
+// to re-check a plan, never to carry one out.
+var ErrReportOnly = errors.New("report-only deleter: nothing is deleted")
+
+// NewReportOnly is New without the deletes, for the reaper's account-idle
+// sweep in report mode (spawn#1654): Describe re-reads every resource exactly
+// as New's does, and Delete refuses with ErrReportOnly, making no AWS call.
+//
+// It is a separate constructor, not New with a flag, so that no delete is
+// reachable from a caller that only reports. The IAM coverage of a program is
+// derived from its call graph (internal/iamcoverage), and that graph counts a
+// method value as callable wherever it is created: New creates every
+// d.deleteX, so a program that calls New is held to grant every delete. This
+// function never names one, so the reaper's role is asked for the reads
+// alone, and a report-mode reaper cannot delete even through a bug.
+func NewReportOnly(cfg aws.Config, opts Options) footprint.ByType {
+	d := buildDeleter(cfg, opts)
+	return footprint.ByType{
+		fs.TypeInstance:        typed{d, d.describeInstance, refuseDelete},
+		fs.TypeVolume:          typed{d, d.describeVolume, refuseDelete},
+		fs.TypeSecurityGroup:   typed{d, d.describeSecurityGroup, refuseDelete},
+		fs.TypePlacementGroup:  typed{d, d.describePlacementGroup, refuseDelete},
+		fs.TypeKeyPair:         typed{d, d.describeKeyPair, refuseDelete},
+		fs.TypeEIP:             typed{d, d.describeEIP, refuseDelete},
+		fs.TypeInstanceProfile: typed{d, d.describeProfile, refuseDelete},
+		fs.TypeRole:            typed{d, d.describeRole, refuseDelete},
+		fs.TypeManagedPolicy:   typed{d, d.describePolicy, refuseDelete},
+		fs.TypeBucket:          typed{d, d.describeBucket, refuseDelete},
+		fs.TypeQueue:           typed{d, d.describeQueue, refuseDelete},
+	}
+}
+
+func refuseDelete(_ context.Context, r footprint.Resource, _ seen) error {
+	return fmt.Errorf("%s: %w", r.ARN, ErrReportOnly)
+}
+
+func buildDeleter(cfg aws.Config, opts Options) *deleter {
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	d := &deleter{cfg: cfg, opts: opts, client: spawnaws.NewClientFromConfig(cfg), seen: map[string]seen{}}
+	if d.opts.Workers == nil {
+		d.opts.Workers = d.defaultWorkers
+	}
+	return d
 }
 
 // seen is what the last Describe of a resource found, for its Delete.

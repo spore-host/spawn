@@ -13,6 +13,7 @@ import (
 
 	"github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/orgaccount"
 	"github.com/spore-host/spawn/pkg/sweep"
 )
@@ -143,6 +144,7 @@ func ensureSweepRole(ctx context.Context, cfg sdkaws.Config, accountID string, s
 		return refuse("spawn will not create it: " + err.Error())
 	}
 
+	lifecyclemark.Mark(ctx, cfg, lifecyclemark.ScopeGlobal) // before the role (spawn#1654)
 	res, err := aws.EnsureSweepCrossAccountRole(ctx, sweepRoleIAM(cfg), accountID, orchestrator, warn)
 	switch {
 	case err == nil:

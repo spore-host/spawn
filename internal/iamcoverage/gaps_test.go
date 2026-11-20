@@ -16,4 +16,12 @@ var knownGaps = map[string]string{
 	// enabled exporter would be denied (#1344, item 1).
 	"spored | spawn-instance-* (spored-baseline-policy) | xray:PutTraceSegments": "#1344",
 	"spored | spored-instance-role | xray:PutTraceSegments":                      "#1344",
+
+	// The reaper's account-idle sweep (#1654) inventories calque through
+	// calquefootprint.Inventory, whose Collect lists S3 objects only in the
+	// buckets Options.Buckets names. The reaper names none (calque records
+	// no buckets), so the call is unreachable at runtime, but the call graph
+	// cannot see Options. It stays denied: the member role reads no S3
+	// object or object tag (permanent).
+	"ttl-reaper | cross-account TTLReaperCrossAccountRole | s3:GetObjectTagging": "#1654 (permanent)",
 }

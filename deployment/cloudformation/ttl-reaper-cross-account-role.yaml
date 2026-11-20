@@ -395,6 +395,8 @@ Resources:
                   - sqs:GetQueueAttributes
                   - sqs:ListQueueTags
                   - sqs:DeleteQueue
+                  # #1654: the account-idle report's re-check of a pool queue.
+                  - sqs:GetQueueUrl
                 Resource: !Sub 'arn:aws:sqs:*:${AWS::AccountId}:spawn-pool-*'
               # Delete only, and only staged pool specs: no other object in
               # spawn-results-* (or anywhere) can be deleted with this.
@@ -418,6 +420,87 @@ Resources:
                 Action:
                   - s3:DeleteObject
                 Resource: 'arn:aws:s3:::spawn-staging-*/launch-config/config-*.json'
+              # The account-idle sweep (#1654), REPORT MODE: the reaper judges
+              # whether anything spawn manages is active here, and once nothing
+              # has been for 24 h it plans (and only logs) the teardown. It
+              # needs the shared-account lifecycle lease table in this account,
+              # by exact name, and read-only access to what `spawn footprint`
+              # and calque's footprint list. Nothing below deletes what spawn
+              # or a user made: the only writes are on spore-host-lifecycle
+              # (the lease's own items, and re-creating the table, tagged, if
+              # it vanished mid-run). DynamoDB authorizes a TransactWriteItems
+              # per item action, hence ConditionCheckItem/PutItem/DeleteItem.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:ConditionCheckItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:CreateTable
+                  - dynamodb:TagResource
+                Resource: !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/spore-host-lifecycle'
+              # The footprint scan's reads. These APIs either have no
+              # resource-level ARN or are listed across every spore.host name
+              # prefix; all are Describe/List/Get.
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - dynamodb:ListTables
+                  - dynamodb:ListTagsOfResource
+                  - ec2:DescribeImages
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeVolumes
+                  - events:ListEventBuses
+                  - events:ListRules
+                  - events:ListTagsForResource
+                  - lambda:ListFunctions
+                  - lambda:ListTags
+                  - logs:DescribeLogGroups
+                  - logs:ListTagsForResource
+                  - scheduler:GetSchedule
+                  - scheduler:ListSchedules
+                  - sns:ListTopics
+                  - sns:ListTagsForResource
+                  - tag:GetResources
+                # trivy:ignore:AVD-AWS-0057 -- read-only Describe/List across every spore.host name prefix.
+                Resource: '*'
+              # IAM metadata only (names, tags, attachments, profile links),
+              # never a policy document.
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:ListRoleTags
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfilesForRole
+                  - iam:GetInstanceProfile
+                  - iam:ListInstanceProfiles
+                  - iam:ListInstanceProfileTags
+                  - iam:ListPolicies
+                  - iam:GetPolicy
+                  - iam:ListPolicyTags
+                # trivy:ignore:AVD-AWS-0057 -- read-only IAM metadata the footprint reads across spore.host's role, profile and policy names.
+                Resource: '*'
+              # calque's per-queue inline grants on its own worker roles: the
+              # one place a policy document is read.
+              - Effect: Allow
+                Action:
+                  - iam:ListRolePolicies
+                  - iam:GetRolePolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/calque-*'
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:ListQueueTags
+                Resource: !Sub 'arn:aws:sqs:*:${AWS::AccountId}:calque-*'
+              # The footprint's bucket listing: no resource-level ARN, names only.
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                # trivy:ignore:AVD-AWS-0057 -- ListBuckets has no resource-level ARN; names only.
+                Resource: '*'
       Tags:
         - Key: !Sub '${TagPrefix}:managed'
           Value: 'false'

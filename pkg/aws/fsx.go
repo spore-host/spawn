@@ -11,6 +11,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/fsx"
 	"github.com/aws/aws-sdk-go-v2/service/fsx/types"
+
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 )
 
 // FSxInfo contains information about an FSx Lustre filesystem
@@ -53,6 +55,7 @@ type FSxConfig struct {
 // blocks and sets up the DRA; CreateFSxLustreFilesystemAsync returns immediately
 // and leaves AVAILABLE-wait + DRA to spored (#194).
 func (c *Client) startFSxCreate(ctx context.Context, config FSxConfig) (filesystemID string, fsxClient *fsx.Client, importPath, exportPath string, err error) {
+	lifecyclemark.Mark(ctx, c.cfg, c.regionalConfig(config.Region).Region) // before the filesystem (spawn#1654)
 	// 1. Construct import/export paths early (needed for S3 bucket tags)
 	importPath = config.ImportPath
 	if importPath == "" && config.S3Bucket != "" {

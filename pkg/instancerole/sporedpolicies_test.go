@@ -2,6 +2,7 @@ package instancerole
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -20,9 +21,26 @@ type fakePolicies struct {
 	deleted  []string
 	// attachedSince: policies attached between the listing and the delete.
 	attachedSince map[string]bool
-	// versions by policy ARN, and the (arn, versionId) pairs deleted.
+	// versions by policy ARN, and the (arn, versionId) pairs deleted. The
+	// sweep has no version calls any more (#1664); the fake keeps them so a
+	// test can prove none is made.
 	versions        map[string][]iamtypes.PolicyVersion
 	deletedVersions []string
+	// tags by policy ARN; tagErr: ARNs whose ListPolicyTags fails.
+	tags   map[string]map[string]string
+	tagErr map[string]bool
+}
+
+func (f *fakePolicies) ListPolicyTags(_ context.Context, in *iam.ListPolicyTagsInput, _ ...func(*iam.Options)) (*iam.ListPolicyTagsOutput, error) {
+	arn := aws.ToString(in.PolicyArn)
+	if f.tagErr[arn] {
+		return nil, errors.New("AccessDenied: not authorized to perform iam:ListPolicyTags")
+	}
+	var out []iamtypes.Tag
+	for k, v := range f.tags[arn] {
+		out = append(out, iamtypes.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return &iam.ListPolicyTagsOutput{Tags: out}, nil
 }
 
 func (f *fakePolicies) ListPolicies(_ context.Context, in *iam.ListPoliciesInput, _ ...func(*iam.Options)) (*iam.ListPoliciesOutput, error) {
@@ -148,57 +166,95 @@ func TestSweepSporedPolicies(t *testing.T) {
 	}
 }
 
-// The spawn-instance boundary is swept here too: it is kept while any role
-// uses it as a permissions boundary (PermissionsBoundaryUsageCount > 0) and
-// deleted, with its non-default versions, once none does and it is past the
-// grace window.
-func TestSweepSporedPolicies_Boundary(t *testing.T) {
+// #1664: the spawn-instance boundary is permanent. The sweep lists it as kept
+// and never deletes it, nor any of its versions: not while a role uses it, not
+// unused and old (which is what it used to delete), not young.
+func TestSweepSporedPolicies_NeverDeletesTheBoundary(t *testing.T) {
 	old := 72 * time.Hour
 	boundaryARN := "arn:aws:iam::111122223333:policy" + SporedPolicyPath + BoundaryPolicyName
+	for name, pol := range map[string]iamtypes.Policy{
+		"in use":         boundaryPolicy(3, old),
+		"unused and old": boundaryPolicy(0, old),
+		"unused, young":  boundaryPolicy(0, time.Hour),
+	} {
+		f := &fakePolicies{
+			policies: []iamtypes.Policy{pol},
+			versions: map[string][]iamtypes.PolicyVersion{boundaryARN: {
+				{VersionId: aws.String("v1"), IsDefaultVersion: false},
+				{VersionId: aws.String("v2"), IsDefaultVersion: true},
+			}},
+		}
+		for _, reap := range []bool{false, true} {
+			res, err := SweepSporedPolicies(context.Background(), f, sweepNow, reap)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 || res[0].Delete || res[0].Deleted || res[0].Reason != KeepBoundaryPermanent {
+				t.Errorf("%s, reap=%t: %+v, want kept as %q", name, reap, res, KeepBoundaryPermanent)
+			}
+		}
+		if len(f.deleted) != 0 || len(f.deletedVersions) != 0 {
+			t.Errorf("%s: deleted %v and versions %v of the boundary", name, f.deleted, f.deletedVersions)
+		}
+	}
+}
 
-	// In use: kept, even though it is attached to nothing.
-	inUse := &fakePolicies{policies: []iamtypes.Policy{boundaryPolicy(3, old)}}
-	prev, err := SweepSporedPolicies(context.Background(), inUse, sweepNow, true)
+// The boundary is recognised by its ARN as well as by its name, so a listing
+// that reports one but not the other cannot slip it through.
+func TestSweepSporedPolicies_BoundaryByARN(t *testing.T) {
+	pol := boundaryPolicy(0, 72*time.Hour)
+	pol.PolicyName = nil
+	f := &fakePolicies{policies: []iamtypes.Policy{pol}}
+	res, err := SweepSporedPolicies(context.Background(), f, sweepNow, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(prev) != 1 || prev[0].Delete || prev[0].Reason != KeepBoundaryInUse {
-		t.Fatalf("a boundary in use: %+v, want kept as %q", prev, KeepBoundaryInUse)
+	if len(f.deleted) != 0 || len(res) != 1 || res[0].Reason != KeepBoundaryPermanent {
+		t.Fatalf("a boundary named only by ARN: %+v, deleted %v", res, f.deleted)
 	}
-	if len(inUse.deleted) != 0 {
-		t.Errorf("a boundary in use was deleted: %v", inUse.deleted)
-	}
+}
 
-	// Unused and old: deleted, non-default versions first.
-	unused := &fakePolicies{
-		policies: []iamtypes.Policy{boundaryPolicy(0, old)},
-		versions: map[string][]iamtypes.PolicyVersion{boundaryARN: {
-			{VersionId: aws.String("v1"), IsDefaultVersion: false},
-			{VersionId: aws.String("v2"), IsDefaultVersion: true},
-		}},
+// #1664: a spored policy tagged spore-host:permanent=true is kept, however
+// unused and old it is.
+func TestSweepSporedPolicies_KeepsPermanentTagged(t *testing.T) {
+	old := 72 * time.Hour
+	perm := policy(SporedPolicyPath, "spored-policy-v1", 0, old)
+	plain := policy(SporedPolicyPath, "spored-policy-v2", 0, old)
+	f := &fakePolicies{
+		policies: []iamtypes.Policy{perm, plain},
+		tags: map[string]map[string]string{
+			aws.ToString(perm.Arn):  {"spore-host:permanent": "true"},
+			aws.ToString(plain.Arn): {"spore-host:managed-by": "spawn"},
+		},
 	}
-	res, err := SweepSporedPolicies(context.Background(), unused, sweepNow, true)
+	res, err := SweepSporedPolicies(context.Background(), f, sweepNow, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 1 || !res[0].Deleted {
-		t.Fatalf("an unused old boundary: %+v, want deleted", res)
+	if strings.Join(f.deleted, "|") != aws.ToString(plain.Arn) {
+		t.Errorf("deleted %v, want only %s", f.deleted, aws.ToString(plain.Arn))
 	}
-	if strings.Join(unused.deletedVersions, "|") != boundaryARN+" v1" {
-		t.Errorf("deleted versions %v, want only the non-default v1", unused.deletedVersions)
+	for _, d := range res {
+		if d.Name == "spored-policy-v1" && (d.Delete || d.Deleted || d.Reason != KeepPolicyPermanent) {
+			t.Errorf("the permanent-tagged policy: %+v, want kept as %q", d, KeepPolicyPermanent)
+		}
 	}
-	if strings.Join(unused.deleted, "|") != boundaryARN {
-		t.Errorf("deleted %v, want the boundary policy", unused.deleted)
-	}
+}
 
-	// Unused but young: kept.
-	young := &fakePolicies{policies: []iamtypes.Policy{boundaryPolicy(0, time.Hour)}}
-	r, err := SweepSporedPolicies(context.Background(), young, sweepNow, true)
+// A candidate whose tags cannot be read cannot be shown not to be permanent,
+// so it is kept, with the error.
+func TestSweepSporedPolicies_UnreadableTagsKeep(t *testing.T) {
+	pol := policy(SporedPolicyPath, "spored-policy-v1", 0, 72*time.Hour)
+	f := &fakePolicies{policies: []iamtypes.Policy{pol}, tagErr: map[string]bool{aws.ToString(pol.Arn): true}}
+	res, err := SweepSporedPolicies(context.Background(), f, sweepNow, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r) != 1 || r[0].Delete || r[0].Reason != KeepPolicyYoung {
-		t.Fatalf("a young unused boundary: %+v, want kept young", r)
+	if len(f.deleted) != 0 {
+		t.Fatalf("deleted %v with unreadable tags", f.deleted)
+	}
+	if len(res) != 1 || res[0].Delete || res[0].Reason != KeepPolicyTagsUnreadable || res[0].Err == nil {
+		t.Errorf("unreadable tags: %+v, want kept as %q with the error", res, KeepPolicyTagsUnreadable)
 	}
 }
 

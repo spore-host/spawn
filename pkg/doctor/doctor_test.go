@@ -24,6 +24,7 @@ type mockProber struct {
 	sweepRoleErr    error
 	nitroErr        error
 	route53Err      error
+	leaseErr        error
 	truffleErr      error
 	awscliErr       error
 	sshErr          error
@@ -52,6 +53,9 @@ func (m mockProber) SweepCrossAccountRole(context.Context) (string, error) {
 }
 func (m mockProber) Route53Available(context.Context) (string, error) {
 	return "12 zones", m.route53Err
+}
+func (m mockProber) IdleTeardownLease(context.Context) (string, error) {
+	return "spore-host-lifecycle is writable in us-east-1", m.leaseErr
 }
 func (m mockProber) NitroCoverage(context.Context) (string, error) {
 	return "163 Nitro instance types (v6:44 v5:14 v4:53 v3:19 v2:33)", m.nitroErr
@@ -293,5 +297,17 @@ func TestRoute53HintDoesNotClaimDNSBreaks(t *testing.T) {
 	}
 	if !strings.Contains(c.Fix, "DNS updater") {
 		t.Errorf("hint should say --dns goes through the DNS updater: %q", c.Fix)
+	}
+}
+
+// spawn#1654: a lease table this identity cannot write is reported here, as
+// a Warn (informational: no launch depends on it), and never a Fail.
+func TestIdleTeardownLeaseIsInformational(t *testing.T) {
+	c := find(Run(context.Background(), mockProber{acct: "1", leaseErr: errors.New("idle teardown unavailable: the spore-host-lifecycle lease table isn't writable by arn:x")}), "idle teardown")
+	if c == nil || c.Status != Warn || !strings.Contains(c.Fix, "isn't writable by arn:x") {
+		t.Fatalf("idle teardown check %+v, want a Warn naming the principal", c)
+	}
+	if c := find(Run(context.Background(), mockProber{acct: "1"}), "idle teardown"); c == nil || c.Status != Pass {
+		t.Errorf("a writable lease: %+v, want Pass", c)
 	}
 }

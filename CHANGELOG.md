@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The TTL reaper's account-idle sweep, in report mode** (#1654, part of the
+  leave-no-trace epic spore-host/spore-host#752). Once per member account per
+  run it judges each scanned region and the `global` (IAM) scope active or
+  idle from every activity signal: spawn instances pending through stopped,
+  egress proxies, FSx being made or just made, pool queues in use, calque's
+  footprint (through calque's `pkg/calquefootprint`), and, from the infra
+  account's tables, sweeps and pipelines not finished and schedules that will
+  still fire for that account. A read that fails counts as active. It records
+  the verdict in the account's `spore-host-lifecycle` lease table; once a
+  scope has been idle for 24 h (`REAPER_ACCOUNT_IDLE_GRACE`) it takes the
+  teardown lease, re-checks, plans with `spawn footprint`'s own scan and
+  rules, runs the plan through the shared teardown executor in report mode
+  with a deleter that cannot delete, logs every row and a summary
+  `account-idle REPORT account=<id> region=<scope> would_delete=N kept=M`, and
+  releases the lease. **It deletes nothing**: `REAPER_ACCOUNT_IDLE=reap`
+  reports too until #1657. An account no spawn creator has marked in the
+  lease table is "lease unavailable" and never idle-torn-down; spore.host's
+  infra account is always refused. Template parameters `AccountIdle` and
+  `AccountIdleGrace`; `spawn reaper deploy --account-idle` and
+  `--account-idle-grace`. **The member accounts' role stack
+  (`ttl-reaper-cross-account-role.yaml`) must be redeployed** for the new
+  grants: the lease table by exact name, and read-only footprint and calque
+  reads; until then each scope is logged as lease unavailable. The reaper
+  also reads `spawn-sweep-orchestration` and `spawn-pipeline-orchestration`
+  (Scan) on its own credentials.
+- Every spawn path that creates something an idle teardown could delete now
+  first marks spawn active in the shared-account lease (DynamoDB
+  `spore-host-lifecycle`, per region, and `global` in us-east-1): launches,
+  pools, tasks, detached sweeps, schedules, the egress proxy, FSx, buckets,
+  IAM, and `spawn reaper deploy` (#1654). **It never fails a launch, and a
+  failed mark prints nothing**: it goes to spawn's diagnostic log
+  (`~/.spawn/spawn.log`, and stderr with `--verbose`), the create carries on,
+  and the account counts as "lease unavailable", which the idle teardown never
+  tears down. The only thing a user sees is a wait of more than 30 s, when a
+  teardown really holds the lease. Nothing is marked in spore.host's infra
+  account. The actions are `dynamodb:ConditionCheckItem`, `UpdateItem`,
+  `PutItem`, `DeleteItem`, `DescribeTable`, `CreateTable` and `TagResource` on
+  `arn:aws:dynamodb:*:*:table/spore-host-lifecycle` (see
+  `docs/reference/cli-iam-actions.md`); spore.host does not provision them for
+  users yet (#1666). The orchestrator Lambdas' own launches do not mark; the
+  reaper's verdict counts their records as activity.
+- `spawn doctor` has an "idle teardown" check: whether this identity can write
+  the lifecycle lease table, read-only (a DescribeTable, and an UpdateItem
+  whose condition can never hold). A Warn names the principal and what is
+  missing; launches are unaffected either way (#1654).
+- `teardown.NewReportOnly` (pkg/teardown): the footprint deleter with every
+  delete refused, so a report-only caller cannot reach a delete, nor be asked
+  to grant one. `(*aws.Client).GatherFootprint` and `AccountFootprint`
+  (pkg/aws, additions to the public surface): the scans and the report
+  `spawn footprint -o json` builds.
 - Every deploy path for spore.host's own service now tags what it deploys
   `spore-host:role=service`, `spore-host:component=<id>` and
   `spore-host:deployed-by=<repo path of the deploy mechanism>`
@@ -105,6 +155,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`spawn reaper teardown --if-idle-for` judges idleness by the reaper's
+  lifecycle verdict** (#1654): spawn is idle in the account when the reaper's
+  account-idle sweep has recorded every scanned region and the global scope
+  idle, for at least the time given. It used to be the absence of action
+  words in the reaper's logs, which only said the reaper had found nothing to
+  reap. The refusals stay: idleness that cannot be determined (now also a
+  scope with no verdict, or the sweep off), and a reaper that does not run
+  (still read from its logs). A wait longer than the reaper's account-idle
+  grace is refused, since each report restarts the grace; deploy with
+  `--account-idle-grace` to wait longer. It needs `dynamodb:GetItem` on
+  `spore-host-lifecycle`.
+- The IAM inventory (`internal/iamcoverage`) maps DynamoDB `TransactWriteItems`,
+  which is not an IAM action, to the item actions DynamoDB authorizes a
+  transaction by (`ConditionCheckItem`, `PutItem`, `UpdateItem`,
+  `DeleteItem`), and `TransactGetItems` to `GetItem`.
+- `ttl-reaper` depends on `github.com/spore-host/calque` (`pkg/calquefootprint`,
+  at a pseudo-version of calque's main until calque tags a release), and its
+  AWS SDK modules move up to calque's.
 - **Breaking: `spawn footprint -o json` is now the shared spore.host footprint
   schema** (`libs/footprint`, schema 1; #1653). The old shape (`regions`,
   `tagged[]` with untagged PascalCase fields, `control_plane[]`, `global[]`,
@@ -147,6 +215,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`spawn cleanup --instance-roles` no longer deletes the
+  `spore-host/spawn-instance-boundary` permissions boundary** once no role uses
+  it (#1664). That broke every non-admin's next launch, because the documented
+  baseline cannot re-create it. The boundary is spore.host's one permanent
+  piece in an account; it is listed as kept, and only an administrator's
+  explicit removal (#1656, not yet implemented) removes it. A spored managed
+  policy tagged `spore-host:permanent=true` is kept too, and so is one whose
+  tags cannot be read: the sweep now needs `iam:ListPolicyTags`, and no longer
+  calls `ListPolicyVersions` or `DeletePolicyVersion`. The reaper's roles grant
+  no `iam:DeletePolicy` at all, and a gate keeps it so.
 - `spawn egress-proxy delete` no longer leaves the VPC's two security groups
   behind (#1651). It used to stop at the first group it could not delete, so
   the clients group was never tried; it checked instances but not network

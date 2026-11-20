@@ -41,6 +41,7 @@ import (
 	spawnaws "github.com/spore-host/spawn/pkg/aws"
 	spawnconfig "github.com/spore-host/spawn/pkg/config"
 	"github.com/spore-host/spawn/pkg/dns"
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 	"github.com/spore-host/spawn/pkg/orgaccount"
 	"github.com/spore-host/spawn/pkg/sporetags"
 	"github.com/spore-host/spawn/pkg/trustboundary"
@@ -175,6 +176,7 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(progress, "Onboarding account %s (region %s)…\n", accountID, region)
 	// The ExternalId is decided inside ensurePortalOnboardRole: an existing role
 	// already trusts one, and a re-run must keep presenting THAT one (#1138).
+	lifecyclemark.Mark(ctx, cfg, lifecyclemark.ScopeGlobal) // before the role (spawn#1654)
 	roleARN, externalID, err := ensurePortalOnboardRole(ctx, onboardIAMClient(cfg), progress, accountID, phoneHomeRole, onboardExternalID, sporedRole)
 	if err != nil {
 		return fmt.Errorf("ensure onboarding role: %w", err)
