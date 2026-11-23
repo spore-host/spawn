@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Linux bootstrap installs AWS CLI 2.42.1 instead of 2.39.3 on an image with no aws CLI** (#1495). This changes the published bootstrap body, so deploy the sweep orchestrator from the release that ships it, as the deploy checklist says. Both installer zips' signatures verified against the AWS CLI team's PGP key (`FB5DB77FD5C118B80511ADA8A6310ACC4672475C`) before their sha256s were pinned: x86_64 `ff2631c32c5db291b099600f404bc493454ec66c125ff4604625da90480c1f47`, aarch64 `98f5f03bb6508a06ce9d9d6d2db97932dce735f3b7ad85616324a95edf4b815f`. Opened by the weekly AWS CLI pin workflow.
+
 - Bumped `github.com/spore-host/libs` to v0.55.0 (the root module, the
   `ttl-reaper` and `sweep-orchestrator` Lambdas) for `lastmile` (libs#78).
   v0.54.0 is identical to v0.53.0.
