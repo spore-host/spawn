@@ -96,6 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn setup-account` creates) instead of passing on `DescribeTable` alone,
   which any identity with read-only DynamoDB access holds.
 
+### Security
+
+- Bumped `go.opentelemetry.io/otel`, `otel/sdk` and `otel/trace` to v1.47.0
+  (the root module and the `dashboard-api`, `dns-updater`,
+  `sweep-orchestrator` and `ttl-reaper` Lambdas) for GO-2026-6974 (the span
+  attribute length limit is bypassed by U+FFFD runes) and GO-2026-6975
+  (memory amplification parsing W3C baggage), both published 2026-11-23.
+
 ## [0.168.0] - 2026-11-20
 
 ### Added
