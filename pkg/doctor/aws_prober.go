@@ -278,16 +278,42 @@ func (p *awsProber) IdleTeardownLease(ctx context.Context) (string, error) {
 	if acct == footprintspawn.InfraAccountID {
 		return "not used in spore.host's infra account", nil
 	}
-	region := p.cfg.Region
-	c := p.cfg.Copy()
-	c.Region = region
-	switch err := lifecyclemark.Probe(ctx, dynamodb.NewFromConfig(c)); {
+	return probeLease(ctx, acct, principal, p.cfg.Region, func(region string) lifecycle.API {
+		c := p.cfg.Copy()
+		c.Region = region
+		return dynamodb.NewFromConfig(c)
+	})
+}
+
+// probeLease is the idle-teardown check for acct's identity principal in
+// region, through api's per-region DynamoDB clients.
+//
+// A region with no lease table yet says nothing about the identity: DynamoDB
+// lets anyone with dynamodb:DescribeTable (AWS's ReadOnlyAccess, say) learn
+// that a table is absent. So the check then probes the control region's
+// table, which holds the global scope: `spawn setup-account` and every IAM
+// create mark it, so it exists in any account spawn has set up. Only when
+// that has no table either is "the first launch creates it" all there is to
+// say (spawn#1672).
+func probeLease(ctx context.Context, acct, principal, region string, api func(region string) lifecycle.API) (string, error) {
+	err := lifecyclemark.Probe(ctx, api(region))
+	switch {
 	case err == nil:
 		return fmt.Sprintf("%s is writable in %s", lifecycle.TableName, region), nil
-	case errors.Is(err, lifecyclemark.ErrNoTable):
-		return fmt.Sprintf("no %s table in %s yet; the first launch creates it", lifecycle.TableName, region), nil
-	default:
+	case !errors.Is(err, lifecyclemark.ErrNoTable):
 		return "", leaseUnavailable(acct, principal, err)
+	}
+	noTable := fmt.Sprintf("no %s table in %s yet; the first launch creates it", lifecycle.TableName, region)
+	if region == lifecyclemark.ControlRegion {
+		return noTable, nil
+	}
+	switch err := lifecyclemark.Probe(ctx, api(lifecyclemark.ControlRegion)); {
+	case err == nil:
+		return fmt.Sprintf("%s (writable in %s)", noTable, lifecyclemark.ControlRegion), nil
+	case errors.Is(err, lifecyclemark.ErrNoTable):
+		return noTable, nil
+	default:
+		return "", leaseUnavailable(acct, principal, fmt.Errorf("in %s: %w", lifecyclemark.ControlRegion, err))
 	}
 }
 

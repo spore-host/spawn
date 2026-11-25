@@ -91,7 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check and an update, and DynamoDB authorizes each. The check is now that
   transaction, with conditions that can never hold, so it still writes
   nothing. A refusal of either action is the warning that names the principal
-  and the policy `spore-host/spawn-user-lifecycle`.
+  and the policy `spore-host/spawn-user-lifecycle`. In a region with no lease
+  table yet it also tries the `us-east-1` table (the global scope's, which
+  `spawn setup-account` creates) instead of passing on `DescribeTable` alone,
+  which any identity with read-only DynamoDB access holds.
 
 ## [0.168.0] - 2026-11-20
 
