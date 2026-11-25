@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spore-host/spawn/pkg/lifecyclemark"
 )
 
 // #39: the --nested-spawn role must cover what a spawn CLI on the instance
@@ -83,11 +85,34 @@ var nestedSpawnNotGranted = map[string]string{
 	"s3:PutBucketTagging":                "results-bucket bookkeeping; not a plain child launch",
 	"s3:DeleteBucketTagging":             "results-bucket bookkeeping; not a plain child launch",
 	"dynamodb:GetItem":                   "sweep records; sweeps are not a child launch",
-	"dynamodb:PutItem":                   "sweep records; sweeps are not a child launch",
-	"lambda:Invoke":                      "detached sweep orchestrator; sweeps are not a child launch",
-	"sts:AssumeRole":                     "cross-account sweep validation; nested spawn stays in its own account",
-	"account:GetAccountInformation":      "best effort: DNS falls back to the base36 account label",
+	"dynamodb:PutItem":                   "sweep records (sweeps are not a child launch), and " + nestedLeaseMarkNotGranted,
+	// The lease mark every create makes first (spawn#1654). The baseline's
+	// UpdateItem and DeleteItem are on table/spawn-hybrid-registry only, so
+	// the name-level match above counts them as granted; on the lease table
+	// they are not.
+	"dynamodb:ConditionCheckItem":   nestedLeaseMarkNotGranted,
+	"dynamodb:UpdateItem":           nestedLeaseMarkNotGranted,
+	"dynamodb:DeleteItem":           nestedLeaseMarkNotGranted,
+	"dynamodb:DescribeTable":        nestedLeaseMarkNotGranted,
+	"dynamodb:CreateTable":          nestedLeaseMarkNotGranted,
+	"dynamodb:TagResource":          nestedLeaseMarkNotGranted,
+	"lambda:Invoke":                 "detached sweep orchestrator; sweeps are not a child launch",
+	"sts:AssumeRole":                "cross-account sweep validation; nested spawn stays in its own account",
+	"account:GetAccountInformation": "best effort: DNS falls back to the base36 account label",
 }
+
+// nestedLeaseMarkNotGranted is why the nested role holds no grant on the
+// lifecycle lease table (spawn#1672). A child's mark is refused, silently by
+// design (one line in spawn's diagnostic log), and the launch goes on. A
+// child is launched by a live head, a spawn:managed instance, which keeps its
+// own region and the global scope active, so no idle teardown can claim
+// them; only a child launched into another region than its head's is not
+// fenced by the lease. Granting it would let an instance's workload write the
+// account's lease: forge a lease or a closing sentinel that makes every
+// spawn create in the account wait up to 10 minutes, or reset another
+// tool's item.
+const nestedLeaseMarkNotGranted = "the lease mark on table/spore-host-lifecycle (pkg/lifecyclemark); a nested child's " +
+	"region is kept active by its live head, and the grant would let a workload write the account's lease (see nestedLeaseMarkNotGranted)"
 
 // nestedSpawnNeedsNoGrant are calls IAM does not authorize.
 var nestedSpawnNeedsNoGrant = map[string]bool{
@@ -329,5 +354,22 @@ func discoverSDKActions(t *testing.T, root string, cmdFiles []string) map[string
 			t.Fatalf("cmd/%s defines no functions; the command list is stale", file)
 		}
 	}
+	// The lease mark's DynamoDB calls are made in libs/lifecycle, outside
+	// this module, so following source cannot see them. Reaching
+	// lifecyclemark.Mark is reaching them: they are
+	// lifecyclemark.RequiredActions, which internal/iamcoverage holds to the
+	// call graph (TestLeaseRequiredActionsAreWhatMarkCalls). Without this a
+	// nested spore's mark was invisible here (spawn#1672).
+	if d.seen[leaseMarkKey] {
+		for _, a := range lifecyclemark.RequiredActions {
+			if _, ok := d.actions[a]; !ok {
+				d.actions[a] = leaseMarkKey + " (libs/lifecycle MarkActive)"
+			}
+		}
+	}
 	return d.actions
 }
+
+// leaseMarkKey is how the discovery names lifecyclemark.Mark once it has
+// followed a reference to it.
+const leaseMarkKey = "pkg/lifecyclemark.Mark"

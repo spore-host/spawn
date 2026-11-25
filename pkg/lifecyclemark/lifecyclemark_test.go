@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/libs/lifecycle"
@@ -266,14 +267,68 @@ func TestProbe(t *testing.T) {
 	if after := len(f.Keys(lifecycle.TableName)); after != before {
 		t.Errorf("the probe wrote an item (%d -> %d keys): it would keep the table from ever closing", before, after)
 	}
-	f.Err = func(op string, _ any) error {
-		if op == "UpdateItem" {
-			return &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform: dynamodb:UpdateItem"}
+	// A refusal of either item action of the mark's transaction is a refusal
+	// of the probe, the way IAM refuses the mark itself (spawn#1672): an
+	// identity granted UpdateItem but not ConditionCheckItem can mark nothing.
+	for _, denied := range []string{"dynamodb:UpdateItem", "dynamodb:ConditionCheckItem"} {
+		f.Err = denyItemAction(denied)
+		err := Probe(ctx, f)
+		if err == nil || errors.Is(err, ErrNoTable) || !strings.Contains(err.Error(), "not authorized to perform: "+denied) {
+			t.Errorf("%s refused: %v, want that refusal", denied, err)
+		}
+		f.Err = nil
+		marked := lifecycletest.New()
+		if err := lifecycleClient(t, marked).MarkActive(ctx, Tool, "us-east-1"); err != nil {
+			t.Fatal(err)
+		}
+		marked.Err = denyItemAction(denied)
+		if err := lifecycleClient(t, marked).MarkActive(ctx, Tool, "us-east-1"); err == nil {
+			t.Errorf("MarkActive with %s refused succeeded, so this model of IAM is not what the mark needs", denied)
+		}
+	}
+	if after := len(f.Keys(lifecycle.TableName)); after != before {
+		t.Errorf("a refused probe wrote an item (%d -> %d keys)", before, after)
+	}
+}
+
+func lifecycleClient(t *testing.T, f *lifecycletest.Fake) *lifecycle.Client {
+	t.Helper()
+	c, err := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return f, nil },
+		Sleep: func(context.Context, time.Duration) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// denyItemAction models IAM refusing one DynamoDB item action: the single
+// call of that name, or any transaction holding an item of that kind, which
+// DynamoDB authorizes per item action and refuses whole.
+func denyItemAction(action string) func(op string, in any) error {
+	refuse := &smithy.GenericAPIError{Code: "AccessDeniedException",
+		Message: "User: arn:aws:sts::123456789012:assumed-role/r/s is not authorized to perform: " + action +
+			" on resource: arn:aws:dynamodb:us-east-1:123456789012:table/" + lifecycle.TableName}
+	return func(op string, in any) error {
+		if "dynamodb:"+op == action {
+			return refuse
+		}
+		tx, ok := in.(*dynamodb.TransactWriteItemsInput)
+		if !ok {
+			return nil
+		}
+		for _, ti := range tx.TransactItems {
+			for kind, set := range map[string]bool{
+				"dynamodb:ConditionCheckItem": ti.ConditionCheck != nil,
+				"dynamodb:PutItem":            ti.Put != nil,
+				"dynamodb:UpdateItem":         ti.Update != nil,
+				"dynamodb:DeleteItem":         ti.Delete != nil,
+			} {
+				if set && kind == action {
+					return refuse
+				}
+			}
 		}
 		return nil
-	}
-	if err := Probe(ctx, f); err == nil || errors.Is(err, ErrNoTable) || !strings.Contains(err.Error(), "UpdateItem") {
-		t.Errorf("a refused write: %v, want the UpdateItem refusal", err)
 	}
 }
 

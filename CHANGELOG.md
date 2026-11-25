@@ -81,9 +81,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lease mark writes, now name the policy `spore-host/spawn-user-lifecycle` and
   its ARN, which an administrator attaches, instead of saying spore.host does
   not provision the permissions (#1666).
-  baseline cannot re-create it. The boundary is permanent account setup; it
-  is listed as kept, and only `spawn setup-account --remove` (#1656) removes
-  it. A spored managed
+
+### Fixed
+
+- **`spawn doctor`'s "idle teardown" check now tries the write a lease mark
+  makes** (#1672). It tried an `UpdateItem` on its own, so an identity granted
+  `dynamodb:UpdateItem` but not `dynamodb:ConditionCheckItem` passed, while
+  every mark it made was refused: a mark is one transaction of a condition
+  check and an update, and DynamoDB authorizes each. The check is now that
+  transaction, with conditions that can never hold, so it still writes
+  nothing. A refusal of either action is the warning that names the principal
+  and the policy `spore-host/spawn-user-lifecycle`.
 
 ## [0.168.0] - 2026-11-20
 

@@ -406,17 +406,29 @@ func identity(ctx context.Context, cfg aws.Config) string {
 // the identity may describe it, and the first mark creates it if it may.
 var ErrNoTable = errors.New("no " + lifecycle.TableName + " table in this region yet")
 
-// probeKey is the item Probe's conditional write names. The condition can
-// never hold, so the item is never written: a stray item would stop
-// CloseTableIfEmpty from ever removing the table.
-const probeKey = "probe#spawn-doctor"
+// probeKey and probeCheckKey are the items Probe's transaction names: the
+// update's and the condition check's (a transaction may not name one item
+// twice). Neither condition can ever hold, so neither item is ever written:
+// a stray item would stop CloseTableIfEmpty from ever removing the table.
+const (
+	probeKey      = "probe#spawn-doctor"
+	probeCheckKey = "probe#spawn-doctor-check"
+)
+
+// probeNever is a condition no item satisfies.
+const probeNever = "attribute_exists(#k) AND attribute_not_exists(#k)"
 
 // Probe reports, changing nothing, whether api's identity can use the lease
-// table, for `spawn doctor`: a DescribeTable, then an UpdateItem whose
-// condition can never hold. IAM authorizes the UpdateItem before DynamoDB
-// evaluates the condition, so a ConditionalCheckFailedException proves the
-// write is allowed and that nothing was written. nil means usable; ErrNoTable
-// that the table does not exist yet; any other error is the refusal.
+// table, for `spawn doctor`: a DescribeTable, then a transaction of the shape
+// a mark makes (lifecycle.MarkActive: a ConditionCheck and an Update) whose
+// conditions can never hold. DynamoDB authorizes a transaction per item
+// action, dynamodb:ConditionCheckItem and dynamodb:UpdateItem here, before it
+// evaluates any condition, so a cancellation proves both are allowed and that
+// nothing was written; a refusal of either is an AccessDeniedException for
+// the whole call. Probing the UpdateItem alone would pass an identity granted
+// UpdateItem but not ConditionCheckItem, whose every mark is refused
+// (spawn#1672). nil means usable; ErrNoTable that the table does not exist
+// yet; any other error is the refusal.
 func Probe(ctx context.Context, api lifecycle.API) error {
 	_, err := api.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(lifecycle.TableName)})
 	var nf *ddbtypes.ResourceNotFoundException
@@ -426,20 +438,31 @@ func Probe(ctx context.Context, api lifecycle.API) error {
 	case err != nil:
 		return fmt.Errorf("dynamodb:DescribeTable: %w", err)
 	}
-	_, err = api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 aws.String(lifecycle.TableName),
-		Key:                       map[string]ddbtypes.AttributeValue{"pk": &ddbtypes.AttributeValueMemberS{Value: probeKey}},
-		UpdateExpression:          aws.String("SET #p = :p"),
-		ConditionExpression:       aws.String("attribute_exists(#k) AND attribute_not_exists(#k)"),
-		ExpressionAttributeNames:  map[string]string{"#p": "probe", "#k": "pk"},
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":p": &ddbtypes.AttributeValueMemberS{Value: "spawn doctor"}},
-	})
-	var ccf *ddbtypes.ConditionalCheckFailedException
+	key := func(k string) map[string]ddbtypes.AttributeValue {
+		return map[string]ddbtypes.AttributeValue{"pk": &ddbtypes.AttributeValueMemberS{Value: k}}
+	}
+	_, err = api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []ddbtypes.TransactWriteItem{
+		{ConditionCheck: &ddbtypes.ConditionCheck{
+			TableName:                aws.String(lifecycle.TableName),
+			Key:                      key(probeCheckKey),
+			ConditionExpression:      aws.String(probeNever),
+			ExpressionAttributeNames: map[string]string{"#k": "pk"},
+		}},
+		{Update: &ddbtypes.Update{
+			TableName:                 aws.String(lifecycle.TableName),
+			Key:                       key(probeKey),
+			UpdateExpression:          aws.String("SET #p = :p"),
+			ConditionExpression:       aws.String(probeNever),
+			ExpressionAttributeNames:  map[string]string{"#p": "probe", "#k": "pk"},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":p": &ddbtypes.AttributeValueMemberS{Value: "spawn doctor"}},
+		}},
+	}})
+	var cancelled *ddbtypes.TransactionCanceledException
 	switch {
-	case errors.As(err, &ccf):
+	case errors.As(err, &cancelled):
 		return nil
 	case err == nil:
-		return errors.New("the probe's never-true condition held; the table is not behaving as DynamoDB")
+		return errors.New("the probe's never-true conditions held; the table is not behaving as DynamoDB")
 	}
-	return fmt.Errorf("dynamodb:UpdateItem: %w", err)
+	return fmt.Errorf("the mark's transaction (dynamodb:ConditionCheckItem, dynamodb:UpdateItem): %w", err)
 }
