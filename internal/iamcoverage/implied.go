@@ -155,6 +155,28 @@ var passRoleRules = []impliedRule{
 		"https://docs.aws.amazon.com/imagebuilder/latest/APIReference/API_ImportDiskImage.html"),
 }
 
+// transactionItemRules are DynamoDB's write transaction (spawn#1672): an item
+// is authorized as the action it performs, so TransactWriteItems needs each
+// item action only when one of its TransactItems sets that kind of item. A
+// list built at the call site, as spawn doctor's probe builds it, needs only
+// its own kinds; an item built out of sight (a helper's result, a parameter)
+// counts as every kind, the over-approximation the rest of the package makes.
+var transactionItemRules = func() []impliedRule {
+	docs := []string{sarDynamoDB + "TransactWriteItems",
+		"https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html"}
+	var out []impliedRule
+	for _, item := range []struct{ field, action string }{
+		{"ConditionCheck", "dynamodb:ConditionCheckItem"},
+		{"Put", "dynamodb:PutItem"},
+		{"Update", "dynamodb:UpdateItem"},
+		{"Delete", "dynamodb:DeleteItem"},
+	} {
+		out = append(out, impliedRule{Op: "dynamodb:TransactWriteItems", Field: "TransactItems." + item.field,
+			Actions: []string{item.action}, Docs: docs})
+	}
+	return out
+}()
+
 // impliedRules is every implied-action rule (#1377, #1397). Only rules
 // verified against AWS's documentation are here. Checked and left out:
 // scheduler:CreateSchedule's tags (a schedule takes no tags; the SAR lists no
@@ -162,6 +184,7 @@ var passRoleRules = []impliedRule{
 // system type, and spawn sets none).
 var impliedRules = concatRules(
 	passRoleRules,
+	transactionItemRules,
 	// "To be able to tag a queue on creation, you must have the
 	// sqs:CreateQueue and sqs:TagQueue permissions."
 	tagOnCreate(sarSQS, "sqs", "Tags", "sqs:TagQueue",

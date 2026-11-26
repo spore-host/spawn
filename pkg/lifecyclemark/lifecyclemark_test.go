@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/libs/lifecycle"
@@ -266,14 +267,156 @@ func TestProbe(t *testing.T) {
 	if after := len(f.Keys(lifecycle.TableName)); after != before {
 		t.Errorf("the probe wrote an item (%d -> %d keys): it would keep the table from ever closing", before, after)
 	}
-	f.Err = func(op string, _ any) error {
-		if op == "UpdateItem" {
-			return &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized to perform: dynamodb:UpdateItem"}
+	// A refusal of either item action of the mark's transaction is a refusal
+	// of the probe, the way IAM refuses the mark itself (spawn#1672): an
+	// identity granted UpdateItem but not ConditionCheckItem can mark nothing.
+	for _, denied := range []string{"dynamodb:UpdateItem", "dynamodb:ConditionCheckItem"} {
+		f.Err = denyItemAction(denied)
+		err := Probe(ctx, f)
+		if err == nil || errors.Is(err, ErrNoTable) || !strings.Contains(err.Error(), "not authorized to perform: "+denied) {
+			t.Errorf("%s refused: %v, want that refusal", denied, err)
+		}
+		f.Err = nil
+		marked := lifecycletest.New()
+		if err := lifecycleClient(t, marked).MarkActive(ctx, Tool, "us-east-1"); err != nil {
+			t.Fatal(err)
+		}
+		marked.Err = denyItemAction(denied)
+		if err := lifecycleClient(t, marked).MarkActive(ctx, Tool, "us-east-1"); err == nil {
+			t.Errorf("MarkActive with %s refused succeeded, so this model of IAM is not what the mark needs", denied)
+		}
+	}
+	if after := len(f.Keys(lifecycle.TableName)); after != before {
+		t.Errorf("a refused probe wrote an item (%d -> %d keys)", before, after)
+	}
+}
+
+func lifecycleClient(t *testing.T, f *lifecycletest.Fake) *lifecycle.Client {
+	t.Helper()
+	c, err := lifecycle.New(lifecycle.Options{DynamoDB: func(string) (lifecycle.API, error) { return f, nil },
+		Sleep: func(context.Context, time.Duration) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// denyItemAction models IAM refusing one DynamoDB item action: the single
+// call of that name, or any transaction holding an item of that kind, which
+// DynamoDB authorizes per item action and refuses whole.
+func denyItemAction(action string) func(op string, in any) error {
+	refuse := &smithy.GenericAPIError{Code: "AccessDeniedException",
+		Message: "User: arn:aws:sts::123456789012:assumed-role/r/s is not authorized to perform: " + action +
+			" on resource: arn:aws:dynamodb:us-east-1:123456789012:table/" + lifecycle.TableName}
+	return func(op string, in any) error {
+		if "dynamodb:"+op == action {
+			return refuse
+		}
+		tx, ok := in.(*dynamodb.TransactWriteItemsInput)
+		if !ok {
+			return nil
+		}
+		for _, ti := range tx.TransactItems {
+			for kind, set := range map[string]bool{
+				"dynamodb:ConditionCheckItem": ti.ConditionCheck != nil,
+				"dynamodb:PutItem":            ti.Put != nil,
+				"dynamodb:UpdateItem":         ti.Update != nil,
+				"dynamodb:DeleteItem":         ti.Delete != nil,
+			} {
+				if set && kind == action {
+					return refuse
+				}
+			}
 		}
 		return nil
 	}
-	if err := Probe(ctx, f); err == nil || errors.Is(err, ErrNoTable) || !strings.Contains(err.Error(), "UpdateItem") {
-		t.Errorf("a refused write: %v, want the UpdateItem refusal", err)
+}
+
+// Probe passes only on its own cancellation: every reason is its never-true
+// conditions failing (ConditionalCheckFailed) or an item not reached (None).
+// Any other reason (a throttle, a conflicting transaction) proves nothing,
+// and is ErrInconclusive rather than a pass or a refusal.
+func TestProbeAcceptsOnlyItsOwnCancellation(t *testing.T) {
+	ctx := context.Background()
+	f := lifecycletest.New()
+	if err := lifecycleClient(t, f).MarkActive(ctx, Tool, "us-east-1"); err != nil {
+		t.Fatal(err)
+	}
+	cancel := func(codes ...string) error {
+		rs := make([]types.CancellationReason, len(codes))
+		for i, c := range codes {
+			rs[i] = types.CancellationReason{Code: aws.String(c)}
+		}
+		return &types.TransactionCanceledException{Message: aws.String("Transaction cancelled"), CancellationReasons: rs}
+	}
+	for _, tc := range []struct {
+		codes []string
+		pass  bool
+	}{
+		{[]string{"ConditionalCheckFailed", "ConditionalCheckFailed"}, true},
+		{[]string{"ConditionalCheckFailed", "None"}, true},
+		{[]string{"None", "ConditionalCheckFailed"}, true},
+		{[]string{"ThrottlingError", "None"}, false},
+		{[]string{"ConditionalCheckFailed", "TransactionConflict"}, false},
+		{[]string{"None", "None"}, false},
+		{nil, false},
+	} {
+		err := cancel(tc.codes...)
+		f.Err = func(op string, _ any) error {
+			if op == "TransactWriteItems" {
+				return err
+			}
+			return nil
+		}
+		got := Probe(ctx, f)
+		switch {
+		case tc.pass && got != nil:
+			t.Errorf("cancelled for %v: %v, want a pass", tc.codes, got)
+		case !tc.pass && !errors.Is(got, ErrInconclusive):
+			t.Errorf("cancelled for %v: %v, want ErrInconclusive", tc.codes, got)
+		}
+	}
+}
+
+// Outside the aws partition, ScopeGlobal's table (ControlRegion, us-east-1)
+// cannot be reached, so Mark does not try it. Trying was worse than useless:
+// the endpoint refuses the credentials, a refusal stops every later mark in
+// the process, and the regional mark after it never ran (spawn#1672).
+func TestMarkSkipsTheGlobalScopeOutsideTheAWSPartition(t *testing.T) {
+	fs := fakes{}
+	unreachable := lifecycletest.New()
+	unreachable.Err = func(string, any) error {
+		return &smithy.GenericAPIError{Code: "UnrecognizedClientException", Message: "The security token included in the request is invalid."}
+	}
+	fs[ControlRegion] = unreachable
+	debug := install(t, fs.factory, &bytes.Buffer{})
+	gov := cfgFor("AKIAGOV")
+	gov.Region = "us-gov-west-1"
+
+	Mark(context.Background(), gov, ScopeGlobal, "us-gov-west-1")
+
+	if n := unreachable.Calls("TransactWriteItems") + unreachable.Calls("DescribeTable"); n != 0 {
+		t.Errorf("Mark called the %s table %d times from GovCloud credentials, want none", ControlRegion, n)
+	}
+	it := item(t, fs["us-gov-west-1"], "us-gov-west-1")
+	if attr(it, "state") != string(lifecycle.StateActive) {
+		t.Errorf("the regional scope was not marked: %v", it)
+	}
+	if !strings.Contains(debug.String(), "not marking the global scope") {
+		t.Errorf("the skip left no diagnostic line: %q", debug.String())
+	}
+}
+
+func TestGlobalReachable(t *testing.T) {
+	for region, want := range map[string]bool{
+		"us-east-1": true, "eu-west-2": true, "ap-southeast-4": true, "il-central-1": true, "mx-central-1": true,
+		"":              true, // unknown: as Mark has always treated it
+		"us-gov-west-1": false, "cn-north-1": false, "us-iso-east-1": false, "us-isob-east-1": false,
+		"eu-isoe-west-1": false, "us-isof-south-1": false, "eusc-de-east-1": false,
+	} {
+		if got := GlobalReachable(region); got != want {
+			t.Errorf("GlobalReachable(%q) = %v, want %v", region, got, want)
+		}
 	}
 }
 

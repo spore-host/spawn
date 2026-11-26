@@ -81,9 +81,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lease mark writes, now name the policy `spore-host/spawn-user-lifecycle` and
   its ARN, which an administrator attaches, instead of saying spore.host does
   not provision the permissions (#1666).
-  baseline cannot re-create it. The boundary is permanent account setup; it
-  is listed as kept, and only `spawn setup-account --remove` (#1656) removes
-  it. A spored managed
+
+### Fixed
+
+- **`spawn doctor`'s "idle teardown" check now tries the write a lease mark
+  makes** (#1672). It tried an `UpdateItem` on its own, so an identity granted
+  `dynamodb:UpdateItem` but not `dynamodb:ConditionCheckItem` passed, while
+  every mark it made was refused: a mark is one transaction of a condition
+  check and an update, and DynamoDB authorizes each. The check is now that
+  transaction, with conditions that can never hold, so it still writes
+  nothing. A refusal of either action is the warning that names the principal
+  and the policy `spore-host/spawn-user-lifecycle`; a probe cancelled for any
+  other reason (a throttle, say) is reported as not checked, not as a pass.
+  - In a region with no lease table yet, the check no longer says "the first
+    launch creates it". That first mark needs `dynamodb:CreateTable` and
+    `dynamodb:TagResource`, which nothing can check without creating the
+    table, and the check now says so. It also tries the mark's writes on the
+    `us-east-1` table (the global scope's, which `spawn setup-account`
+    creates), rather than passing on `DescribeTable` alone, which any
+    read-only identity holds. With no table there either, it reports the
+    check as not run and points at `spawn setup-account`.
+  - Outside the aws partition (GovCloud, China and the rest) it no longer
+    tries the `us-east-1` table, which those credentials cannot reach, and no
+    longer points a refusal at `spore-host/spawn-user-lifecycle`, whose ARNs
+    are aws-partition ones.
+- **Outside the aws partition, a lease mark no longer stops the marks after
+  it** (#1672). spawn's global lease scope lives in `us-east-1`. A mark of it
+  from GovCloud or China credentials was refused, and a refusal stops every
+  later mark in the process, so a launch whose IAM setup marked first never
+  marked its own region. spawn no longer marks the global scope outside the
+  aws partition; regional marks go on as before.
+
+### Security
+
+- Bumped `go.opentelemetry.io/otel`, `otel/sdk` and `otel/trace` to v1.47.0
+  (the root module and the `dashboard-api`, `dns-updater`,
+  `sweep-orchestrator` and `ttl-reaper` Lambdas) for GO-2026-6974 (the span
+  attribute length limit is bypassed by U+FFFD runes) and GO-2026-6975
+  (memory amplification parsing W3C baggage), both published 2026-11-23. The
+  OTLP and stdout trace exporters move to v1.47.0 with them (the root module,
+  `dashboard-api`, and `dns-updater`, which was on v1.44.0).
 
 ## [0.168.0] - 2026-11-20
 

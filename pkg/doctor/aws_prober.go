@@ -278,17 +278,90 @@ func (p *awsProber) IdleTeardownLease(ctx context.Context) (string, error) {
 	if acct == footprintspawn.InfraAccountID {
 		return "not used in spore.host's infra account", nil
 	}
-	region := p.cfg.Region
-	c := p.cfg.Copy()
-	c.Region = region
-	switch err := lifecyclemark.Probe(ctx, dynamodb.NewFromConfig(c)); {
+	return probeLease(ctx, acct, principal, p.cfg.Region, func(region string) lifecycle.API {
+		c := p.cfg.Copy()
+		c.Region = region
+		return dynamodb.NewFromConfig(c)
+	})
+}
+
+// probeLease is the idle-teardown check for acct's identity principal in
+// region, through api's per-region DynamoDB clients. It says only what it
+// checked, and it agrees with what Mark (pkg/lifecyclemark) does:
+//
+//   - The region's table is probed with the mark's own transaction
+//     (lifecyclemark.Probe).
+//   - In a region with no table yet, the first mark creates it, which needs
+//     dynamodb:CreateTable and dynamodb:TagResource. Neither can be checked
+//     without creating the table: DynamoDB has no dry run, and a CreateTable
+//     that IAM allows creates it. So the check never says the first mark will
+//     succeed (spawn#1672). In the aws partition it probes the mark's writes
+//     on ControlRegion's table instead, which holds ScopeGlobal and which
+//     `spawn setup-account` creates. That a table is absent proves nothing:
+//     DynamoDB tells anyone holding DescribeTable, which any read-only
+//     identity does.
+//   - Outside the aws partition Mark never marks ScopeGlobal
+//     (lifecyclemark.GlobalReachable), so the check does not probe its table
+//     either, and says so; and the policy `spawn setup-account` provisions
+//     names aws-partition ARNs, so a refusal there does not point at it.
+func probeLease(ctx context.Context, acct, principal, region string, api func(region string) lifecycle.API) (string, error) {
+	inAWS := lifecyclemark.GlobalReachable(region)
+	refused := func(where string, err error) error {
+		if where != "" {
+			err = fmt.Errorf("in %s: %w", where, err)
+		}
+		if !inAWS {
+			return leaseUnavailableOutsideAWS(principal, region, err)
+		}
+		return leaseUnavailable(acct, principal, err)
+	}
+	err := lifecyclemark.Probe(ctx, api(region))
+	switch {
+	case err == nil && !inAWS:
+		return fmt.Sprintf("%s is writable in %s; spawn's global scope (its table is in %s) is not marked outside the aws partition",
+			lifecycle.TableName, region, lifecyclemark.ControlRegion), nil
 	case err == nil:
 		return fmt.Sprintf("%s is writable in %s", lifecycle.TableName, region), nil
-	case errors.Is(err, lifecyclemark.ErrNoTable):
-		return fmt.Sprintf("no %s table in %s yet; the first launch creates it", lifecycle.TableName, region), nil
-	default:
-		return "", leaseUnavailable(acct, principal, err)
+	case errors.Is(err, lifecyclemark.ErrInconclusive):
+		return "", leaseNotChecked(fmt.Sprintf("in %s, %v", region, err))
+	case !errors.Is(err, lifecyclemark.ErrNoTable):
+		return "", refused("", err)
 	}
+	firstMark := fmt.Sprintf("no %s table in %s yet, and the dynamodb:CreateTable and dynamodb:TagResource its first mark "+
+		"needs cannot be checked without creating it", lifecycle.TableName, region)
+	setup := fmt.Sprintf("run `spawn setup-account`, which creates the %s table, then `spawn doctor` again", lifecyclemark.ControlRegion)
+	switch {
+	case !inAWS:
+		return "", leaseNotChecked(fmt.Sprintf("%s; the %s table is not checked outside the aws partition", firstMark, lifecyclemark.ControlRegion))
+	case region == lifecyclemark.ControlRegion:
+		return "", leaseNotChecked(firstMark + "; " + setup)
+	}
+	switch err := lifecyclemark.Probe(ctx, api(lifecyclemark.ControlRegion)); {
+	case err == nil:
+		return fmt.Sprintf("the mark's writes are allowed (checked on the %s table); %s", lifecyclemark.ControlRegion, firstMark), nil
+	case errors.Is(err, lifecyclemark.ErrNoTable):
+		return "", leaseNotChecked(fmt.Sprintf("%s, and there is none in %s either; %s", firstMark, lifecyclemark.ControlRegion, setup))
+	case errors.Is(err, lifecyclemark.ErrInconclusive):
+		return "", leaseNotChecked(fmt.Sprintf("%s; in %s, %v", firstMark, lifecyclemark.ControlRegion, err))
+	default:
+		return "", refused(lifecyclemark.ControlRegion, err)
+	}
+}
+
+// leaseNotChecked is the idle-teardown check's Warn when it could not tell
+// whether the lease is writable. It claims neither a pass nor a refusal.
+func leaseNotChecked(why string) error {
+	return fmt.Errorf("idle teardown not checked: %s", why)
+}
+
+// leaseUnavailableOutsideAWS is leaseUnavailable outside the aws partition,
+// where the policy `spawn setup-account` provisions does not apply: it names
+// aws-partition ARNs (pkg/aws spawnUserLifecycleDocument).
+func leaseUnavailableOutsideAWS(principal, region string, err error) error {
+	return fmt.Errorf("idle teardown unavailable: the %s lease table in %s isn't writable by %s (%v). Launches are unaffected. "+
+		"The policy `spawn setup-account` provisions (%s) names aws-partition ARNs, so it does not grant this here; "+
+		"spawn's marks here need %s on the %s table", lifecycle.TableName, region, principal, err, lifecyclemark.UserPolicy,
+		strings.Join(lifecyclemark.RequiredActions, ", "), lifecycle.TableName)
 }
 
 // leaseUnavailable is the idle-teardown check's Warn: the lease table is not

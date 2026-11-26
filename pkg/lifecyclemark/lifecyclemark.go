@@ -43,6 +43,10 @@
 // fenced by the lease. `spawn setup-account` provisions these actions as the
 // customer-managed policy UserPolicy (spawn#1666); an account is lease-enabled
 // for the users an administrator attaches it to.
+//
+// Outside the aws partition (GovCloud, China, the ISO partitions) ScopeGlobal
+// is not marked: its table is in ControlRegion, which those credentials
+// cannot reach (GlobalReachable). Regional scopes are marked as anywhere else.
 package lifecyclemark
 
 import (
@@ -52,6 +56,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -74,8 +79,27 @@ const Tool = tags.ToolSpawn
 
 // ControlRegion is the region whose lifecycle table holds ScopeGlobal's item:
 // spawn's account-wide resources (IAM). calque's lease defaults to the same
-// region (its --lease-region), and the reaper reads it from here.
+// region (its --lease-region), and the reaper reads it from here. It is in the
+// aws partition: credentials for another partition cannot reach it
+// (GlobalReachable).
 const ControlRegion = "us-east-1"
+
+// awsPartitionRegion is the aws partition's region pattern, as the SDK's
+// endpoint rules give it (internal/endpoints/awsrulesfn, partition "aws").
+// GovCloud (us-gov-*), China (cn-*), the ISO partitions and the European
+// Sovereign Cloud do not match.
+var awsPartitionRegion = regexp.MustCompile(`^(us|eu|ap|sa|ca|me|af|il|mx)-\w+-\d+$`)
+
+// GlobalReachable reports whether credentials used in region can reach
+// ControlRegion's table, which holds ScopeGlobal: whether region is in the aws
+// partition. An empty region says nothing about the partition and counts as
+// reachable, as Mark has always treated it. Outside the aws partition Mark
+// does not mark ScopeGlobal (spawn#1672): the call could only fail, and a
+// failure there is a refusal that would stop the process's regional marks
+// too.
+func GlobalReachable(region string) bool {
+	return region == "" || awsPartitionRegion.MatchString(region)
+}
 
 // ScopeGlobal is the scope of spawn's account-wide resources.
 const ScopeGlobal = lifecycle.ScopeGlobal
@@ -87,10 +111,12 @@ const Owner = "spawn-cli"
 // (arn:aws:dynamodb:*:*:table/spore-host-lifecycle) for Mark to work.
 // MarkActive is one transaction of a ConditionCheck and an Update, and creates
 // the table, tagged, the first time. DynamoDB authorizes a transaction per
-// item action, and internal/iamcoverage lists every item action a
-// TransactWriteItems may hold, hence PutItem. DeleteItem is for one rare
-// case: removing the closing sentinel a crashed CloseTableIfEmpty abandoned,
-// which would otherwise block every mark in that region. A test
+// item action. internal/iamcoverage follows a transaction's items where the
+// call site builds them, but MarkActive's condition check comes from a helper
+// (libs/lifecycle sentinelAbsent) it does not look into, so it counts every
+// item action a TransactWriteItems may hold, hence PutItem. DeleteItem is for
+// one rare case: removing the closing sentinel a crashed CloseTableIfEmpty
+// abandoned, which would otherwise block every mark in that region. A test
 // (TestLeaseRequiredActionsAreWhatMarkCalls) holds this list to the actions
 // internal/iamcoverage finds Mark calling.
 var RequiredActions = []string{
@@ -113,8 +139,8 @@ var VerdictReadActions = []string{"dynamodb:GetItem"}
 const UserPolicy = "spore-host/spawn-user-lifecycle"
 
 // UserActions are what UserPolicy grants: RequiredActions (the mark, and
-// `spawn doctor`'s read-only probe, which uses two of them) and
-// VerdictReadActions, sorted.
+// `spawn doctor`'s read-only probe, which uses three of them: DescribeTable,
+// ConditionCheckItem and UpdateItem) and VerdictReadActions, sorted.
 func UserActions() []string {
 	out := append(append([]string{}, RequiredActions...), VerdictReadActions...)
 	sort.Strings(out)
@@ -149,8 +175,10 @@ type marker struct {
 	// refused: an identity was refused the table; no more marks this process.
 	refused bool
 	logged  bool
-	waiting map[string]time.Duration
-	marked  map[string]time.Time
+	// loggedGlobal: the skip of an unreachable global scope was logged.
+	loggedGlobal bool
+	waiting      map[string]time.Duration
+	marked       map[string]time.Time
 	// accountOf resolves cfg's account (sts:GetCallerIdentity, which needs no
 	// permission); accounts caches it by access key.
 	accountOf func(ctx context.Context, cfg aws.Config) (string, error)
@@ -219,13 +247,13 @@ func Override(f Factory, out io.Writer, debugf func(format string, args ...any))
 	if debugf != nil {
 		std.debugf = debugf
 	}
-	std.refused, std.logged = false, false
+	std.refused, std.logged, std.loggedGlobal = false, false, false
 	std.waiting, std.marked, std.accounts = map[string]time.Duration{}, map[string]time.Time{}, map[string]string{}
 	return func() {
 		std.mu.Lock()
 		defer std.mu.Unlock()
 		std.factory, std.out, std.debugf, std.now, std.sleep = saved.factory, saved.out, saved.debugf, saved.now, saved.sleep
-		std.refused, std.logged = false, false
+		std.refused, std.logged, std.loggedGlobal = false, false, false
 		std.waiting, std.marked, std.accounts = map[string]time.Duration{}, map[string]time.Time{}, map[string]string{}
 	}
 }
@@ -252,6 +280,14 @@ func (m *marker) mark(ctx context.Context, cfg aws.Config, scopes ...string) {
 	var todo []string
 	for _, s := range scopes {
 		if s == "" {
+			continue
+		}
+		if s == ScopeGlobal && !GlobalReachable(cfg.Region) {
+			if !m.loggedGlobal {
+				m.loggedGlobal = true
+				m.debugf("lifecyclemark: not marking the global scope: its table is in %s, which credentials for %s cannot reach",
+					ControlRegion, cfg.Region)
+			}
 			continue
 		}
 		if t, ok := m.marked[who+"|"+s]; ok && who != "" && now.Sub(t) < cacheFor {
@@ -406,17 +442,36 @@ func identity(ctx context.Context, cfg aws.Config) string {
 // the identity may describe it, and the first mark creates it if it may.
 var ErrNoTable = errors.New("no " + lifecycle.TableName + " table in this region yet")
 
-// probeKey is the item Probe's conditional write names. The condition can
-// never hold, so the item is never written: a stray item would stop
-// CloseTableIfEmpty from ever removing the table.
-const probeKey = "probe#spawn-doctor"
+// ErrInconclusive is Probe's answer when its transaction was cancelled for a
+// reason other than its conditions (a throttle, a conflicting transaction):
+// that proves nothing either way, so it is neither a pass nor a refusal.
+var ErrInconclusive = errors.New("the lease probe was inconclusive")
+
+// probeKey and probeCheckKey are the items Probe's transaction names: the
+// update's and the condition check's (a transaction may not name one item
+// twice). Neither condition can ever hold, so neither item is ever written:
+// a stray item would stop CloseTableIfEmpty from ever removing the table.
+const (
+	probeKey      = "probe#spawn-doctor"
+	probeCheckKey = "probe#spawn-doctor-check"
+)
+
+// probeNever is a condition no item satisfies.
+const probeNever = "attribute_exists(#k) AND attribute_not_exists(#k)"
 
 // Probe reports, changing nothing, whether api's identity can use the lease
-// table, for `spawn doctor`: a DescribeTable, then an UpdateItem whose
-// condition can never hold. IAM authorizes the UpdateItem before DynamoDB
-// evaluates the condition, so a ConditionalCheckFailedException proves the
-// write is allowed and that nothing was written. nil means usable; ErrNoTable
-// that the table does not exist yet; any other error is the refusal.
+// table, for `spawn doctor`: a DescribeTable, then a transaction of the shape
+// a mark makes (lifecycle.MarkActive: a ConditionCheck and an Update) whose
+// conditions can never hold. DynamoDB authorizes a transaction per item
+// action, dynamodb:ConditionCheckItem and dynamodb:UpdateItem here, before it
+// evaluates any condition, so a cancellation by those conditions proves both
+// are allowed and that nothing was written; a refusal of either is an
+// AccessDeniedException for the whole call. A cancellation for any other
+// reason is ErrInconclusive. Probing the UpdateItem alone would pass an
+// identity granted UpdateItem but not ConditionCheckItem, whose every mark is
+// refused (spawn#1672). nil means usable; ErrNoTable that the table does not
+// exist yet; ErrInconclusive that the probe proved nothing; any other error is
+// the refusal.
 func Probe(ctx context.Context, api lifecycle.API) error {
 	_, err := api.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(lifecycle.TableName)})
 	var nf *ddbtypes.ResourceNotFoundException
@@ -426,20 +481,57 @@ func Probe(ctx context.Context, api lifecycle.API) error {
 	case err != nil:
 		return fmt.Errorf("dynamodb:DescribeTable: %w", err)
 	}
-	_, err = api.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 aws.String(lifecycle.TableName),
-		Key:                       map[string]ddbtypes.AttributeValue{"pk": &ddbtypes.AttributeValueMemberS{Value: probeKey}},
-		UpdateExpression:          aws.String("SET #p = :p"),
-		ConditionExpression:       aws.String("attribute_exists(#k) AND attribute_not_exists(#k)"),
-		ExpressionAttributeNames:  map[string]string{"#p": "probe", "#k": "pk"},
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":p": &ddbtypes.AttributeValueMemberS{Value: "spawn doctor"}},
-	})
-	var ccf *ddbtypes.ConditionalCheckFailedException
+	key := func(k string) map[string]ddbtypes.AttributeValue {
+		return map[string]ddbtypes.AttributeValue{"pk": &ddbtypes.AttributeValueMemberS{Value: k}}
+	}
+	_, err = api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []ddbtypes.TransactWriteItem{
+		{ConditionCheck: &ddbtypes.ConditionCheck{
+			TableName:                aws.String(lifecycle.TableName),
+			Key:                      key(probeCheckKey),
+			ConditionExpression:      aws.String(probeNever),
+			ExpressionAttributeNames: map[string]string{"#k": "pk"},
+		}},
+		{Update: &ddbtypes.Update{
+			TableName:                 aws.String(lifecycle.TableName),
+			Key:                       key(probeKey),
+			UpdateExpression:          aws.String("SET #p = :p"),
+			ConditionExpression:       aws.String(probeNever),
+			ExpressionAttributeNames:  map[string]string{"#p": "probe", "#k": "pk"},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":p": &ddbtypes.AttributeValueMemberS{Value: "spawn doctor"}},
+		}},
+	}})
+	var cancelled *ddbtypes.TransactionCanceledException
 	switch {
-	case errors.As(err, &ccf):
+	case errors.As(err, &cancelled):
+		if codes, ok := cancelledByConditions(cancelled.CancellationReasons); !ok {
+			return fmt.Errorf("%w: its transaction was cancelled for %s; try again", ErrInconclusive, codes)
+		}
 		return nil
 	case err == nil:
-		return errors.New("the probe's never-true condition held; the table is not behaving as DynamoDB")
+		return errors.New("the probe's never-true conditions held; the table is not behaving as DynamoDB")
 	}
-	return fmt.Errorf("dynamodb:UpdateItem: %w", err)
+	return fmt.Errorf("the mark's transaction (dynamodb:ConditionCheckItem, dynamodb:UpdateItem): %w", err)
+}
+
+// cancelledByConditions reports whether a cancellation is the probe's own:
+// at least one ConditionalCheckFailed and nothing but ConditionalCheckFailed
+// or None. It also returns the reasons' codes, for the message when it is not.
+func cancelledByConditions(reasons []ddbtypes.CancellationReason) (string, bool) {
+	codes := make([]string, 0, len(reasons))
+	failed, other := false, false
+	for _, r := range reasons {
+		code := aws.ToString(r.Code)
+		codes = append(codes, code)
+		switch code {
+		case "ConditionalCheckFailed":
+			failed = true
+		case "None":
+		default:
+			other = true
+		}
+	}
+	if len(codes) == 0 {
+		return "no reason", false
+	}
+	return strings.Join(codes, ", "), failed && !other
 }
