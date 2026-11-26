@@ -332,6 +332,94 @@ func denyItemAction(action string) func(op string, in any) error {
 	}
 }
 
+// Probe passes only on its own cancellation: every reason is its never-true
+// conditions failing (ConditionalCheckFailed) or an item not reached (None).
+// Any other reason (a throttle, a conflicting transaction) proves nothing,
+// and is ErrInconclusive rather than a pass or a refusal.
+func TestProbeAcceptsOnlyItsOwnCancellation(t *testing.T) {
+	ctx := context.Background()
+	f := lifecycletest.New()
+	if err := lifecycleClient(t, f).MarkActive(ctx, Tool, "us-east-1"); err != nil {
+		t.Fatal(err)
+	}
+	cancel := func(codes ...string) error {
+		rs := make([]types.CancellationReason, len(codes))
+		for i, c := range codes {
+			rs[i] = types.CancellationReason{Code: aws.String(c)}
+		}
+		return &types.TransactionCanceledException{Message: aws.String("Transaction cancelled"), CancellationReasons: rs}
+	}
+	for _, tc := range []struct {
+		codes []string
+		pass  bool
+	}{
+		{[]string{"ConditionalCheckFailed", "ConditionalCheckFailed"}, true},
+		{[]string{"ConditionalCheckFailed", "None"}, true},
+		{[]string{"None", "ConditionalCheckFailed"}, true},
+		{[]string{"ThrottlingError", "None"}, false},
+		{[]string{"ConditionalCheckFailed", "TransactionConflict"}, false},
+		{[]string{"None", "None"}, false},
+		{nil, false},
+	} {
+		err := cancel(tc.codes...)
+		f.Err = func(op string, _ any) error {
+			if op == "TransactWriteItems" {
+				return err
+			}
+			return nil
+		}
+		got := Probe(ctx, f)
+		switch {
+		case tc.pass && got != nil:
+			t.Errorf("cancelled for %v: %v, want a pass", tc.codes, got)
+		case !tc.pass && !errors.Is(got, ErrInconclusive):
+			t.Errorf("cancelled for %v: %v, want ErrInconclusive", tc.codes, got)
+		}
+	}
+}
+
+// Outside the aws partition, ScopeGlobal's table (ControlRegion, us-east-1)
+// cannot be reached, so Mark does not try it. Trying was worse than useless:
+// the endpoint refuses the credentials, a refusal stops every later mark in
+// the process, and the regional mark after it never ran (spawn#1672).
+func TestMarkSkipsTheGlobalScopeOutsideTheAWSPartition(t *testing.T) {
+	fs := fakes{}
+	unreachable := lifecycletest.New()
+	unreachable.Err = func(string, any) error {
+		return &smithy.GenericAPIError{Code: "UnrecognizedClientException", Message: "The security token included in the request is invalid."}
+	}
+	fs[ControlRegion] = unreachable
+	debug := install(t, fs.factory, &bytes.Buffer{})
+	gov := cfgFor("AKIAGOV")
+	gov.Region = "us-gov-west-1"
+
+	Mark(context.Background(), gov, ScopeGlobal, "us-gov-west-1")
+
+	if n := unreachable.Calls("TransactWriteItems") + unreachable.Calls("DescribeTable"); n != 0 {
+		t.Errorf("Mark called the %s table %d times from GovCloud credentials, want none", ControlRegion, n)
+	}
+	it := item(t, fs["us-gov-west-1"], "us-gov-west-1")
+	if attr(it, "state") != string(lifecycle.StateActive) {
+		t.Errorf("the regional scope was not marked: %v", it)
+	}
+	if !strings.Contains(debug.String(), "not marking the global scope") {
+		t.Errorf("the skip left no diagnostic line: %q", debug.String())
+	}
+}
+
+func TestGlobalReachable(t *testing.T) {
+	for region, want := range map[string]bool{
+		"us-east-1": true, "eu-west-2": true, "ap-southeast-4": true, "il-central-1": true, "mx-central-1": true,
+		"":              true, // unknown: as Mark has always treated it
+		"us-gov-west-1": false, "cn-north-1": false, "us-iso-east-1": false, "us-isob-east-1": false,
+		"eu-isoe-west-1": false, "us-isof-south-1": false, "eusc-de-east-1": false,
+	} {
+		if got := GlobalReachable(region); got != want {
+			t.Errorf("GlobalReachable(%q) = %v, want %v", region, got, want)
+		}
+	}
+}
+
 // UserPolicy grants what the mark needs and what the verdict read needs, and
 // nothing else (spawn#1666).
 func TestUserActionsAreTheMarkAndTheVerdictRead(t *testing.T) {

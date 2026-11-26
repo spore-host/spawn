@@ -27,9 +27,10 @@ const repoRoot = "../.."
 
 const sporedPkg = "github.com/spore-host/spawn/cmd/spored"
 
-// lifecyclePkg is the shared-account lease (libs/lifecycle), whose DynamoDB
-// calls run on the credentials of the account the lease is in.
-const lifecyclePkg = "github.com/spore-host/libs/lifecycle"
+// leasePkgs are the shared-account lease's packages: libs/lifecycle (the mark
+// and the teardown's calls) and pkg/lifecyclemark (spawn doctor's probe).
+// Their DynamoDB calls run on the credentials of the account the lease is in.
+var leasePkgs = []string{"github.com/spore-host/libs/lifecycle", "github.com/spore-host/spawn/pkg/lifecyclemark"}
 
 // build is one main package as it is compiled for a principal.
 type build struct {
@@ -368,18 +369,19 @@ var principals = []principal{
 			// ssm: the egress proxy's readiness probe (#1515), on the
 			// assumed role in the member account, like its EC2 calls.
 			//
-			// libs/lifecycle: the lease lives in the member account, so a
-			// lease call can only be made on the member credentials. The
-			// orchestrator makes none today: its launches are fenced by the
-			// CLI's mark of every sweep region before it invokes the
-			// orchestrator, and kept active by the unfinished sweep record
-			// (lambda/ttl-reaper accountidle.go), so SpawnSweepCrossAccountRole
-			// holds no lease grant (spawn#1672). Claiming the package here
-			// means a mark added to the orchestrator is demanded of that role,
-			// never of SpawnSweepOrchestratorRole in the infra account, which
-			// has no lease.
+			// leasePkgs (libs/lifecycle, pkg/lifecyclemark): the lease lives
+			// in the member account, so a lease call can only be made on the
+			// member credentials. The orchestrator makes none today: its
+			// launches are fenced by the CLI's mark of every sweep region
+			// before it invokes the orchestrator, and kept active by the
+			// unfinished sweep record (lambda/ttl-reaper accountidle.go), so
+			// SpawnSweepCrossAccountRole holds no lease grant (spawn#1672).
+			// Claiming the packages here means a mark or probe added to the
+			// orchestrator is demanded of that role, never of
+			// SpawnSweepOrchestratorRole in the infra account, which has no
+			// lease.
 			{name: "member account", services: []string{"ec2", "iam", "ssm"},
-				pkgs: []string{lifecyclePkg}, variants: []variant{
+				pkgs: leasePkgs, variants: []variant{
 					{"SpawnSweepCrossAccountRole", sweepCrossAccountPolicy},
 				}},
 			{name: "function role", variants: []variant{

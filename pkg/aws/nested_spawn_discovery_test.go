@@ -112,7 +112,7 @@ var nestedSpawnNotGranted = map[string]string{
 // spawn create in the account wait up to 10 minutes, or reset another
 // tool's item.
 const nestedLeaseMarkNotGranted = "the lease mark on table/spore-host-lifecycle (pkg/lifecyclemark); a nested child's " +
-	"region is kept active by its live head, and the grant would let a workload write the account's lease (see nestedLeaseMarkNotGranted)"
+	"region is kept active by its live head, and the grant would let a workload write the account's lease (spawn#1672)"
 
 // nestedSpawnNeedsNoGrant are calls IAM does not authorize.
 var nestedSpawnNeedsNoGrant = map[string]bool{

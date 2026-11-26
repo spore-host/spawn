@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 	"github.com/spore-host/libs/lifecycle"
 	"github.com/spore-host/libs/lifecycle/lifecycletest"
@@ -16,7 +18,12 @@ import (
 
 // spawn#1672: the idle-teardown check says an identity cannot write the lease
 // whenever a mark it made would be refused, including in a region that has
-// no table yet, where DescribeTable alone proves nothing.
+// no table yet, where DescribeTable alone proves nothing. It never says the
+// first mark in such a region succeeds (its CreateTable and TagResource
+// cannot be checked without creating the table), never calls a probe that
+// proves nothing a pass or a refusal, and outside the aws partition neither
+// probes the us-east-1 table Mark never marks from there nor points at the
+// aws-only policy.
 func TestProbeLease(t *testing.T) {
 	const acct, who = "123456789012", "arn:aws:sts::123456789012:assumed-role/launcher/s"
 	ctx := context.Background()
@@ -39,31 +46,72 @@ func TestProbeLease(t *testing.T) {
 		return f
 	}
 
+	throttled := func(f *lifecycletest.Fake) *lifecycletest.Fake {
+		f.Err = func(op string, _ any) error {
+			if op != "TransactWriteItems" {
+				return nil
+			}
+			return &ddbtypes.TransactionCanceledException{Message: aws.String("Transaction cancelled"),
+				CancellationReasons: []ddbtypes.CancellationReason{{Code: aws.String("ThrottlingError")}, {Code: aws.String("None")}}}
+		}
+		return f
+	}
+	// What the first mark in a table-less region needs and nothing checks.
+	unchecked := []string{"dynamodb:CreateTable", "dynamodb:TagResource", "cannot be checked without creating it"}
+	policy := "arn:aws:iam::" + acct + ":policy/" + lifecyclemark.UserPolicy
+
 	cases := []struct {
 		name    string
 		region  string
 		tables  map[string]*lifecycletest.Fake // nil entry: no table there
 		warn    bool
 		contain []string
+		absent  []string
 	}{
 		{name: "writable here", region: "us-west-2",
 			tables:  map[string]*lifecycletest.Fake{"us-west-2": marked(t)},
 			contain: []string{"is writable in us-west-2"}},
 		{name: "refused here", region: "us-west-2",
 			tables: map[string]*lifecycletest.Fake{"us-west-2": denied(marked(t), "dynamodb:ConditionCheckItem")},
-			warn:   true, contain: []string{who, "not authorized to perform: dynamodb:ConditionCheckItem"}},
+			warn:   true, contain: []string{who, "not authorized to perform: dynamodb:ConditionCheckItem", policy}},
+		{name: "inconclusive here", region: "us-west-2",
+			tables: map[string]*lifecycletest.Fake{"us-west-2": throttled(marked(t))},
+			warn:   true, contain: []string{"not checked", "ThrottlingError"}, absent: []string{policy, "isn't writable"}},
 		{name: "no table here, the control region's writable", region: "us-west-2",
 			tables:  map[string]*lifecycletest.Fake{"us-west-2": nil, lifecyclemark.ControlRegion: marked(t)},
-			contain: []string{"no spore-host-lifecycle table in us-west-2 yet", "writable in us-east-1"}},
+			contain: append([]string{"no spore-host-lifecycle table in us-west-2 yet", "allowed (checked on the us-east-1 table)"}, unchecked...),
+			absent:  []string{"the first launch creates it"}},
 		{name: "no table here, refused in the control region", region: "us-west-2",
 			tables: map[string]*lifecycletest.Fake{"us-west-2": nil, lifecyclemark.ControlRegion: denied(marked(t), "dynamodb:UpdateItem")},
-			warn:   true, contain: []string{who, "in us-east-1", "not authorized to perform: dynamodb:UpdateItem"}},
+			warn:   true, contain: []string{who, "in us-east-1", "not authorized to perform: dynamodb:UpdateItem", policy}},
+		{name: "no table here, inconclusive in the control region", region: "us-west-2",
+			tables: map[string]*lifecycletest.Fake{"us-west-2": nil, lifecyclemark.ControlRegion: throttled(marked(t))},
+			warn:   true, contain: append([]string{"not checked", "ThrottlingError"}, unchecked...), absent: []string{policy}},
 		{name: "no table anywhere", region: "us-west-2",
 			tables:  map[string]*lifecycletest.Fake{"us-west-2": nil, lifecyclemark.ControlRegion: nil},
-			contain: []string{"no spore-host-lifecycle table in us-west-2 yet; the first launch creates it"}},
+			warn:    true,
+			contain: append([]string{"not checked", "none in us-east-1 either", "spawn setup-account"}, unchecked...),
+			absent:  []string{policy, "the first launch creates it"}},
 		{name: "no table in the control region itself", region: lifecyclemark.ControlRegion,
 			tables:  map[string]*lifecycletest.Fake{lifecyclemark.ControlRegion: nil},
-			contain: []string{"no spore-host-lifecycle table in us-east-1 yet; the first launch creates it"}},
+			warn:    true,
+			contain: append([]string{"not checked", "spawn setup-account"}, unchecked...), absent: []string{policy}},
+		// Outside the aws partition Mark never marks the global scope, whose
+		// table is in us-east-1, so the check never probes it (a probe of
+		// a region missing from the fakes fails the case).
+		{name: "GovCloud, writable here", region: "us-gov-west-1",
+			tables:  map[string]*lifecycletest.Fake{"us-gov-west-1": marked(t)},
+			contain: []string{"is writable in us-gov-west-1", "global scope", "not marked outside the aws partition"}},
+		{name: "GovCloud, no table here", region: "us-gov-west-1",
+			tables:  map[string]*lifecycletest.Fake{"us-gov-west-1": nil},
+			warn:    true,
+			contain: append([]string{"not checked", "not checked outside the aws partition"}, unchecked...),
+			absent:  []string{"spawn setup-account`, which creates", policy}},
+		{name: "China, refused here", region: "cn-north-1",
+			tables:  map[string]*lifecycletest.Fake{"cn-north-1": denied(marked(t), "dynamodb:UpdateItem")},
+			warn:    true,
+			contain: []string{who, "in cn-north-1", "not authorized to perform: dynamodb:UpdateItem", "aws-partition ARNs"},
+			absent:  []string{"arn:aws:iam::"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +143,11 @@ func TestProbeLease(t *testing.T) {
 			for _, want := range tc.contain {
 				if !strings.Contains(got, want) {
 					t.Errorf("%q does not say %q", got, want)
+				}
+			}
+			for _, bad := range tc.absent {
+				if strings.Contains(got, bad) {
+					t.Errorf("%q says %q", got, bad)
 				}
 			}
 			for r, n := range before {

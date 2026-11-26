@@ -95,11 +95,14 @@ var opActions = map[string][]string{
 	// item, as the action that item performs ("Using IAM with DynamoDB
 	// transactions", DynamoDB Developer Guide: Put, Update, Delete and Get are
 	// governed by PutItem, UpdateItem, DeleteItem and GetItem, and a
-	// ConditionCheck by dynamodb:ConditionCheckItem). Which items a call
-	// carries is not known here, so a write transaction needs all four; this
-	// generator over-approximates. libs/lifecycle's MarkActive (spawn#1654) is
-	// a ConditionCheck and an Update.
-	"dynamodb:TransactWriteItems": {"dynamodb:ConditionCheckItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"},
+	// ConditionCheck by dynamodb:ConditionCheckItem). So a write transaction
+	// needs nothing of its own, and each item action comes from an implied
+	// rule on the item's field (transactionItemRules): exactly the kinds of
+	// item the call site builds, and all four where it cannot see them. spawn
+	// doctor's probe (pkg/lifecyclemark.Probe) builds a ConditionCheck and an
+	// Update; libs/lifecycle's MarkActive (spawn#1654) takes its
+	// ConditionCheck from a helper, so it counts all four.
+	"dynamodb:TransactWriteItems": {},
 	"dynamodb:TransactGetItems":   {"dynamodb:GetItem"},
 
 	// Lambda's Invoke family is all lambda:InvokeFunction.

@@ -13,6 +13,8 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	tm "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
@@ -84,6 +86,45 @@ func implied(ctx context.Context, cfg aws.Config, c *ec2.Client, s3c *s3.Client)
 	eb := eventbridge.NewFromConfig(cfg)
 	targetsWithRole(ctx, eb)
 	targetsWithoutRole(ctx, eb)
+	ddb := dynamodb.NewFromConfig(cfg)
+	txCheckAndUpdate(ctx, ddb)
+	txPut(ctx, ddb)
+	txFromHelper(ctx, ddb)
+	txFromParam(ctx, ddb, []ddbtypes.TransactWriteItem{{Delete: &ddbtypes.Delete{TableName: aws.String("t")}}})
+}
+
+// txCheckAndUpdate is spawn doctor's probe's shape: both items are built at
+// the call, so the transaction needs exactly their two item actions.
+func txCheckAndUpdate(ctx context.Context, d *dynamodb.Client) {
+	_, _ = d.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []ddbtypes.TransactWriteItem{
+		{ConditionCheck: &ddbtypes.ConditionCheck{TableName: aws.String("t")}},
+		{Update: &ddbtypes.Update{TableName: aws.String("t")}},
+	}})
+}
+
+func txPut(ctx context.Context, d *dynamodb.Client) {
+	_, _ = d.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []ddbtypes.TransactWriteItem{
+		{Put: &ddbtypes.Put{TableName: aws.String("t")}},
+	}})
+}
+
+// txFromHelper is MarkActive's shape: one item comes from a helper the
+// analysis does not look into, so it may be any kind.
+func txFromHelper(ctx context.Context, d *dynamodb.Client) {
+	_, _ = d.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []ddbtypes.TransactWriteItem{
+		conditionItem(),
+		{Update: &ddbtypes.Update{TableName: aws.String("t")}},
+	}})
+}
+
+func conditionItem() ddbtypes.TransactWriteItem {
+	return ddbtypes.TransactWriteItem{ConditionCheck: &ddbtypes.ConditionCheck{TableName: aws.String("t")}}
+}
+
+// txFromParam is handed its items: the analysis follows the parameter to its
+// one caller, which builds a Delete.
+func txFromParam(ctx context.Context, d *dynamodb.Client, items []ddbtypes.TransactWriteItem) {
+	_, _ = d.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
 }
 
 func queueTagged(ctx context.Context, q *sqs.Client) {

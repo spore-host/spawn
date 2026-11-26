@@ -53,6 +53,12 @@ func TestImpliedActionsFollowTheCallSite(t *testing.T) {
 		"runWithoutProfile":  {"ec2:RunInstances"},
 		"targetsWithRole":    {"events:PutTargets", "iam:PassRole"},
 		"targetsWithoutRole": {"events:PutTargets"},
+		// spawn#1672: a write transaction needs the item actions of the
+		// items it carries, and every one when an item is built out of sight.
+		"txCheckAndUpdate": {"dynamodb:ConditionCheckItem", "dynamodb:UpdateItem"},
+		"txPut":            {"dynamodb:PutItem"},
+		"txFromHelper":     {"dynamodb:ConditionCheckItem", "dynamodb:DeleteItem", "dynamodb:PutItem", "dynamodb:UpdateItem"},
+		"txFromParam":      {"dynamodb:DeleteItem"},
 	} {
 		f, err := p.Func(fixturePkg + "." + fn)
 		if err != nil {
@@ -127,6 +133,7 @@ var impliedInputTypes = map[string]any{
 	"ec2:PurchaseCapacityBlock":                         ec2.PurchaseCapacityBlockInput{},
 	"ebs:StartSnapshot":                                 ebs.StartSnapshotInput{},
 	"dynamodb:CreateTable":                              dynamodb.CreateTableInput{},
+	"dynamodb:TransactWriteItems":                       dynamodb.TransactWriteItemsInput{},
 	"lambda:CreateFunction":                             lambda.CreateFunctionInput{},
 	"lambda:UpdateFunctionConfiguration":                lambda.UpdateFunctionConfigurationInput{},
 	"scheduler:CreateSchedule":                          scheduler.CreateScheduleInput{},
